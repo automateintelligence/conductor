@@ -13,7 +13,9 @@ def test_file_followup_labels_and_links():
         == 42
     )
     gh.ensure_label.assert_called_with("o/r", "debt")
-    gh._gh_api.assert_called()
+    gh._gh_api.assert_called_once_with(
+        "POST", "repos/o/r/issues/7/comments", body={"body": "Excavated debt: #42"}
+    )
 
 
 def test_block_on_subplan_sets_labels():
@@ -21,6 +23,7 @@ def test_block_on_subplan_sets_labels():
     escalate.block_on_subplan("o/r", 7, gh=gh)
     _, kwargs = gh.set_labels.call_args
     assert "status:blocked" in kwargs["add"] and "blocked-on-subplan" in kwargs["add"]
+    assert "status:in-progress" in kwargs["remove"]
 
 
 def test_write_adr(tmp_path):

@@ -1,4 +1,5 @@
 import os
+from typing import Any
 
 from ledger import gh as _gh
 
@@ -9,13 +10,13 @@ def file_followup(
     title: str,
     body: str,
     link_issue: int | None = None,
-    gh: object = _gh,
+    gh: Any = _gh,
 ) -> int:
     assert kind in ("debt", "feature")
-    gh.ensure_label(repo, kind)  # type: ignore[union-attr]
-    issue = gh.create_issue(repo, title, body, labels=[kind])  # type: ignore[union-attr]
+    gh.ensure_label(repo, kind)
+    issue = gh.create_issue(repo, title, body, labels=[kind])
     if link_issue:
-        gh._gh_api(  # type: ignore[union-attr]
+        gh._gh_api(
             "POST",
             f"repos/{repo}/issues/{link_issue}/comments",
             body={"body": f"Excavated {kind}: #{issue['number']}"},
@@ -23,8 +24,8 @@ def file_followup(
     return issue["number"]
 
 
-def block_on_subplan(repo: str, phase_issue: int, gh: object = _gh) -> None:
-    gh.set_labels(  # type: ignore[union-attr]
+def block_on_subplan(repo: str, phase_issue: int, gh: Any = _gh) -> None:
+    gh.set_labels(
         repo,
         phase_issue,
         add=["status:blocked", "blocked-on-subplan"],
