@@ -21,6 +21,7 @@ Exit codes (reconcile contract):
     10  invalid combo detected and REPAIRED
     1   error / could not reconcile
 """
+
 from __future__ import annotations
 
 import json
@@ -58,7 +59,9 @@ def main() -> int:
     assert_path = (
         sys.argv[2]
         if len(sys.argv) > 2
-        else os.path.join(os.path.dirname(os.path.abspath(__file__)), "assert_phaseA.sh")
+        else os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "assert_phaseA.sh"
+        )
     )
 
     state, labels = read_issue(num)
@@ -84,12 +87,24 @@ def main() -> int:
         if state == "closed":
             sh(["gh", "issue", "reopen", str(num), "-R", REPO])
         sh(
-            ["gh", "issue", "edit", str(num), "-R", REPO,
-             "--add-label", IN_PROGRESS, "--remove-label", DONE]
+            [
+                "gh",
+                "issue",
+                "edit",
+                str(num),
+                "-R",
+                REPO,
+                "--add-label",
+                IN_PROGRESS,
+                "--remove-label",
+                DONE,
+            ]
         )
         nstate, nlabels = read_issue(num)
         print(f"[reconcile] AFTER repair: state={nstate!r} labels={nlabels}")
-        print("[reconcile] RESULT: REPAIRED invalid combo (done+red -> in-progress/open).")
+        print(
+            "[reconcile] RESULT: REPAIRED invalid combo (done+red -> in-progress/open)."
+        )
         return 10
 
     # --- Consistent: done/closed and tests green. Precedence satisfied -> permit.

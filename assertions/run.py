@@ -19,6 +19,7 @@ Exit codes:
 YAML loading uses pyyaml when available but does not hard-depend on it: a minimal
 built-in parser handles the flat manifest schema as a fallback.
 """
+
 from __future__ import annotations
 
 import json
@@ -99,6 +100,7 @@ def load_assertions(path: str) -> list:
         text = f.read()
     try:
         import yaml  # optional; not a hard dependency
+
         try:
             data = yaml.safe_load(text)
         except yaml.YAMLError as exc:  # type: ignore[attr-defined]
@@ -171,7 +173,12 @@ def main() -> int:
             if rc != 0:
                 reason = f"setup-failed({reason})"
                 duration = round(time.monotonic() - start, 3)
-                results[aid] = {"pass": False, "rc": rc, "duration": duration, "reason": reason}
+                results[aid] = {
+                    "pass": False,
+                    "rc": rc,
+                    "duration": duration,
+                    "reason": reason,
+                }
                 print(f"[FAIL] {aid} (rc={rc}, reason={reason})")
                 continue
         rc, reason = _run(command, timeout)
