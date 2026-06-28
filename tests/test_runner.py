@@ -182,3 +182,69 @@ def test_bin_conductor_wrapper_passes_through(tmp_path):
         [conductor, "assert", "run", "--level", "spec"], env=_env(tmp_path), cwd=ROOT
     )
     assert p.returncode == 0
+
+
+def test_unknown_flag_is_fail_closed(tmp_path):  # Codex (fail-open args)
+    # A typoed/unsupported flag must NOT be silently dropped and pass the gate.
+    _manifest(
+        tmp_path,
+        textwrap.dedent(
+            """\
+        assertions:
+          - id: a
+            command: "true"
+            level: spec
+    """
+        ),
+    )
+    p = subprocess.run(RUN + ["--levl", "phase"], env=_env(tmp_path), cwd=ROOT)
+    assert p.returncode == 5  # unknown flag -> fail-closed, not green-by-default
+
+
+def test_bin_conductor_requires_run_subcommand(tmp_path):  # Codex (fail-open args)
+    _manifest(
+        tmp_path,
+        textwrap.dedent(
+            """\
+        assertions:
+          - id: a
+            command: "true"
+            level: spec
+    """
+        ),
+    )
+    conductor = os.path.join(ROOT, "bin", "conductor")
+    # bare `assert` and `assert <junk>` must be usage errors, not a silent green gate
+    assert (
+        subprocess.run([conductor, "assert"], env=_env(tmp_path), cwd=ROOT).returncode
+        == 64
+    )
+    assert (
+        subprocess.run(
+            [conductor, "assert", "bogus"], env=_env(tmp_path), cwd=ROOT
+        ).returncode
+        == 64
+    )
+
+
+def test_teardown_counts_toward_overall_budget(tmp_path):  # Codex (teardown wall-clock)
+    # teardown is wall-clock too: a teardown that runs past the overall budget
+    # must (a) be capped, and (b) make the gate report exit 4, not a false DONE.
+    _manifest(
+        tmp_path,
+        textwrap.dedent(
+            """\
+        assertions:
+          - id: a
+            command: "true"
+            teardown: "sleep 3"
+            timeout: 30
+            level: spec
+    """
+        ),
+    )
+    start = time.monotonic()
+    p = subprocess.run(RUN, env=_env(tmp_path, CONDUCTOR_OVERALL_TIMEOUT="1"), cwd=ROOT)
+    elapsed = time.monotonic() - start
+    assert p.returncode == 4  # wall-clock overrun (incl. teardown) -> NOT done
+    assert elapsed < 2.0  # teardown capped by remaining budget, not the full 3s

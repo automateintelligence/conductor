@@ -170,7 +170,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--level", choices=["spec", "phase", "task"], default=None)
     try:
-        args, _ = ap.parse_known_args()
+        args = ap.parse_args()
     except SystemExit as exc:
         # argparse exit 0/None == --help (standard, leave it). A non-zero usage
         # error (e.g. invalid --level value) must fail closed WITHOUT colliding
@@ -205,6 +205,7 @@ def main() -> int:
 
     deadline = time.monotonic() + OVERALL_TIMEOUT if OVERALL_TIMEOUT else None
     results, passed = {}, 0
+    overall_timed_out = False
     for a in assertions:
         aid, command = str(a["id"]), str(a["command"])
         setup = str(a.get("setup", "") or "")
@@ -260,10 +261,18 @@ def main() -> int:
                 passed += 1
         finally:
             if teardown:
-                _run(teardown, 5, workdir)  # best-effort cleanup
+                # teardown is wall-clock too (Codex): cap it by the remaining
+                # overall budget so cleanup cannot run past the deadline.
+                rem = _remaining(deadline)
+                if rem is None or rem > 0:
+                    _run(teardown, 5.0 if rem is None else min(5.0, rem), workdir)
             if ISOLATE and workdir != REPO_ROOT:
                 shutil.rmtree(workdir, ignore_errors=True)
+            if deadline is not None and time.monotonic() > deadline:
+                overall_timed_out = True
 
+    if overall_timed_out:  # teardown (or cleanup) pushed past the overall budget
+        return _overall_fail(results)
     write_results(results)
     total = len(assertions)
     failed = total - passed

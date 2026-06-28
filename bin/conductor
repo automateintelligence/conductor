@@ -2,6 +2,6 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 case "${1:-}" in
-  assert) shift; [ "${1:-}" = "run" ] && shift; exec python3 "$HERE/assertions/run.py" "$@" ;;
+  assert) shift; [ "${1:-}" = "run" ] || { echo "usage: conductor assert run [--level spec|phase|task]" >&2; exit 64; }; shift; exec python3 "$HERE/assertions/run.py" "$@" ;;
   *) echo "usage: conductor assert run [--level spec|phase|task]" >&2; exit 64 ;;
 esac
