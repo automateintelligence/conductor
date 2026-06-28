@@ -1,0 +1,7 @@
+{
+  "name": "conductor",
+  "version": "0.1.0",
+  "description": "Autonomous spec-completion loop: spec -> plans -> phases -> machine-checked done.",
+  "author": {"name": "Jeffrey A. Daniels"},
+  "dependencies": ["spec-craft"]
+}
