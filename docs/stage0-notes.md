@@ -154,7 +154,7 @@ Confirmed (claude-code-guide + on-disk plugin layout + Codex review of Plan 1): 
 not the command. Consequences for conductor (a plugin, §2.1/§11):
 
 - The design doc's bare `/conductor`, `/autodev`, `/expectations`, `/executable-assertions`
-  are **shorthand**. Real invocations: `/conductor:conductor` (supervisor — there is **no**
+  are **shorthand**. Real invocations: `/conductor:start` (supervisor — there is **no**
   bare `/conductor` for a plugin), `/conductor:autodev`, `/conductor:assertions-to-tests`,
   `/conductor:issue-sync`. The two spec-authoring skills live in a **separate standalone
   plugin `spec-craft`** (amendment G): `/spec-craft:expectations`,
@@ -185,4 +185,4 @@ skills are available to the recipe. spec-craft stays conductor-agnostic; conduct
 
 > Amends §11: components 1–2 ship as the standalone `spec-craft` plugin (not conductor
 > skills); conductor depends on it. Build order: Plan 1 = spec-craft; Plan 2 = conductor
-> done-gate; then ledger (Plan 3); then `/conductor:autodev` + `/conductor:conductor` (Plan 4).
+> done-gate; then ledger (Plan 3); then `/conductor:autodev` + `/conductor:start` (Plan 4).

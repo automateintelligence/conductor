@@ -493,6 +493,6 @@ claim/reconcile; status labels `status:<x>`; `/conductor:issue-sync` namespacing
 ---
 
 ## Open follow-ups
-- Plan 4 (`/conductor:autodev` + `/conductor:conductor`) calls `reconcile(now_ts=…, L=…)` every
+- Plan 4 (`/conductor:autodev` + `/conductor:start`) calls `reconcile(now_ts=…, L=…)` every
   fire (resetting the retry counter on a `stale-lease-reclaim` action), `generate`/`convert` at
   setup / next-plan / deepen-in-place, and `release` on unit completion.

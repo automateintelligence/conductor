@@ -33,7 +33,7 @@ YAML manifest (pyyaml optional, built-in fallback parser).
 - **Reuse Stage 0:** `assertions/run.py` (199 lines), `assertions/manifest.yaml`, `bin/conductor` exist (E4). Promote/harden.
 
 ## Conventions (LOCKED — inherited by Plans 3–4)
-Namespaced invocation `/conductor:<skill>` (supervisor `/conductor:conductor`, worker
+Namespaced invocation `/conductor:<skill>` (supervisor `/conductor:start`, worker
 `/conductor:autodev`); conducted skills keep their namespace (`/spec-craft:executable-assertions`,
 `/superpowers:test-driven-development`); no bare names/aliases (amendment F). `level`≠`kind`.
 Validate with `claude plugin validate ./ [--strict]`.
@@ -473,6 +473,6 @@ git commit -m "Plan2 T4: done-gate E2E (RED->GREEN) + plugin discovery check" \
 
 ## Open follow-ups
 - Plan 3 (ledger + claim model) consumes this manifest/runner as the "assertions decide" half of §7.
-- Plan 4 (`/conductor:autodev` + `/conductor:conductor`) drives spec-level assertions RED→GREEN;
-  `/conductor:conductor` invokes `/spec-craft:expectations` + `/spec-craft:executable-assertions`
+- Plan 4 (`/conductor:autodev` + `/conductor:start`) drives spec-level assertions RED→GREEN;
+  `/conductor:start` invokes `/spec-craft:expectations` + `/spec-craft:executable-assertions`
   as the precondition, then `/conductor:assertions-to-tests`.
