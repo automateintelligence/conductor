@@ -4,7 +4,7 @@
 Reads assertions/manifest.yaml, runs each assertion's optional `setup` then its
 `command` under a hard per-assertion timeout, and reports per-assertion + aggregate
 results. Writes machine-readable assertions/run/results.json (id -> {pass, rc,
-duration, kind}) for the ledger/handoff.
+duration, kind, reason}) for the ledger/handoff.
 
 FAIL-CLOSED (critical, design §5.2): a missing/unparseable manifest, a command that
 cannot execute (missing dep / crash), or a timeout is treated as NOT done. The gate
@@ -169,7 +169,18 @@ def _remaining(deadline: float | None) -> float | None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--level", choices=["spec", "phase", "task"], default=None)
-    args, _ = ap.parse_known_args()
+    try:
+        args, _ = ap.parse_known_args()
+    except SystemExit as exc:
+        # argparse exit 0/None == --help (standard, leave it). A non-zero usage
+        # error (e.g. invalid --level value) must fail closed WITHOUT colliding
+        # with EXIT_NO_MANIFEST(2): an invalid level matches no assertions -> 5.
+        if exc.code in (0, None):
+            raise
+        write_results({})
+        print("[GATE] FAIL: invalid command-line arguments")
+        print("SUMMARY: gate NOT done (invalid arguments) -> exit 5")
+        return EXIT_NO_MATCH
     try:
         assertions = load_assertions(MANIFEST)
     except ManifestMissing:

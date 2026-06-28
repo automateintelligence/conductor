@@ -147,3 +147,38 @@ def test_overall_budget_not_rounded_up(tmp_path):  # Codex #2 (sub-second)
     assert (
         p.returncode == 4 and (time.monotonic() - start) < 2.0
     )  # not a 1.2s false pass
+
+
+def test_invalid_level_is_fail_closed(tmp_path):
+    _manifest(
+        tmp_path,
+        textwrap.dedent(
+            """\
+        assertions:
+          - id: a
+            command: "true"
+            level: spec
+    """
+        ),
+    )
+    p = subprocess.run(RUN + ["--level", "bogus"], env=_env(tmp_path), cwd=ROOT)
+    assert p.returncode == 5  # invalid args -> fail-closed, NOT exit 2
+
+
+def test_bin_conductor_wrapper_passes_through(tmp_path):
+    _manifest(
+        tmp_path,
+        textwrap.dedent(
+            """\
+        assertions:
+          - id: ok
+            command: "true"
+            level: spec
+    """
+        ),
+    )
+    conductor = os.path.join(ROOT, "bin", "conductor")
+    p = subprocess.run(
+        [conductor, "assert", "run", "--level", "spec"], env=_env(tmp_path), cwd=ROOT
+    )
+    assert p.returncode == 0

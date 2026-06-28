@@ -23,3 +23,6 @@ def test_plugin_manifest_schema_and_dependency():
         "repository",
         "license",
     }
+    assert isinstance(data["author"], dict), (
+        "author must be an object, not a string (claude plugin validate --strict)"
+    )
