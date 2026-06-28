@@ -33,7 +33,7 @@ def test_lease_body_marker_round_trip():
     assert claim.read_lease("o/r", 1, gh) == {"worker": "alice", "ts": 1782600000}
     claim.renew_lease("o/r", 1, "alice", 1782600999, gh)
     assert body["v"].count("conductor-lease") == 1  # replaced, not stacked
-    assert claim.read_lease("o/r", 1, gh)["ts"] == 1782600999  # type: ignore[index]
+    assert claim.read_lease("o/r", 1, gh) == {"worker": "alice", "ts": 1782600999}
 
 
 def test_claim_won_mutates_status_and_lease():
