@@ -1,0 +1,7 @@
+# Stage 0 scratch / transient
+experiments/**/run/
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
