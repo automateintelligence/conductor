@@ -144,3 +144,25 @@ driven by Option 1 + Tier B autostart — the *same code path as local*. Anthrop
 > always-on host with the skill stack**, NOT assumed to be Anthropic-cloud `/schedule`
 > (which lacks the stack). Tier A is feasibility-gated — E7 must first verify the
 > skill/plugin/codex stack is even installable in cloud.
+
+---
+
+## F. Plugin invocation convention — `/conductor:<skill>` (namespaced), no bare names, no aliases
+
+Confirmed (claude-code-guide + on-disk plugin layout + Codex review of Plan 1): a Claude Code
+**plugin** skill is invoked **`/<plugin>:<skill>`**. The SKILL.md `name:` is display metadata,
+not the command. Consequences for conductor (a plugin, §2.1/§11):
+
+- The design doc's bare `/conductor`, `/autodev`, `/expectations`, `/executable-assertions`
+  are **shorthand**. The real invocations are `/conductor:conductor` (supervisor — there is
+  **no** bare `/conductor` for a plugin), `/conductor:autodev`, `/conductor:expectations`,
+  `/conductor:executable-assertions`, `/conductor:assertions-to-tests`, `/conductor:issue-sync`.
+- **No command aliases** exist; a skill can only invoke another skill internally.
+- Conducted external skills keep their own namespace: `/superpowers:test-driven-development`,
+  `/superpowers:subagent-driven-development`, etc.
+- Layout: manifest at `.claude-plugin/plugin.json` (`name` required; rest optional);
+  `skills/` and `commands/` auto-discovered. Validate with `claude plugin validate ./ [--strict]`.
+
+> Amends §3/§6/§11 naming: read every bare `/x` for a conductor-owned skill as
+> `/conductor:x`. If bare names are ever required, conductor must ship as **standalone
+> skills** (`.claude/skills/`), not a plugin — but that loses single-plugin install (§2.1).
