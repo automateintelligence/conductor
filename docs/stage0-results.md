@@ -152,18 +152,23 @@ Zero intervention — composes E0/E1 (loop + self-stop + fresh context) + E2 (su
 execution contract) + E4 (the real machine done-gate) + the §6 recipe
 (implement → commit → handoff).
 
-**Option 2 — cross-session recovery (cloud `/schedule` + local autostart):** both wrappers
-re-invoke the reconcile-first `/conductor` over the durable substrate (pushed git + issues
-+ handoff). The **local** autostart was tested live — a fresh `claude -p` re-ran
-`/conductor` and skipped every already-done step (clean resume). The **cloud `/schedule`**
-fire is its cloud counterpart (same entry point + substrate); a managed skill, not
-soak-tested (multi-hour). Install snippets: `experiments/E5-end-to-end/recovery.md`.
+**Recovery — two complementary tiers, for different failure modes** (plain-language detail
++ install snippets: `experiments/E5-end-to-end/recovery.md`):
+- **Tier B (local — machine available: reboot/crash/closed terminal):** OS autostart →
+  `claude -p "/conductor resume"`. **Tested live** — a fresh `claude -p` re-ran
+  reconcile-first `/conductor` and skipped every already-done step (clean resume, no
+  double-work). The literal `@reboot`/systemd trigger is a snippet, not reboot-tested.
+- **Tier A (cloud — machine off/unreachable: keep going):** cloud `/schedule` fires a fresh
+  container running `/conductor` + in-cloud `/loop` (Option 1 in the cloud), resuming from
+  the last pushed state. **Design only — untested (E7).** Local⇄cloud overlap is bounded by
+  the ledger lease (§7, E8) for correctness and an explicit cloud-stop on local resume for
+  cost.
 
-**Composition LOCK:** Option 1 (in-session `/loop`) is the **primary runtime driver**;
-Option 2 (cloud `/schedule`) and the local `@reboot`/systemd autostart are **complementary
-cross-session recovery wrappers, not alternatives** — confirming the design §3 hypothesis.
-One substrate (pushed git + issues + handoff), one entry point (reconcile-first
-`/conductor`).
+**Composition LOCK:** Option 1 (in-session `/loop`) = **primary runtime driver** (validated
+to green, unattended). Tier B = its **tested** local recovery; Tier A = the **designed**
+cross-session tier (substrate validated; soak-test deferred to E7). Complementary tiers,
+not alternatives — one substrate (pushed git + issues + handoff), one entry point
+(reconcile-first `/conductor`).
 
 **Verdict:** ≥1 ordering (Option 1) reaches green with zero intervention ✓ →
 composition locked ✓.

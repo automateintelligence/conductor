@@ -65,27 +65,34 @@ Heavy setup steps (TDD assertions, author plan) should run in **fresh subagents*
 
 ---
 
-## C. Recovery after a *local* restart — two restart tiers
+## C. Recovery — two tiers for two different situations (not interchangeable)
 
 `/schedule` runs **cloud** routines; it has **no handle on the local machine**, so it
-cannot launch or command a *local* session. Recovery therefore has two parallel tiers,
-both resuming from the same durable substrate (pushed git + issues + handoff) via a
-reconcile-first `/conductor`:
+cannot launch or command a *local* session. Recovery splits by *what failed*, and the two
+tiers are **complementary, not two ways to build the same thing**. Both restart paths
+re-invoke the **reconcile-first `/conductor`** over the durable substrate (pushed git +
+issues + handoff) and resume from the **last pushed point**.
 
-| Restart | Mechanism | Work resumes |
-|---|---|---|
-| reboot / session death, resume **locally** | OS autostart — `@reboot` cron / systemd user service / login agent → `claude -p "/conductor resume" < /dev/null --permission-mode …` | local machine |
-| local death, resume **anywhere** | cloud `/schedule` → `/conductor` in a fresh cloud container (clones from GitHub) | cloud |
+| Tier | Situation | Mechanism | Status |
+|---|---|---|---|
+| **B (local)** | machine **available** — reboot, Claude crashed, terminal closed | OS autostart (`@reboot` cron / systemd / login agent) → `claude -p "/conductor resume" </dev/null` | **tested** (fresh `claude -p` reconcile-resume skipped all done steps; OS trigger = snippet, not reboot-tested) |
+| **A (cloud)** | machine **off / unreachable**, work must continue | cloud `/schedule` → fresh container runs `/conductor`+in-cloud `/loop` (Option 1 in the cloud), clones from GitHub | **design only — untested (E7)**; needs cloud repo+`gh` access |
 
-Harness `CronCreate(durable:true)` persists jobs to `.claude/scheduled_tasks.json` and
-survives a *Claude* restart, but still requires Claude itself to be relaunched — it does
-not relaunch Claude or survive a machine reboot by itself. So the **local** watchdog must
-be an OS-level autostart, not a harness cron. `/schedule` is the **cloud** watchdog
-(design Option 2, §3/§10); the OS-autostart is its **local** counterpart.
+If progress is only needed while the machine is on, **Tier B alone is complete** (no cloud)
+— matching the "`/loop` primary, `/schedule` only for extraordinary multi-day" preference.
 
-> Amends §10: split "loop/conductor dies" into local-autostart vs cloud-`/schedule`
-> recovery; both re-invoke a reconcile-first `/conductor`. Local-autostart demonstrated
-> in E5.
+**Local⇄cloud overlap (both briefly running):** correctness is handled by the shared
+done-gate + ledger **lease/claim** (§7 — whoever holds the fresh lease owns the unit; the
+other backs off; this is **E8, untested**); *cost* is handled by local resume standing the
+cloud watchdog down (delete the `/schedule` routine — a one-line prompt confirm suffices).
+
+Note: harness `CronCreate(durable:true)` survives a *Claude* restart but still needs Claude
+relaunched and won't survive a machine reboot by itself — so Tier B must be an OS-level
+autostart, not a harness cron.
+
+> Amends §10: split "loop/conductor dies" into **Tier B (local OS-autostart, tested)** vs
+> **Tier A (cloud `/schedule`, design-only — validate in E7; lease handling E8)**; both
+> re-invoke a reconcile-first `/conductor`.
 
 ---
 
