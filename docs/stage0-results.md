@@ -14,7 +14,7 @@ via `gh api`); launcher `claude` v2.1.195 (`-p` headless verified).
 | E2 | subagent dispatch; `baseline..final` bracket; thin session | commit captured by SHA bracket; main context small | ✅ pass |
 | E3 | gh ledger ops + state model + reconcile repair | hierarchy + label/assignee transitions correct; reconcile repairs invalid combo | ✅ pass |
 | E4 | assertion spec → runnable test + runner (the crux) | red→green; exit codes correct; **unrunnable = NOT done** | ✅ pass |
-| E5 | end-to-end micro-spec, BOTH orderings | ≥1 reaches green with zero intervention → **lock composition** | ⏳ pending |
+| E5 | end-to-end micro-spec, BOTH orderings | ≥1 reaches green with zero intervention → **lock composition** | ✅ pass |
 
 **Legend:** ⏳ pending · 🔄 in progress · ✅ pass · ❌ fail · ⚠️ partial/conditional
 
@@ -131,15 +131,68 @@ subprocess timeout, prints per-id `[PASS]/[FAIL]` + aggregate, writes
 crash / timeout = NOT done, never green-by-default ✓. This is the machine-checked
 done-gate the loop's terminal condition depends on (§5.1).
 
-## E5 — end-to-end, both orderings → composition lock
-_pending_
+## E5 — end-to-end, both orderings → composition lock — ✅ PASS
+
+**Micro-spec:** 2 executable assertions in the real done-gate (`answer-42` green,
+`feature-shipped` starts RED). "Done" = `bin/conductor assert run` exits 0.
+
+**`/conductor` setup (reconcile-first — amendment B):** `conductor_e5.sh` checked the
+precondition and recorded goal/plan/driver. Re-run → every step "already done → skip
+(reconcile)"; no double-work, no error.
+
+**Option 1 — in-session `/loop /autodev` (live):** cron `515d3f94` (every minute) fired
+`autodev_e5_step.sh`:
+- fire 1 → done-gate RED → implemented `feature()` → committed (`a85bce9`) →
+  `STATE=IMPLEMENTED`, handoff written.
+- fire 2 → done-gate GREEN (`2/2 green`) → autonomous self-stop: `CronDelete(515d3f94)` +
+  wrote `run/DONE`. `CronList` → "No scheduled jobs." Independent gate re-run: both PASS,
+  exit 0.
+
+Zero intervention — composes E0/E1 (loop + self-stop + fresh context) + E2 (subagent
+execution contract) + E4 (the real machine done-gate) + the §6 recipe
+(implement → commit → handoff).
+
+**Option 2 — cross-session recovery (cloud `/schedule` + local autostart):** both wrappers
+re-invoke the reconcile-first `/conductor` over the durable substrate (pushed git + issues
++ handoff). The **local** autostart was tested live — a fresh `claude -p` re-ran
+`/conductor` and skipped every already-done step (clean resume). The **cloud `/schedule`**
+fire is its cloud counterpart (same entry point + substrate); a managed skill, not
+soak-tested (multi-hour). Install snippets: `experiments/E5-end-to-end/recovery.md`.
+
+**Composition LOCK:** Option 1 (in-session `/loop`) is the **primary runtime driver**;
+Option 2 (cloud `/schedule`) and the local `@reboot`/systemd autostart are **complementary
+cross-session recovery wrappers, not alternatives** — confirming the design §3 hypothesis.
+One substrate (pushed git + issues + handoff), one entry point (reconcile-first
+`/conductor`).
+
+**Verdict:** ≥1 ordering (Option 1) reaches green with zero intervention ✓ →
+composition locked ✓.
 
 ---
 
-## Stage 0 verdict
-_pending — filled after E0–E5._
+## Stage 0 verdict — ✅ PASS (E0–E5 all green)
 
-**Composition lock (from E5):** _pending._
+All six gate experiments passed and are recorded. Stage 0 (design §11) is satisfied; the
+framework architecture is validated and **planning may proceed** (`/writing-plans`).
 
-**Design amendments:** see `docs/stage0-notes.md` (A: fresh-context via `claude -p`;
-B: `/conductor` reconcile-first idempotency).
+| # | Result | One-line evidence |
+|---|---|---|
+| E0 | ✅ | cron fired the stub 3× on the minute; self-stopped (`CronDelete`) on green; never asked |
+| E1 | ✅ | two fresh `claude -p` sessions continued the loop from disk to green (relaunch ≫ `/clear`) |
+| E2 | ✅ | `1011229..ca4a3d4` bracket = exactly the subagent's one commit; main session thin |
+| E3 | ✅ | milestone→2 phases→3 real sub-issues; label/assignee transitions; reconcile repaired `done`+red |
+| E4 | ✅ | `answer()→42` red→green; runner exit `0/1/2`; unrunnable = NOT done (fail-closed) |
+| E5 | ✅ | `/conductor`→`/loop /autodev`→real done-gate→self-stop on green, unattended; composition locked |
+
+**Composition lock (E5):** Option 1 in-session `/loop` = **primary driver**; cloud
+`/schedule` + local `@reboot` autostart = **complementary cross-session recovery**
+(design §3 hypothesis confirmed).
+
+**Design amendments to fold into `/writing-plans`** (full text in `docs/stage0-notes.md`):
+- **A** — fresh context via `claude -p` relaunch / thin-session subagents (never `/clear` or `/compact`).
+- **B** — `/conductor` is reconcile-first & idempotent (not just `/autodev`).
+- **C** — recovery has two restart tiers: local OS-autostart vs cloud `/schedule`; `/schedule` cannot command a local session.
+- **D** — issue-sync drives labels + sub-issues via `gh api` (gh 2.4.0 lacks the subcommands).
+
+**Next:** `/writing-plans` for the conductor MVP build (components 1–7, design §11), with
+E0–E5 as validated foundations and amendments A–D incorporated.
