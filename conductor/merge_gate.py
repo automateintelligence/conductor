@@ -1,6 +1,8 @@
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from typing import Any
 
@@ -97,3 +99,26 @@ def check(
     if not merge_ref_verify(repo, pr, local_verify):
         blockers.append("merge-ref-verify-failed")
     return {"ok": not blockers, "blockers": blockers}
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("usage: conductor merge-gate <pr>", file=sys.stderr)
+        sys.exit(2)
+    pr_num = int(sys.argv[1])
+    repo = (
+        os.environ.get("CONDUCTOR_REPO")
+        or subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    )
+    local_verify = os.environ.get("CONDUCTOR_MERGE_VERIFY", "pytest -q")
+    result = check(repo, pr_num, local_verify=local_verify)
+    ok: bool = result["ok"]
+    blockers: list[str] = result["blockers"]
+    for b in blockers:
+        print(b, file=sys.stderr)
+    sys.exit(0 if ok else 1)

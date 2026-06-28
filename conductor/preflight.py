@@ -1,5 +1,6 @@
 import glob
 import os
+import sys
 from typing import TypedDict
 
 
@@ -57,3 +58,12 @@ def check(
     avail = available if available is not None else available_commands()
     missing = [c for c in required if not _present(c, avail)]
     return {"ok": not missing, "missing": missing}
+
+
+if __name__ == "__main__":
+    result = check()
+    ok: bool = result["ok"]
+    missing: list[str] = result["missing"]
+    for cmd in missing:
+        print(f"MISSING: {cmd}", file=sys.stderr)
+    sys.exit(0 if ok else 1)

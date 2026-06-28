@@ -19,3 +19,20 @@ def test_autodev_skill_contract():
         "environment-provided",
     ]:
         assert needle in body, needle
+
+
+def test_start_skill_contract():
+    body = open(os.path.join(ROOT, "skills/start/SKILL.md")).read().lower()
+    for needle in [
+        "preflight",
+        "reconcile-first",
+        "idempotent",
+        "spec-craft:executable-assertions",
+        "conductor:assertions-to-tests",
+        "issue-sync",
+        "/loop /conductor:autodev",
+        "start_probe.assertions_ready",
+        "already done",
+        "resume",
+    ]:
+        assert needle in body, needle
