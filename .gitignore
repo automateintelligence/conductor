@@ -6,3 +6,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 node_modules/
+
+# Toolchain pin (local pyenv dev; resolves ruff/pyright/pytest), SDD scratch, lint caches
+.python-version
+.superpowers/
+.ruff_cache/
+.mypy_cache/
+.pyright/
