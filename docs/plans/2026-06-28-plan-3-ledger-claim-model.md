@@ -9,11 +9,11 @@ labels, §7) — so work state lives server-side, conflict-free, parallel-correc
 N=1 single loop as the degenerate case.
 
 **Architecture:** A Python package `ledger/` wrapping `gh api` (labels, milestones, issues,
-**sub-issues**, assignees, lease comments) + the §7 reconcile/claim logic, exposed via a
-`/conductor:issue-sync` skill and `conductor ledger …` CLI. Promotes the Stage-0 **E3**
-prototype (`experiments/E3-gh-ledger/reconcile.py` + its validated `gh api` patterns). The
-load-bearing §7 rules (precedence, invalid-combo repair, lease) are pure functions, unit-tested
-with the gh layer mocked; one integration test hits an ephemeral milestone (cleaned up).
+**sub-issues**, assignees, **lease = hidden body marker**) + the §7 reconcile/claim logic,
+exposed via a `/conductor:issue-sync` skill and `conductor ledger …` CLI. Promotes the Stage-0
+**E3** prototype. Load-bearing §7 rules (precedence, invalid-combo repair, claim, lease,
+stale-reclaim) are pure functions, unit-tested with the gh layer mocked; one integration test
+hits an ephemeral milestone (cleaned up).
 
 **Tech Stack:** Python 3 (stdlib + pytest), `gh` v2.4.0 via `gh api` (REST), conductor plugin.
 
@@ -21,22 +21,23 @@ with the gh layer mocked; one integration test hits an ephemeral milestone (clea
 
 - **GitHub is canonical for work state; git is ground truth** (§7). Sub-issues are the Tasks
   representation (E3 proved they work via `gh api`); checklist is the documented fallback.
-- **gh portability (amendment D):** drive labels + sub-issues through `gh api`, never
-  `gh label`/`gh issue` sub-issue subcommands (absent in gh 2.4.0). Sub-issue add:
-  `gh api --method POST repos/<o>/<r>/issues/<parent>/sub_issues -F sub_issue_id=<child DB id>`
-  (typed int; DB id from `…/issues/<n> --jq .id`, not the display number).
-- **Ground-truth precedence (§7):** `git commits + tests > PR state > issue status-label`. On
-  conflict the higher source wins and the lower is repaired.
-- **Parallel-correct from day one (§7):** claim = **assignee** (not the status label); lease =
-  heartbeat timestamp + TTL `L`. N=1 single loop needs no claiming, but the model is built in.
+- **gh portability (amendment D):** labels + sub-issues via `gh api`, never `gh label`/`gh
+  issue` sub-issue subcommands. Sub-issue add: `gh api --method POST
+  repos/<o>/<r>/issues/<parent>/sub_issues -F sub_issue_id=<child DB id>` (typed int; DB id
+  from `…/issues/<n> --jq .id`).
+- **Ground-truth precedence (§7):** `git commits + tests > PR state > issue status-label`.
+- **Claim = assignee; lease = a single hidden body marker** `<!-- conductor-lease worker=<login> ts=<unix> -->`
+  with TTL `L` (NOT a per-timestamp label — avoids label churn; carries worker+ts for
+  stale-reclaim). N=1 single loop needs no claiming, but the model is built in.
+- **release() MUST unassign** (eligibility requires no assignee) AND clear the lease.
 - **Namespacing (locked):** `/conductor:issue-sync`; no bare names (amendment F).
 - **Python gate:** `ruff check . && ruff format --check . && pyright . && pytest` before any task complete.
 - **Commits:** atomic; end with `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 
 ## Conventions (LOCKED)
 Status labels = lifecycle (NOT a lock): `draft, ready, in-progress, in-review, done, blocked`.
-Assignee+lease = the claim. Hierarchy: Plan→Milestone, Phase→Issue, Tasks→sub-issues, PR per
-phase `Closes #<phase>`, `plan.md` = thin index.
+Assignee + lease (body marker) = the claim. Hierarchy: Plan→Milestone, Phase→Issue,
+Tasks→sub-issues, PR per phase `Closes #<phase>`, `plan.md` = thin index.
 
 ---
 
@@ -45,12 +46,11 @@ phase `Closes #<phase>`, `plan.md` = thin index.
 | Path | Responsibility |
 |---|---|
 | `ledger/__init__.py` | Package marker. |
-| `ledger/gh.py` | Thin `gh api` wrappers: `ensure_label`, `create_milestone`, `create_issue`, `add_sub_issue`, `set_labels`, `assign`, `close_issue`, `reopen_issue`, `issue_state`, `write_lease`, `read_lease`. One `_gh_api(method, path, **fields)` seam (mockable). |
-| `ledger/model.py` | Dataclasses: `PhaseState(status, assignee, lease, commits_since_baseline, pr_state, tests_red)`; enums for status/precedence. |
-| `ledger/sync.py` | `generate(plan)` and `convert(plan_md_path)` → milestone/issues/sub-issues/labels. |
-| `ledger/claim.py` | `eligible(phase)`, `claim(issue, worker, ttl)`, `renew_lease`, `release`, `stale(lease, L)`. |
-| `ledger/reconcile.py` | §7 precedence + invalid-combo repairs + retry cap `R` + stale-lease reclaim. Promotes E3. |
-| `skills/issue-sync/SKILL.md` | `/conductor:issue-sync` — generate / convert / reconcile entry point. |
+| `ledger/gh.py` | `gh api` wrappers incl. `assign`/`unassign`, `get_body`/`set_body`, sub-issues. One `_gh_api(method, path, fields, jq)` seam (mockable). |
+| `ledger/claim.py` | `eligible`, `claim`, `read_lease`/`renew_lease` (body marker), `release` (unassign + clear), `lease_is_stale`. |
+| `ledger/reconcile.py` | §7 precedence + invalid-combo repairs + retry cap `R` + **stale-lease reclaim**. Promotes E3. |
+| `ledger/sync.py` | `generate(plan)` / `convert(plan_md)` → milestone/issues/sub-issues/labels. |
+| `skills/issue-sync/SKILL.md` | `/conductor:issue-sync` — generate / convert / reconcile. |
 | `bin/conductor` | add `ledger {generate|convert|reconcile|claim}` subcommands. |
 | `tests/ledger/test_*.py` | unit (gh mocked) + one integration (ephemeral milestone). |
 
@@ -58,17 +58,16 @@ phase `Closes #<phase>`, `plan.md` = thin index.
 
 ## Task 1: `gh api` wrapper layer (`ledger/gh.py`)
 
-Promote E3's validated `gh api` calls into typed wrappers behind one mockable seam.
+Promote E3's `gh api` calls into typed wrappers behind one mockable seam. **Includes
+`unassign` and body get/set** (lease lives in the body, Codex #3/#5).
 
 **Files:** Create `ledger/__init__.py`, `ledger/gh.py`, `tests/ledger/__init__.py`, `tests/ledger/test_gh.py`
 
 **Interfaces:**
-- Produces: `_gh_api(method: str, path: str, fields: dict|None=None, jq: str|None=None) -> Any`
-  and wrappers `ensure_label(repo,name,color)`, `create_milestone(repo,title)->int`,
-  `create_issue(repo,title,body,milestone=None,labels=())->dict` (returns `{number, id}`),
-  `add_sub_issue(repo,parent_number,child_db_id)`, `set_labels(repo,n,add=(),remove=())`,
-  `assign(repo,n,login)`, `close_issue(repo,n)`, `reopen_issue(repo,n)`,
-  `issue_state(repo,n)->dict` (`{state, labels, assignees, id}`).
+- `_gh_api(method, path, fields=None, jq=None)`; `ensure_label`, `create_milestone`,
+  `create_issue`→`{number,id}`, `add_sub_issue(repo,parent,child_db_id)`, `set_labels`,
+  `assign(repo,n,login)`, **`unassign(repo,n,login)`**, `close_issue`, `reopen_issue`,
+  `issue_state`→`{state,labels,assignees,id}`, **`get_body(repo,n)->str`**, **`set_body(repo,n,body)`**.
 
 - [ ] **Step 1: Write failing unit tests (gh mocked)**
 
@@ -81,14 +80,13 @@ def test_add_sub_issue_uses_typed_int_db_id():
     calls = []
     with patch.object(gh, "_gh_api", lambda m, p, fields=None, jq=None: calls.append((m, p, fields)) or {}):
         gh.add_sub_issue("o/r", 1, 4761391764)
-    m, p, fields = calls[-1]
-    assert m == "POST" and p == "repos/o/r/issues/1/sub_issues"
-    assert fields == {"sub_issue_id": 4761391764}        # int, not str (E3 deviation #2)
+    assert calls[-1] == ("POST", "repos/o/r/issues/1/sub_issues", {"sub_issue_id": 4761391764})
 
-def test_create_issue_returns_number_and_db_id():
-    with patch.object(gh, "_gh_api", lambda *a, **k: {"number": 7, "id": 999}):
-        out = gh.create_issue("o/r", "Phase A", "body")
-    assert out == {"number": 7, "id": 999}
+def test_unassign_calls_delete_assignees():
+    calls = []
+    with patch.object(gh, "_gh_api", lambda m, p, fields=None, jq=None: calls.append((m, p)) or {}):
+        gh.unassign("o/r", 5, "bob")
+    assert calls[-1] == ("DELETE", "repos/o/r/issues/5/assignees")
 ```
 
 - [ ] **Step 2: Run → FAIL** (`ledger` absent).
@@ -101,24 +99,25 @@ import json, subprocess
 def _gh_api(method, path, fields=None, jq=None):
     cmd = ["gh", "api", "--method", method, path]
     for k, v in (fields or {}).items():
-        # -F sends typed (int/bool); -f sends string. Sub-issue ids MUST be typed ints.
         cmd += (["-F", f"{k}={v}"] if isinstance(v, (int, bool)) else ["-f", f"{k}={v}"])
     if jq:
         cmd += ["--jq", jq]
     out = subprocess.run(cmd, capture_output=True, text=True)
     if out.returncode != 0:
         raise RuntimeError(f"gh api {method} {path} failed: {out.stderr.strip()}")
-    return json.loads(out.stdout) if out.stdout.strip() and not jq else out.stdout.strip()
+    if jq:
+        return out.stdout.rstrip("\n")
+    return json.loads(out.stdout) if out.stdout.strip() else None
 
 def ensure_label(repo, name, color="ededed"):
     try:
         _gh_api("POST", f"repos/{repo}/labels", {"name": name, "color": color})
     except RuntimeError as e:
-        if "already_exists" not in str(e):                    # idempotent
+        if "already_exists" not in str(e):
             raise
 
 def create_milestone(repo, title):
-    return _gh_api("POST", f"repos/{repo}/milestones", {"title": title}, jq=None)["number"]
+    return _gh_api("POST", f"repos/{repo}/milestones", {"title": title})["number"]
 
 def create_issue(repo, title, body, milestone=None, labels=()):
     f = {"title": title, "body": body}
@@ -127,9 +126,9 @@ def create_issue(repo, title, body, milestone=None, labels=()):
     if labels: set_labels(repo, data["number"], add=labels)
     return {"number": data["number"], "id": data["id"]}
 
-def add_sub_issue(repo, parent_number, child_db_id):
-    return _gh_api("POST", f"repos/{repo}/issues/{parent_number}/sub_issues",
-                   {"sub_issue_id": int(child_db_id)})       # typed int (E3)
+def add_sub_issue(repo, parent, child_db_id):
+    return _gh_api("POST", f"repos/{repo}/issues/{parent}/sub_issues",
+                   {"sub_issue_id": int(child_db_id)})
 
 def set_labels(repo, n, add=(), remove=()):
     cur = set(issue_state(repo, n)["labels"])
@@ -139,6 +138,9 @@ def set_labels(repo, n, add=(), remove=()):
 def assign(repo, n, login):
     _gh_api("POST", f"repos/{repo}/issues/{n}/assignees", {"assignees": json.dumps([login])})
 
+def unassign(repo, n, login):                                      # Codex #3
+    _gh_api("DELETE", f"repos/{repo}/issues/{n}/assignees", {"assignees": json.dumps([login])})
+
 def close_issue(repo, n):  _gh_api("PATCH", f"repos/{repo}/issues/{n}", {"state": "closed"})
 def reopen_issue(repo, n): _gh_api("PATCH", f"repos/{repo}/issues/{n}", {"state": "open"})
 
@@ -147,35 +149,39 @@ def issue_state(repo, n):
     return {"state": d["state"], "id": d["id"],
             "labels": [l["name"] for l in d.get("labels", [])],
             "assignees": [a["login"] for a in d.get("assignees", [])]}
+
+def get_body(repo, n):
+    return _gh_api("GET", f"repos/{repo}/issues/{n}").get("body") or ""
+
+def set_body(repo, n, body):
+    _gh_api("PATCH", f"repos/{repo}/issues/{n}", {"body": body})
 ```
-(`labels`/`assignees` as `-f key=<json>` strings is the simplest gh-portable form; `_gh_api`
-sends non-int values with `-f`.)
 
-- [ ] **Step 4: Run unit tests → PASS.** Lint+typecheck.
-
-- [ ] **Step 5: Commit** (`Plan3 T1: ledger/gh.py gh api wrappers (promote E3)` …+ trailer).
+- [ ] **Step 4: Run → PASS.** Lint+typecheck. **Commit.**
 
 ---
 
-## Task 2: Lease helpers + claim model (`ledger/claim.py`)
+## Task 2: Lease (body marker) + claim model (`ledger/claim.py`)
 
-Lease = a heartbeat written as a hidden marker in the issue body (or a `lease:<ts>` comment);
-TTL `L`. Claim = assignee. Eligibility = unassigned AND not blocked/done/dep-blocked.
+Lease = a **single hidden body marker** (Codex #5), TTL `L`. Claim = assignee. Eligibility =
+unassigned AND not blocked/done/closed/dep-blocked. **`release` unassigns AND clears the lease**
+(Codex #3).
 
-**Files:** Create `ledger/claim.py`, `ledger/model.py`, `tests/ledger/test_claim.py`
+**Files:** Create `ledger/claim.py`, `tests/ledger/test_claim.py`
 
 **Interfaces:**
-- Produces: `eligible(state: dict) -> bool`; `claim(repo, n, worker, now_ts, ttl) -> bool`
-  (assign + write lease, re-read to confirm sole assignee, return False if lost the race);
-  `renew_lease(repo, n, now_ts)`; `release(repo, n)`; `lease_is_stale(lease_ts, now_ts, L) -> bool`.
+- `eligible(state)->bool`; `read_lease(repo,n,gh)->{worker,ts}|None`;
+  `renew_lease(repo,n,worker,now_ts,gh)`; `claim(repo,n,worker,now_ts,ttl,gh)->bool`;
+  `release(repo,n,worker,gh)` (unassign + clear marker); `lease_is_stale(lease_ts,now_ts,L)->bool`.
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **Step 1: Write failing tests (incl. release-unassigns + lease round-trip)**
 
 ```python
 # tests/ledger/test_claim.py
+from unittest.mock import MagicMock
 from ledger import claim
 
-def test_eligible_only_when_unassigned_and_open_state():
+def test_eligible_only_when_unassigned_and_open():
     assert claim.eligible({"assignees": [], "labels": ["status:ready"], "state": "open"})
     assert not claim.eligible({"assignees": ["x"], "labels": ["status:ready"], "state": "open"})
     assert not claim.eligible({"assignees": [], "labels": ["status:blocked"], "state": "open"})
@@ -184,6 +190,28 @@ def test_eligible_only_when_unassigned_and_open_state():
 def test_lease_staleness():
     assert claim.lease_is_stale(100, now_ts=100 + 901, L=900)
     assert not claim.lease_is_stale(100, now_ts=100 + 10, L=900)
+    assert claim.lease_is_stale(None, now_ts=5, L=900)            # no lease = stale
+
+def test_lease_body_marker_round_trip():
+    body = {"v": "Phase A body."}
+    gh = MagicMock()
+    gh.get_body.side_effect = lambda r, n: body["v"]
+    gh.set_body.side_effect = lambda r, n, b: body.__setitem__("v", b)
+    claim.renew_lease("o/r", 1, "alice", 1782600000, gh)
+    assert claim.read_lease("o/r", 1, gh) == {"worker": "alice", "ts": 1782600000}
+    # renewing replaces, does not stack markers
+    claim.renew_lease("o/r", 1, "alice", 1782600999, gh)
+    assert body["v"].count("conductor-lease") == 1
+    assert claim.read_lease("o/r", 1, gh)["ts"] == 1782600999
+
+def test_release_unassigns_and_clears_lease():                   # Codex #3
+    body = {"v": "x <!-- conductor-lease worker=alice ts=1 -->"}
+    gh = MagicMock()
+    gh.get_body.side_effect = lambda r, n: body["v"]
+    gh.set_body.side_effect = lambda r, n, b: body.__setitem__("v", b)
+    claim.release("o/r", 1, "alice", gh)
+    gh.unassign.assert_called_once_with("o/r", 1, "alice")
+    assert "conductor-lease" not in body["v"]
 ```
 
 - [ ] **Step 2: Run → FAIL.**
@@ -191,7 +219,10 @@ def test_lease_staleness():
 - [ ] **Step 3: Implement** `ledger/claim.py`:
 
 ```python
+import re
+
 BLOCKING = {"status:blocked", "status:done"}
+_LEASE = re.compile(r"<!--\s*conductor-lease worker=(\S+) ts=(\d+)\s*-->")
 
 def eligible(state):
     labels = set(state.get("labels", []))
@@ -203,57 +234,62 @@ def eligible(state):
 def lease_is_stale(lease_ts, now_ts, L):
     return lease_ts is None or (now_ts - lease_ts) > L
 
+def read_lease(repo, n, gh):
+    m = _LEASE.search(gh.get_body(repo, n) or "")
+    return {"worker": m.group(1), "ts": int(m.group(2))} if m else None
+
+def renew_lease(repo, n, worker, now_ts, gh):
+    body = _LEASE.sub("", gh.get_body(repo, n) or "").rstrip()     # strip any existing marker
+    gh.set_body(repo, n, f"{body}\n\n<!-- conductor-lease worker={worker} ts={now_ts} -->")
+
 def claim(repo, n, worker, now_ts, ttl, gh):
     if not eligible(gh.issue_state(repo, n)):
         return False
     gh.assign(repo, n, worker)
     gh.set_labels(repo, n, add=["status:in-progress"], remove=["status:ready"])
-    renew_lease(repo, n, now_ts, gh)
-    confirm = gh.issue_state(repo, n)["assignees"]          # re-read: sole assignee?
-    return confirm == [worker]
+    renew_lease(repo, n, worker, now_ts, gh)
+    return gh.issue_state(repo, n)["assignees"] == [worker]        # re-read: sole assignee?
 
-def renew_lease(repo, n, now_ts, gh):
-    gh.set_labels(repo, n, add=[f"lease:{now_ts}"],
-                  remove=[l for l in gh.issue_state(repo, n)["labels"] if l.startswith("lease:")])
-
-def release(repo, n, gh):
-    gh.set_labels(repo, n, remove=[l for l in gh.issue_state(repo, n)["labels"] if l.startswith("lease:")])
+def release(repo, n, worker, gh):                                 # Codex #3: unassign + clear
+    gh.unassign(repo, n, worker)
+    body = _LEASE.sub("", gh.get_body(repo, n) or "").rstrip()
+    gh.set_body(repo, n, body)
 ```
-(Lease as a `lease:<ts>` label keeps it server-side and visible; a single loop never calls
-`claim`, but the path exists for multi-loop, §7.)
 
-- [ ] **Step 4: Run → PASS.** Lint+typecheck. **Commit.**
+- [ ] **Step 4: Run → PASS.** Lint+typecheck. **Commit** (`Plan3 T2: claim + lease body marker; release unassigns (Codex #3/#5)`).
 
 ---
 
-## Task 3: Reconcile (§7 precedence + repairs) — promote E3
+## Task 3: Reconcile (§7 precedence + repairs + stale-lease reclaim) — promote E3
 
-Promote `experiments/E3-gh-ledger/reconcile.py` (validated: detected `done`+red → reopen →
-in-progress; permitted `done`+green) into `ledger/reconcile.py`, generalized over the §7 rules.
+Promote `experiments/E3-gh-ledger/reconcile.py` and add the **stale-lease reclaim** branch
+(Codex #4): `reconcile` now takes lease state and reclaims an in-progress unit whose lease is
+stale. **MVP reclaim = unassign + reset to `ready`** (single pool; the multi-loop dispatcher
+reassign is Phase 2, §7).
 
 **Files:** Create `ledger/reconcile.py`, `tests/ledger/test_reconcile.py`
 
 **Interfaces:**
-- Produces: `reconcile(repo, n, tests_red: bool, pr_merged: bool, commits_since_baseline: int,
-  retries: int, R: int, gh) -> dict` applying precedence `git/tests > PR > label`, returning
-  `{action, new_status}` and performing the repair. Encodes the §7 invalid-combo table.
+- `reconcile(repo, n, *, tests_red, pr_merged, commits_since_baseline, retries, R, gh,
+  now_ts=None, L=900) -> {action, new_status}` — reads the lease from the issue body via
+  `claim.read_lease`; applies precedence `git/tests > PR > label`; performs the repair.
 
-- [ ] **Step 1: Write failing tests (the §7 table)**
+- [ ] **Step 1: Write failing tests (the §7 table + stale reclaim)**
 
 ```python
 # tests/ledger/test_reconcile.py
-from ledger import reconcile
 from unittest.mock import MagicMock
+from ledger import reconcile
 
-def _gh(state):
-    g = MagicMock(); g.issue_state.return_value = state; return g
+def _gh(state, body=""):
+    g = MagicMock(); g.issue_state.return_value = state; g.get_body.return_value = body
+    return g
 
 def test_done_but_tests_red_reopens_to_in_progress():
     g = _gh({"state": "closed", "labels": ["status:done"], "assignees": [], "id": 1})
     out = reconcile.reconcile("o/r", 1, tests_red=True, pr_merged=True,
                               commits_since_baseline=3, retries=0, R=3, gh=g)
-    assert out["new_status"] == "status:in-progress"
-    g.reopen_issue.assert_called_once()
+    assert out["new_status"] == "status:in-progress"; g.reopen_issue.assert_called_once()
 
 def test_done_and_tests_green_is_permitted():
     g = _gh({"state": "closed", "labels": ["status:done"], "assignees": [], "id": 1})
@@ -267,49 +303,72 @@ def test_in_progress_no_assignee_resets_to_ready():
                               commits_since_baseline=0, retries=0, R=3, gh=g)
     assert out["new_status"] == "status:ready"
 
-def test_retry_cap_exceeded_routes_to_blocked():
-    g = _gh({"state": "open", "labels": ["status:in-progress"], "assignees": ["w"], "id": 1})
+def test_in_progress_stale_lease_reclaims():                     # Codex #4
+    g = _gh({"state": "open", "labels": ["status:in-progress"], "assignees": ["dead"], "id": 1},
+            body="<!-- conductor-lease worker=dead ts=100 -->")
     out = reconcile.reconcile("o/r", 1, tests_red=True, pr_merged=False,
-                              commits_since_baseline=1, retries=3, R=3, gh=g)
+                              commits_since_baseline=1, retries=0, R=3, gh=g,
+                              now_ts=100 + 5000, L=900)
+    assert out["action"] == "stale-lease-reclaim" and out["new_status"] == "status:ready"
+    g.unassign.assert_called_once_with("o/r", 1, "dead")
+
+def test_in_progress_fresh_lease_not_reclaimed():
+    g = _gh({"state": "open", "labels": ["status:in-progress"], "assignees": ["w"], "id": 1},
+            body="<!-- conductor-lease worker=w ts=100 -->")
+    out = reconcile.reconcile("o/r", 1, tests_red=False, pr_merged=False,
+                              commits_since_baseline=1, retries=0, R=3, gh=g,
+                              now_ts=110, L=900)
+    assert out["action"] == "none"
+
+def test_retry_cap_exceeded_routes_to_blocked():
+    g = _gh({"state": "open", "labels": ["status:in-progress"], "assignees": ["w"], "id": 1},
+            body="<!-- conductor-lease worker=w ts=100 -->")
+    out = reconcile.reconcile("o/r", 1, tests_red=True, pr_merged=False,
+                              commits_since_baseline=1, retries=3, R=3, gh=g, now_ts=110, L=900)
     assert out["new_status"] == "status:blocked"
 ```
 
 - [ ] **Step 2: Run → FAIL.**
 
-- [ ] **Step 3: Implement** `ledger/reconcile.py` encoding the §7 table:
+- [ ] **Step 3: Implement** `ledger/reconcile.py`:
 
 ```python
-def reconcile(repo, n, tests_red, pr_merged, commits_since_baseline, retries, R, gh):
+from ledger import claim
+
+def reconcile(repo, n, *, tests_red, pr_merged, commits_since_baseline,
+              retries, R, gh, now_ts=None, L=900):
     st = gh.issue_state(repo, n)
-    labels = set(st["labels"]); status = next((l for l in labels if l.startswith("status:")), None)
+    labels = set(st["labels"])
+    status = next((l for l in labels if l.startswith("status:")), None)
     closed = st["state"] == "closed"
 
-    def repair(new_status, action, reopen=False, close=False):
-        if reopen: gh.reopen_issue(repo, n)
-        if close:  gh.close_issue(repo, n)
+    def repair(new_status, action, reopen=False):
+        if reopen:
+            gh.reopen_issue(repo, n)
         if new_status:
             gh.set_labels(repo, n, add=[new_status],
                           remove=[l for l in labels if l.startswith("status:")])
         return {"action": action, "new_status": new_status}
 
     # Precedence: git/tests > PR > label.
-    # 1. retry cap (§6.1): exhausted attempts -> blocked + escalate
-    if tests_red and retries >= R:
+    if tests_red and retries >= R:                                       # retry cap (§6.1)
         return repair("status:blocked", "retry-cap-exceeded")
-    # 2. done/closed but tests red -> reopen -> in-progress (§7)
-    if (status == "status:done" or closed) and tests_red:
+    if (status == "status:done" or closed) and tests_red:                # done/closed + red
         return repair("status:in-progress", "reopen-tests-red", reopen=True)
-    # 3. in-progress but no assignee -> reset -> ready (abandoned)
-    if status == "status:in-progress" and not st["assignees"]:
+    if status == "status:in-progress" and st["assignees"] and now_ts is not None:  # Codex #4
+        lease = claim.read_lease(repo, n, gh)
+        if claim.lease_is_stale(lease["ts"] if lease else None, now_ts, L):
+            for w in st["assignees"]:
+                gh.unassign(repo, n, w)                                   # reclaim (single pool)
+            return repair("status:ready", "stale-lease-reclaim")
+    if status == "status:in-progress" and not st["assignees"]:           # abandoned
         return repair("status:ready", "reset-abandoned")
-    # 4. closed but PR not merged -> reopen
-    if closed and not pr_merged:
+    if closed and not pr_merged:                                         # closed but unmerged
         return repair("status:in-progress", "reopen-unmerged", reopen=True)
-    # 5. consistent (done+green, or in-progress+assignee, etc.) -> no-op
     return {"action": "none", "new_status": status}
 ```
 
-- [ ] **Step 4: Run → PASS.** Lint+typecheck. **Commit** (`Plan3 T3: ledger/reconcile.py (§7 precedence, promote E3)`).
+- [ ] **Step 4: Run → PASS.** Lint+typecheck. **Commit** (`Plan3 T3: reconcile §7 precedence + stale-lease reclaim (Codex #4)`).
 
 ---
 
@@ -318,46 +377,21 @@ def reconcile(repo, n, tests_red, pr_merged, commits_since_baseline, retries, R,
 **Files:** Create `ledger/sync.py`, `tests/ledger/test_sync.py`
 
 **Interfaces:**
-- Produces: `generate(repo, plan: dict, gh) -> dict` (plan = `{title, phases:[{title, status,
-  tasks:[str]}]}`) → creates milestone, phase issues (labeled), task sub-issues; returns
-  `{milestone, phases:[{number, sub_issues:[number]}]}`. `convert(repo, plan_md_path, gh)` →
-  parse a thin `plan.md`/`tasks.md` into the `plan` dict, then `generate`.
+- `generate(repo, plan: dict, gh) -> dict` (plan = `{title, phases:[{title, status, tasks:[str]}]}`)
+  → milestone + phase issues (labeled) + task sub-issues; returns `{milestone, phases:[{number,
+  sub_issues:[number]}]}`. `convert(repo, plan_md_path, gh)` parses a thin `plan.md` into the
+  `plan` dict, then `generate`. `parse_plan_md(text)->dict`.
 
-- [ ] **Step 1: Write failing tests (gh mocked, assert the call sequence + sub-issue linking)**
-
-```python
-# tests/ledger/test_sync.py
-from ledger import sync
-from unittest.mock import MagicMock
-
-def test_generate_creates_milestone_phases_and_sub_issues():
-    gh = MagicMock()
-    gh.create_milestone.return_value = 1
-    gh.create_issue.side_effect = [{"number": 1, "id": 100}, {"number": 2, "id": 200},
-                                   {"number": 3, "id": 300}]  # phaseA, taskA1... (per call)
-    plan = {"title": "P", "phases": [{"title": "A", "status": "ready", "tasks": ["t1"]}]}
-    out = sync.generate("o/r", plan, gh)
-    gh.create_milestone.assert_called_once_with("o/r", "P")
-    # phase A (#1) gets task #2 linked as a sub-issue by DB id
-    gh.add_sub_issue.assert_called_with("o/r", 1, 200)
-    assert out["phases"][0]["number"] == 1 and out["phases"][0]["sub_issues"] == [2]
-
-def test_convert_parses_thin_plan_md(tmp_path):
-    p = tmp_path / "plan.md"
-    p.write_text("# Plan P\n## Phase A [ready]\n- [ ] t1\n- [ ] t2\n## Phase B [draft]\n")
-    plan = sync.parse_plan_md(p.read_text())
-    assert plan["title"] == "Plan P"
-    assert plan["phases"][0] == {"title": "Phase A", "status": "ready", "tasks": ["t1", "t2"]}
-    assert plan["phases"][1]["status"] == "draft"
-```
+- [ ] **Step 1: Write failing tests** (gh mocked; assert milestone→phases→sub-issue linking by DB id; parse thin `plan.md` with `## Phase A [ready]` + `- [ ]` tasks). Include a test that
+when `add_sub_issue` raises, `generate` falls back to `- [ ] #<task#>` in the parent body and
+records `fallback=True` (mirrors E3).
 
 - [ ] **Step 2: Run → FAIL.**
 
-- [ ] **Step 3: Implement** `ledger/sync.py` (`parse_plan_md`, `generate`, `convert`). `generate`:
-ensure status labels first; create milestone; for each phase create the issue with
-`status:<status>`; for each task create an issue and `add_sub_issue(parent_number,
-task["id"])`; if `add_sub_issue` raises (feature off), fall back to appending `- [ ] #<task#>`
-to the parent body and record `fallback=True`. (Mirrors E3 exactly.)
+- [ ] **Step 3: Implement** `ledger/sync.py` (`parse_plan_md`, `generate`, `convert`):
+ensure status labels; create milestone; per phase create issue with `status:<status>`; per task
+create issue + `add_sub_issue(parent_number, task_db_id)`; on `add_sub_issue` failure append
+`- [ ] #<task#>` to the parent body via `set_body` and set `fallback=True`.
 
 - [ ] **Step 4: Run → PASS.** Lint+typecheck. **Commit.**
 
@@ -368,24 +402,22 @@ to the parent body and record `fallback=True`. (Mirrors E3 exactly.)
 **Files:** Create `skills/issue-sync/SKILL.md`; modify `bin/conductor`; create
 `tests/ledger/test_integration.py`, `tests/test_skill_outputs.py` (add a check).
 
-- [ ] **Step 1: Skill structural test + write the skill**
+- [ ] **Step 1: Skill + structural test.** `skills/issue-sync/SKILL.md` (frontmatter
+  `name: issue-sync`) documents **generate / convert / reconcile**, states it **never prompts**
+  (§5), and that reconcile follows precedence `git/tests > PR > label` and reclaims stale
+  leases. Structural test asserts the body mentions `generate`, `convert`, `reconcile`,
+  `precedence`, `sub-issue`, `never prompt`, `stale`.
 
-`skills/issue-sync/SKILL.md` (frontmatter `name: issue-sync`) documents the three modes —
-**generate** (plan → hierarchy), **convert** (existing `plan.md`/`tasks.md` → hierarchy), and
-**reconcile** (each iteration: read git/tests/PR/labels, apply `ledger.reconcile` per
-precedence) — and states it **never prompts** (§5 "fully automated"). Structural test asserts
-the body contains `generate`, `convert`, `reconcile`, `precedence`, `sub-issue`, `never prompt`.
-
-- [ ] **Step 2: CLI** — add to `bin/conductor`:
-`conductor ledger generate <plan.json>` / `convert <plan.md>` / `reconcile <issue#> --tests-red …`
-dispatching to `python3 -m ledger.<cmd>`.
+- [ ] **Step 2: CLI** — `conductor ledger {generate <plan.json>|convert <plan.md>|reconcile <issue#> [flags]}`
+  dispatching to `python3 -m ledger.<cmd>`.
 
 - [ ] **Step 3: Integration test (ephemeral, cleaned up)** — mirrors E3 against the real repo:
-generate a `IT-<runid>` milestone + 2 phases + 3 sub-issues, assert hierarchy via `gh api`,
-flip phase A `done`+close, inject red, `reconcile` → asserts reopen→in-progress, then green →
-permitted. Teardown: close issues + delete the milestone. Marked `@pytest.mark.integration`
-(skipped unless `RUN_GH_INTEGRATION=1`, so CI without gh stays green — and it is NOT the
-fail-closed gate).
+  generate `IT-<runid>` milestone + 2 phases + 3 sub-issues; assert hierarchy via `gh api`;
+  claim phase A (assignee + lease body marker); flip `done`+close; inject red; `reconcile` →
+  reopen→in-progress; set green → permitted; then write a stale lease + `reconcile(now_ts past L)`
+  → stale-reclaim resets to ready and unassigns. Teardown: close issues + delete the milestone.
+  `@pytest.mark.integration`, skipped unless `RUN_GH_INTEGRATION=1` (CI without gh stays green;
+  this is NOT the fail-closed done-gate).
 
 - [ ] **Step 4: Full quality gate + commit** (`Plan3 T5: /conductor:issue-sync skill + ledger CLI + integration`).
 
@@ -393,25 +425,32 @@ fail-closed gate).
 
 ## Self-Review
 
-**Coverage (§11 comps 4–5, §7):** component 4 issue-sync (generate/convert/reconcile) → T4+T5;
-component 5 ledger+claim (assignee+lease+labels, precedence, invalid-combo repair, retry cap,
-stale-lease) → T2+T3. gh portability (amendment D) → T1.
+**Coverage (§11 comps 4–5, §7):** issue-sync generate/convert/reconcile → T4+T5; ledger+claim
+(assignee + lease body marker + labels, precedence, invalid-combo repair, retry cap,
+**stale-lease reclaim**) → T2+T3. gh portability (amendment D) → T1.
 
-**§7 rule coverage:** precedence git/tests>PR>label (T3); invalid combos done+red→reopen,
-in-progress+no-assignee→ready, closed+unmerged→reopen (T3 tests); retry cap→blocked (T3);
-lease staleness (T2); eligibility (T2); real sub-issues + checklist fallback (T4, E3-proven).
+**Codex review (Plans 2–3) — Plan 3 items addressed:**
+- **#3 release unassigns:** `gh.unassign` added; `release()` removes assignee + clears lease;
+  tested (`test_release_unassigns_and_clears_lease`). ✓
+- **#4 stale-lease reclaim:** `reconcile` takes `now_ts`/`L`, reads the lease, and reclaims
+  (unassign + reset `ready`); MVP = single-pool reclaim, dispatcher-reassign noted Phase 2;
+  tested (`test_in_progress_stale_lease_reclaims`, `…fresh_lease_not_reclaimed`). ✓
+- **#5 lease lifecycle:** lease is a single hidden body marker (no per-ts label churn);
+  round-trip + single-marker tested. ✓
 
-**Placeholder scan:** load-bearing logic (reconcile, claim, gh wrappers) shown in full; sync
-parse/generate specified with the exact E3 fallback behavior.
+**§7 rule coverage:** precedence git/tests>PR>label; invalid combos (done+red→reopen,
+in-progress+stale→reclaim, in-progress+no-assignee→ready, closed+unmerged→reopen); retry
+cap→blocked; lease staleness; eligibility; sub-issues + checklist fallback (E3-proven).
 
-**Consistency:** `gh` seam `_gh_api` mocked uniformly; status labels `status:<x>` + `lease:<ts>`
-consistent T2/T3; `/conductor:issue-sync` namespacing.
+**Consistency:** `gh` seam `_gh_api` mocked uniformly; lease marker regex identical in
+claim/reconcile; status labels `status:<x>`; `/conductor:issue-sync` namespacing.
 
-**Parallel-correctness:** claim/lease built in (T2) though N=1 single loop never calls `claim`
-— enabling multi-loop (Plan: Phase 2 dispatcher) is a config flip, not a rewrite (§7).
+**Parallel-correctness:** claim/lease/stale-reclaim built in though N=1 single loop never calls
+`claim` — enabling multi-loop is a config flip, not a rewrite (§7).
 
 ---
 
 ## Open follow-ups
-- Plan 4 (`/conductor:autodev` + `/conductor:conductor`) calls `reconcile` every fire and
-  `generate`/`convert` at setup / next-plan / deepen-in-place.
+- Plan 4 (`/conductor:autodev` + `/conductor:conductor`) calls `reconcile(now_ts=…, L=…)` every
+  fire and `generate`/`convert` at setup / next-plan / deepen-in-place; `release` on unit
+  completion.

@@ -209,13 +209,23 @@ If you reach for verification mechanics, stop and note it for the next step.
 
 - [ ] **Step 5: Run test to verify it passes** → PASS.
 
-- [ ] **Step 6: Behavioral smoke check (recorded)**
+- [ ] **Step 6: Behavioral smoke check (recorded; requires the plugin INSTALLED + ENABLED)**
 
+This is a real `/spec-craft:expectations` invocation, so spec-craft must be installed and
+enabled in the environment `claude -p` runs in — `claude plugin validate` alone does NOT prove
+invocability (Codex minor). Enable it for local dev first (e.g. add this repo as a local
+marketplace then install: `claude plugin marketplace add .` → `claude plugin install spec-craft`,
+or the project's `.claude/settings.json` plugin config / `--plugin-url`), confirm it lists, and
+only then run the smoke:
 ```bash
+claude plugin list | grep -q spec-craft && echo "spec-craft enabled"   # precondition
 cp tests/fixtures/sample-spec.md /tmp/spec.md
 claude -p --permission-mode bypassPermissions "/spec-craft:expectations /tmp/spec.md" </dev/null
 grep -c "Success scenarios\|Failure scenarios\|Must-nots" /tmp/spec.md   # expect 3
 ```
+If the plugin can't be enabled in this environment, **skip** the behavioral smoke and rely on
+the structural test (Step 2) + `claude plugin validate --strict` (Task 3) — the behavioral check
+is recorded evidence, not a hard gate.
 
 - [ ] **Step 7: Commit**
 
