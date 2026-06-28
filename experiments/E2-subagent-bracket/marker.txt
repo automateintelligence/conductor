@@ -1,0 +1,1 @@
+E2 worker did one unit of work in a fresh subagent context.
