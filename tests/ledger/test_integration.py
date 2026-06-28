@@ -62,20 +62,14 @@ def test_full_ledger_lifecycle() -> None:
         ],
     }
 
-    created_issues: list[int] = []
-    milestone_number: int | None = None
-
     try:
         # --- Step 2: generate hierarchy ---
         result = _sync.generate(repo, plan, gh)
-        milestone_number = result["milestone"]
         phase_a_info = result["phases"][0]
         phase_b_info = result["phases"][1]
         phase_a: int = phase_a_info["number"]
         phase_b: int = phase_b_info["number"]
         sub_issues_a: list[int] = phase_a_info["sub_issues"]
-
-        created_issues = [phase_a, phase_b] + sub_issues_a
 
         # --- Step 3: Assert hierarchy ---
         assert len(sub_issues_a) == 3, f"Expected 3 task issues, got {sub_issues_a}"
@@ -211,19 +205,39 @@ def test_full_ledger_lifecycle() -> None:
         )
 
     finally:
-        # Teardown: close every created issue then delete the milestone.
-        # Must run even if assertions fail, leaving the repo clean.
-        for issue_n in created_issues:
+        # Authoritative teardown: search GitHub for any milestone/issues tagged
+        # with this run's unique runid — robust even if generate() raised mid-way
+        # (orphan-safe).  Does NOT rely on the return value of generate().
+        try:
+            milestones = gh._gh_api(
+                "GET", f"repos/{repo}/milestones?state=all&per_page=100"
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[teardown] WARNING: could not list milestones: {exc}")
+            milestones = []
+        for ms in milestones or []:
+            if runid not in ms.get("title", ""):
+                continue
+            ms_number = ms["number"]
+            ms_title = ms["title"]
             try:
-                gh._gh_api(
-                    "PATCH",
-                    f"repos/{repo}/issues/{issue_n}",
-                    body={"state": "closed"},
+                issues = gh._gh_api(
+                    "GET",
+                    f"repos/{repo}/issues?milestone={ms_number}&state=all&per_page=100",
                 )
-            except Exception:  # noqa: BLE001
-                pass
-        if milestone_number is not None:
-            try:
-                gh._gh_api("DELETE", f"repos/{repo}/milestones/{milestone_number}")
-            except Exception:  # noqa: BLE001
-                pass
+                for issue in issues or []:
+                    try:
+                        gh.close_issue(repo, issue["number"])
+                        print(f"[teardown] closed issue #{issue['number']}")
+                    except Exception as exc:  # noqa: BLE001
+                        print(
+                            f"[teardown] WARNING: could not close issue"
+                            f" #{issue['number']}: {exc}"
+                        )
+                gh._gh_api("DELETE", f"repos/{repo}/milestones/{ms_number}")
+                print(f"[teardown] deleted milestone #{ms_number} ({ms_title!r})")
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[teardown] WARNING: failed to clean milestone"
+                    f" #{ms_number} ({ms_title!r}): {exc}"
+                )
