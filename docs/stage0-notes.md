@@ -113,3 +113,34 @@ issue-sync should use real sub-issues (checklist remains the documented fallback
 
 > Amends §7 issue-sync: pin the `gh api` surface so issue-sync is portable across gh
 > versions; do not depend on `gh issue` / `gh label` subcommand availability.
+
+---
+
+## E. Conductor needs its full skill/plugin stack wherever it runs — Anthropic cloud lacks it
+
+Conductor is an **orchestrator of other skills** (superpowers `/writing-plans`,
+`/subagent-driven-development`, `/code-review`, `/receiving-code-review`,
+`/document-release`; spec-kit `/plan`+`/tasks`; `/codex`). It only runs where that stack
+exists:
+
+- **Locally: fine.** The user's machine has the skills (this build used them). Tier B
+  (local autostart) is unaffected.
+- **Anthropic cloud `/schedule` (Tier A): blocked.** Confirmed — cloud instances do **not**
+  have superpowers / spec-kit, and `/codex` needs a CLI binary that isn't there. A cloud
+  `/conductor` would fail at the first `/writing-plans` / `/subagent-driven-development`
+  call. Vendoring the markdown skills into the repo might cover some, but not the plugin
+  machinery or the codex binary; whether the stack is installable in Anthropic cloud at all
+  is **unverified** (a feasibility spike, not an assumption).
+- **Per-host preconditions (any host):** **(a)** the skill/plugin stack, **(b)** `gh`
+  credentials for the repo, **(c)** model access. None is automatic; each host is
+  provisioned.
+
+**Durable "walk away for days" tier = an always-on host the user controls** (home server,
+own cloud VM, or the workstation/WSL left on), provisioned with the same skill stack and
+driven by Option 1 + Tier B autostart — the *same code path as local*. Anthropic-cloud
+`/schedule` is an optional enhancement, gated on proving skills-in-cloud.
+
+> Amends §2/§4: the cross-session "walk away for days" tier should be a **user-controlled
+> always-on host with the skill stack**, NOT assumed to be Anthropic-cloud `/schedule`
+> (which lacks the stack). Tier A is feasibility-gated — E7 must first verify the
+> skill/plugin/codex stack is even installable in cloud.

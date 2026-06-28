@@ -1,64 +1,53 @@
-# E5 recovery — two tiers, for two different situations
+# E5 recovery — where the always-on loop lives, and how it restarts
 
-The **primary driver** is Option 1: a local `/loop` firing `/autodev` in this machine's
-session (validated E2E — it reached green unattended and self-stopped). "Recovery" just
-answers: *if that driver stops, what restarts it?* There are two situations, and they need
-different answers. **They are complementary, not two ways to build the same thing.**
+The **primary driver** is Option 1: a local `/loop` firing `/autodev` (validated E2E —
+reached green unattended, self-stopped).
 
-Both restart paths re-invoke the **reconcile-first `/conductor`**, which reads the durable
-state (pushed git + GitHub issues + handoff) and continues from the **last pushed point** —
-so unpushed in-flight work is re-derived, not trusted from memory. That is why every
-iteration commits + pushes.
+**Hard precondition — conductor only runs where its skill stack exists.** Conductor
+*orchestrates* other skills (superpowers `/writing-plans`, `/subagent-driven-development`,
+`/code-review`, `/receiving-code-review`, `/document-release`; spec-kit; `/codex`). Any host
+that runs `/conductor` must have **(a)** that skill/plugin stack, **(b)** `gh` credentials
+for the repo, **(c)** model access. This holds locally; it does **not** hold in Anthropic's
+cloud (see Tier A).
 
----
+Both restart paths re-invoke the **reconcile-first `/conductor`** over the durable substrate
+(pushed git + issues + handoff), resuming from the **last pushed point**.
 
-## Tier B — your machine is still available (reboot, Claude crashed, terminal closed)
+## Tier B — same machine, just restart the driver (reboot / crash / closed terminal)
 
-A local OS trigger restarts Claude and re-runs `/conductor`. **No cloud involved.**
-
+OS autostart → `claude -p "/conductor resume" </dev/null`:
 ```cron
-# @reboot crontab
 @reboot sleep 30 && cd /path/to/checkout && \
   claude -p "/conductor resume <spec>" --permission-mode bypassPermissions \
   --no-session-persistence </dev/null >> ~/conductor-resume.log 2>&1
 ```
-(or a systemd user service / login agent running the same `claude -p` line.)
+(or a systemd user service / login agent running the same line.)
 
-**Tested:** a fresh `claude -p` process re-ran reconcile-first `/conductor` and skipped
-every already-done step — clean resume, no double-work. The launcher + reconcile-resume are
-proven; the literal `@reboot`/systemd trigger is provided as a snippet, not reboot-tested.
+**Tested:** a fresh `claude -p` re-ran reconcile-first `/conductor` and skipped every
+already-done step — clean resume, no double-work. The OS trigger is a snippet, not
+reboot-tested. Skills are present locally, so this just works.
 
-If you only need recovery when your machine is on, **Tier B is the whole story** — no cloud.
+## Durable "walk away for days" tier — an always-on host YOU control
 
----
+To keep progress going while your laptop is off, run Option 1 + Tier B on an **always-on
+host you own** — a home server, your own cloud VM, or the workstation/WSL left on —
+provisioned once with the same skill stack + gh creds. It is the **same code path as
+local**; nothing new to validate beyond per-host provisioning. **This is the recommended
+durable tier**, not Anthropic cloud.
 
-## Tier A — your machine is off / unreachable, but you want work to keep going
+## Tier A — Anthropic cloud `/schedule` — BLOCKED on skills-in-cloud
 
-A cloud `/schedule` watchdog fires on a cadence; each fire is a fresh **cloud** container
-that runs `/conductor` (which can start an in-cloud `/loop`) — i.e. **Option 1, in the
-cloud**. It clones the repo from GitHub and continues from the last pushed state.
-
-```
-/schedule every 6h "Ensure /conductor is progressing <spec>; done only when
-`conductor assert run` exits 0. If the local loop died, take over (reconcile-first)."
-```
-
-**When you return and resume locally, two things keep it safe:**
-1. **Correctness — the lease/claim (§7).** Local and cloud share one done-gate and one
-   ledger. Whoever holds the fresh lease on a unit owns it; the other backs off. No
-   double-work even if both run briefly.
-2. **Cost — stand the cloud down.** To stop paying for the cloud once local is back, local
-   resume should delete the `/schedule` routine (a one-line prompt confirmation is fine).
-
-**NOT tested — design only.** Tier A rests on substrate that *is* validated (pushed git +
-issues + handoff + reconcile-first `/conductor`), but the cloud spawn, the cloud agent's
-access to the private repo + `gh` credentials, and the takeover itself would be validated
-in **E7** (cross-session durability); the parallel-lease handling is **E8**. Neither is in
-Stage 0.
-
----
+A cloud `/schedule` fire is a fresh Anthropic-cloud container that would run `/conductor`.
+**Problem (confirmed):** those containers do **not** have superpowers / spec-kit, and
+`/codex` needs a CLI binary that isn't there — so cloud `/conductor` dies at the first
+`/writing-plans` / `/subagent-driven-development` call. Vendoring markdown skills into the
+repo might cover some, not the plugin machinery or the codex binary; whether the stack is
+installable in Anthropic cloud at all is **unverified**. So Tier A is **feasibility-gated**
+(amendment E), not a tier we can assume. *If* it is ever unblocked, overlap with a resumed
+local session is bounded by the ledger lease (§7, E8) for correctness + an explicit
+cloud-stop on local resume for cost.
 
 ## Security note
 `--permission-mode bypassPermissions` lets an unattended worker run git/gh/edits without
-prompts. In production prefer a **scoped tool allowlist** in `settings.json` over a blanket
-bypass, and run in a trusted/sandboxed checkout.
+prompts. Prefer a scoped tool allowlist in `settings.json` over a blanket bypass; run in a
+trusted/sandboxed checkout.

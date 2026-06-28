@@ -16,6 +16,15 @@ executable assertions as the terminal condition.
 >   fix (§3); phase size/retry bounds (§6.1).
 > - **Outstanding:** experiment results (§12); planning/implementation runs in CLI.
 
+> **▶ STAGE 0 COMPLETE (2026-06-28) — READ BEFORE PLANNING.** E0–E5 all passed. Results +
+> evidence: [`docs/stage0-results.md`](../stage0-results.md). Design amendments **A–E** to
+> fold into the plan: [`docs/stage0-notes.md`](../stage0-notes.md). **`/writing-plans` MUST
+> read both** before generating the MVP plan (components 1–7, §11). Headline changes:
+> composition = Option 1 in-session `/loop` (primary) + local **Tier-B autostart**; cloud
+> `/schedule` is **blocked** on skills-in-cloud (amendment E); `/conductor` is
+> reconcile-first/idempotent (B); fresh context via `claude -p`, never `/clear`/`/compact`
+> (A); issue-sync via `gh api` (D).
+
 ---
 
 ## 1. Problem
@@ -484,6 +493,12 @@ Everything else is "re-fire and reconcile." Validated by **E9** (§12).
 > *building conductor itself*; it is **not** a step `/conductor` runs per user-spec
 > (the runtime algorithm in §8 has no experiment step). E5's result **locks the
 > composition (Option 1 vs Option-2-watchdog)** before MVP is planned.
+>
+> **STATUS: Stage 0 COMPLETE (2026-06-28) — E0–E5 all green.** Results + evidence:
+> [`docs/stage0-results.md`](../stage0-results.md); design amendments A–E:
+> [`docs/stage0-notes.md`](../stage0-notes.md). Composition locked to **Option 1
+> (in-session `/loop`) + local Tier-B autostart**; cloud `/schedule` (Tier A) is
+> feasibility-gated on skills-in-cloud (amendment E).
 
 | # | Component | Tier | Notes |
 |---|---|---|---|
@@ -574,3 +589,5 @@ E7–E9 before relying on multi-day / parallel runs.
   `/test-driven-development`, `/using-git-worktrees`, `/dispatching-parallel-agents`,
   `/code-review`, `/receiving-code-review`, `/document-release`;
   `/codex` + `requesting-code-review`; GitHub spec-kit.
+- **Stage 0 (this repo):** `docs/stage0-results.md` — E0–E5 validation results + verdict;
+  `docs/stage0-notes.md` — design amendments A–E from Stage 0, to fold into `/writing-plans`.

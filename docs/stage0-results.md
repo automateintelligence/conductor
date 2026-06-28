@@ -158,17 +158,22 @@ execution contract) + E4 (the real machine done-gate) + the §6 recipe
   `claude -p "/conductor resume"`. **Tested live** — a fresh `claude -p` re-ran
   reconcile-first `/conductor` and skipped every already-done step (clean resume, no
   double-work). The literal `@reboot`/systemd trigger is a snippet, not reboot-tested.
-- **Tier A (cloud — machine off/unreachable: keep going):** cloud `/schedule` fires a fresh
-  container running `/conductor` + in-cloud `/loop` (Option 1 in the cloud), resuming from
-  the last pushed state. **Design only — untested (E7).** Local⇄cloud overlap is bounded by
-  the ledger lease (§7, E8) for correctness and an explicit cloud-stop on local resume for
-  cost.
+- **Durable "walk away for days" tier — an always-on host the user controls** (home server
+  / own VM / workstation or WSL left on), provisioned with the skill stack + gh creds,
+  running Option 1 + Tier B. The **same code path as local**; this is the recommended
+  durable tier.
+- **Tier A (Anthropic cloud `/schedule`): BLOCKED.** The cloud environment lacks the
+  conducted skill stack (no superpowers/spec-kit; `/codex` needs a CLI binary), so a cloud
+  `/conductor` fails at the first `/writing-plans` / `/subagent-driven-development`.
+  Feasibility-gated, not assumed (amendment E). If ever unblocked, local⇄cloud overlap is
+  bounded by the ledger lease (§7, E8) + an explicit cloud-stop on local resume.
 
 **Composition LOCK:** Option 1 (in-session `/loop`) = **primary runtime driver** (validated
-to green, unattended). Tier B = its **tested** local recovery; Tier A = the **designed**
-cross-session tier (substrate validated; soak-test deferred to E7). Complementary tiers,
-not alternatives — one substrate (pushed git + issues + handoff), one entry point
-(reconcile-first `/conductor`).
+to green, unattended). Tier B local autostart = its **tested** restart path. Durable
+multi-day tier = **a user-controlled always-on host** (same code path; provision skills +
+gh creds). Anthropic-cloud `/schedule` (Tier A) is **feasibility-gated — blocked until the
+skill/plugin/codex stack is proven installable in cloud** (amendment E). One substrate
+(pushed git + issues + handoff), one entry point (reconcile-first `/conductor`).
 
 **Verdict:** ≥1 ordering (Option 1) reaches green with zero intervention ✓ →
 composition locked ✓.
