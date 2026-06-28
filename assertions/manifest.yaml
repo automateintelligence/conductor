@@ -1,0 +1,12 @@
+# Assertion runner manifest (design §5.2) — the done-gate interface.
+# Maps each assertion-spec id -> its runnable test (command), with setup, timeout, level.
+# The runner (assertions/run.py, via `conductor assert run`) reads this, runs each
+# command under a hard timeout, and is FAIL-CLOSED: missing/unparseable manifest,
+# a command that cannot execute, a crash, or a timeout => NOT done (non-zero exit).
+assertions:
+  - id: answer-42
+    claim: "answer() returns 42"
+    command: "python3 -m pytest -q assertions/answer/test_answer.py"
+    setup: ""
+    timeout: 30
+    level: spec
