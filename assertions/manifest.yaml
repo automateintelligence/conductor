@@ -10,3 +10,9 @@ assertions:
     setup: ""
     timeout: 30
     level: spec
+  - id: feature-shipped
+    claim: "feature() returns 'SHIPPED'"
+    command: "python3 -m pytest -q assertions/feature/test_feature.py"
+    setup: ""
+    timeout: 30
+    level: spec
