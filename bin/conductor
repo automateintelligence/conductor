@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
-# Minimal `conductor` CLI stub (design §5.2). The done-gate contract command is
-# `conductor assert run`, which execs the assertion runner. exec hands the runner's
-# exit code straight back to the caller (0 = all green; non-zero = fail-closed).
 set -euo pipefail
-
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-if [ "${1:-}" = "assert" ] && [ "${2:-}" = "run" ]; then
-  shift 2
-  exec python3 "$REPO_ROOT/assertions/run.py" "$@"
-fi
-
-echo "usage: conductor assert run" >&2
-exit 64
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+case "${1:-}" in
+  assert) shift; [ "${1:-}" = "run" ] && shift; exec python3 "$HERE/assertions/run.py" "$@" ;;
+  *) echo "usage: conductor assert run [--level spec|phase|task]" >&2; exit 64 ;;
+esac

@@ -4,7 +4,7 @@
 Reads assertions/manifest.yaml, runs each assertion's optional `setup` then its
 `command` under a hard per-assertion timeout, and reports per-assertion + aggregate
 results. Writes machine-readable assertions/run/results.json (id -> {pass, rc,
-duration}) for the ledger/handoff.
+duration, kind}) for the ledger/handoff.
 
 FAIL-CLOSED (critical, design §5.2): a missing/unparseable manifest, a command that
 cannot execute (missing dep / crash), or a timeout is treated as NOT done. The gate
@@ -15,6 +15,8 @@ Exit codes:
     1  >=1 assertion red
     2  manifest missing            (distinct code; clear message)
     3  manifest unparseable / wrong shape
+    4  overall wall-clock timeout exceeded
+    5  no assertions match the requested level
 
 YAML loading uses pyyaml when available but does not hard-depend on it: a minimal
 built-in parser handles the flat manifest schema as a fallback.
@@ -22,14 +24,21 @@ built-in parser handles the flat manifest schema as a fallback.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import time
 
 ASSERTIONS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(ASSERTIONS_DIR)
-MANIFEST = os.path.join(ASSERTIONS_DIR, "manifest.yaml")
+MANIFEST = os.environ.get(
+    "CONDUCTOR_MANIFEST", os.path.join(ASSERTIONS_DIR, "manifest.yaml")
+)
+OVERALL_TIMEOUT = float(os.environ.get("CONDUCTOR_OVERALL_TIMEOUT", "0"))  # 0 = none
+ISOLATE = os.environ.get("CONDUCTOR_ISOLATE", "") not in ("", "0")
 RUN_DIR = os.path.join(ASSERTIONS_DIR, "run")
 RESULTS = os.path.join(RUN_DIR, "results.json")
 
@@ -37,6 +46,8 @@ EXIT_OK = 0
 EXIT_RED = 1
 EXIT_NO_MANIFEST = 2
 EXIT_BAD_MANIFEST = 3
+EXIT_OVERALL_TIMEOUT = 4
+EXIT_NO_MATCH = 5
 
 DEFAULT_TIMEOUT = 60
 
@@ -119,14 +130,14 @@ def load_assertions(path: str) -> list:
     return items
 
 
-def _run(cmd: str, timeout: int):
-    """Run a shell command at repo root. Returns (rc, reason). FAIL-CLOSED on any
-    non-zero/timeout/exception (never silently passes)."""
+def _run(cmd: str, timeout: float, cwd: str = REPO_ROOT):
+    """Run a shell command at the given working directory. Returns (rc, reason).
+    FAIL-CLOSED on any non-zero/timeout/exception (never silently passes)."""
     try:
         proc = subprocess.run(
             cmd,
             shell=True,
-            cwd=REPO_ROOT,
+            cwd=cwd,
             timeout=timeout,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -145,7 +156,20 @@ def write_results(results: dict) -> None:
         json.dump(results, f, indent=2, sort_keys=True)
 
 
+def _overall_fail(results: dict) -> int:
+    write_results(results)
+    print("SUMMARY: overall wall-clock exceeded -> gate NOT done (exit 4)")
+    return EXIT_OVERALL_TIMEOUT
+
+
+def _remaining(deadline: float | None) -> float | None:
+    return None if deadline is None else (deadline - time.monotonic())
+
+
 def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--level", choices=["spec", "phase", "task"], default=None)
+    args, _ = ap.parse_known_args()
     try:
         assertions = load_assertions(MANIFEST)
     except ManifestMissing:
@@ -158,38 +182,76 @@ def main() -> int:
         print(f"[GATE] FAIL: manifest unparseable: {exc}")
         print("SUMMARY: gate NOT done (manifest unparseable) -> exit 3")
         return EXIT_BAD_MANIFEST
+    if args.level:
+        assertions = [
+            a for a in assertions if str(a.get("level", "spec")) == args.level
+        ]
+        if not assertions:  # Codex #1: empty != done
+            write_results({})
+            print(f"[GATE] FAIL: no assertions at level '{args.level}'")
+            print("SUMMARY: gate NOT done (no matching assertions) -> exit 5")
+            return EXIT_NO_MATCH
 
-    results: dict = {}
-    passed = 0
+    deadline = time.monotonic() + OVERALL_TIMEOUT if OVERALL_TIMEOUT else None
+    results, passed = {}, 0
     for a in assertions:
-        aid = str(a["id"])
-        command = str(a["command"])
+        aid, command = str(a["id"]), str(a["command"])
         setup = str(a.get("setup", "") or "")
-        timeout = int(a.get("timeout", DEFAULT_TIMEOUT))
-
+        teardown = str(a.get("teardown", "") or "")
+        kind = str(a.get("kind", "example"))
+        timeout = float(a.get("timeout", DEFAULT_TIMEOUT))
+        workdir = tempfile.mkdtemp(prefix=f"assert-{aid}-") if ISOLATE else REPO_ROOT
         start = time.monotonic()
-        if setup:
-            rc, reason = _run(setup, timeout)
-            if rc != 0:
-                reason = f"setup-failed({reason})"
-                duration = round(time.monotonic() - start, 3)
+        try:
+            # setup (if any) then command — each capped by the REAL remaining budget (no round-up),
+            # with a deadline re-check AFTER every return (Codex #2: strict wall-clock).
+            failed_reason = None
+            for is_setup, cmd in ([(True, setup)] if setup else []) + [
+                (False, command)
+            ]:
+                rem = _remaining(deadline)
+                if rem is not None and rem <= 0:
+                    return _overall_fail(results)
+                eff = (
+                    timeout if rem is None else min(timeout, rem)
+                )  # float; NOT max(1, ...)
+                rc, reason = _run(cmd, eff, workdir)
+                if deadline is not None and time.monotonic() > deadline:
+                    results[aid] = {
+                        "pass": False,
+                        "rc": 124,
+                        "kind": kind,
+                        "duration": round(time.monotonic() - start, 3),
+                        "reason": "overall-timeout",
+                    }
+                    print(f"[FAIL] {aid} (reason=overall-timeout)")
+                    return _overall_fail(results)
+                if rc != 0:
+                    failed_reason = f"setup-failed({reason})" if is_setup else reason
+                    results[aid] = {
+                        "pass": False,
+                        "rc": rc,
+                        "kind": kind,
+                        "duration": round(time.monotonic() - start, 3),
+                        "reason": failed_reason,
+                    }
+                    print(f"[FAIL] {aid} (rc={rc}, reason={failed_reason})")
+                    break
+            if failed_reason is None:
                 results[aid] = {
-                    "pass": False,
-                    "rc": rc,
-                    "duration": duration,
-                    "reason": reason,
+                    "pass": True,
+                    "rc": 0,
+                    "kind": kind,
+                    "duration": round(time.monotonic() - start, 3),
+                    "reason": "ok",
                 }
-                print(f"[FAIL] {aid} (rc={rc}, reason={reason})")
-                continue
-        rc, reason = _run(command, timeout)
-        duration = round(time.monotonic() - start, 3)
-        ok = rc == 0
-        results[aid] = {"pass": ok, "rc": rc, "duration": duration, "reason": reason}
-        if ok:
-            passed += 1
-            print(f"[PASS] {aid}")
-        else:
-            print(f"[FAIL] {aid} (rc={rc}, reason={reason})")
+                print(f"[PASS] {aid}")
+                passed += 1
+        finally:
+            if teardown:
+                _run(teardown, 5, workdir)  # best-effort cleanup
+            if ISOLATE and workdir != REPO_ROOT:
+                shutil.rmtree(workdir, ignore_errors=True)
 
     write_results(results)
     total = len(assertions)
