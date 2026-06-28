@@ -35,10 +35,16 @@ def claim(repo: str, n: int, worker: str, now_ts: int, ttl: int, gh: Any) -> boo
     if not eligible(gh.issue_state(repo, n)):
         return False
     gh.assign(repo, n, worker)
-    if gh.issue_state(repo, n)["assignees"] != [worker]:  # lost the race (Codex #2)
+    confirm = gh.issue_state(repo, n)
+    if confirm["assignees"] != [worker]:  # lost the race (Codex #2)
         gh.unassign(repo, n, worker)  # back off; no status/lease touched yet
         return False
-    gh.set_labels(repo, n, add=["status:in-progress"], remove=["status:ready"])
+    gh.set_labels(
+        repo,
+        n,
+        add=["status:in-progress"],
+        remove=[lbl for lbl in confirm["labels"] if lbl.startswith("status:")],
+    )
     renew_lease(repo, n, worker, now_ts, gh)
     return True
 

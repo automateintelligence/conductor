@@ -16,6 +16,9 @@ def test_eligible_only_when_unassigned_and_open():
     assert not claim.eligible(
         {"assignees": [], "labels": ["status:done"], "state": "closed"}
     )
+    assert not claim.eligible(  # Fix 3: dep-blocked must be excluded (design §7)
+        {"assignees": [], "labels": ["dep-blocked"], "state": "open"}
+    )
 
 
 def test_lease_staleness():
@@ -66,6 +69,23 @@ def test_claim_lost_race_backs_off_with_no_residue():  # Codex #2
     gh.unassign.assert_called_once_with("o/r", 1, "me")  # backed off
     gh.set_labels.assert_not_called()
     gh.set_body.assert_not_called()  # NO status/lease residue
+
+
+def test_claim_draft_phase_clears_draft_label():  # Fix 1: all status:* removed, not just status:ready
+    gh = MagicMock()
+    gh.issue_state.side_effect = [
+        {"assignees": [], "labels": ["status:draft"], "state": "open"},  # eligible
+        {
+            "assignees": ["me"],
+            "labels": ["status:draft"],
+            "state": "open",
+        },  # sole owner confirm
+    ]
+    gh.get_body.return_value = ""
+    assert claim.claim("o/r", 2, "me", now_ts=10, ttl=900, gh=gh) is True
+    call_kwargs = gh.set_labels.call_args
+    assert call_kwargs.kwargs["add"] == ["status:in-progress"]
+    assert "status:draft" in call_kwargs.kwargs["remove"]
 
 
 def test_release_unassigns_and_clears_lease():

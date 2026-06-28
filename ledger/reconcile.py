@@ -1,3 +1,4 @@
+import time
 from typing import Any
 
 from ledger import claim
@@ -9,13 +10,15 @@ def reconcile(
     *,
     tests_red: bool,
     pr_merged: bool,
-    commits_since_baseline: int,
+    commits_since_baseline: int,  # reserved: Plan-4 §7 git-commits precedence leg; not yet consumed by any repair
     retries: int,
     R: int,
     gh: Any,
     now_ts: int | None = None,
     L: int = 900,
 ) -> dict[str, Any]:
+    if now_ts is None:
+        now_ts = int(time.time())
     st = gh.issue_state(repo, n)
     labels = set(st["labels"])
     status = next((lbl for lbl in labels if lbl.startswith("status:")), None)

@@ -19,7 +19,7 @@ def parse_plan_md(text: str) -> dict[str, Any]:
         )
         phase_positions.append(m.end())
 
-    for idx, (phase, pos) in enumerate(zip(phases, phase_positions)):
+    for phase, pos in zip(phases, phase_positions):
         # Determine the end of this phase's section (start of next H2 or EOF)
         next_h2 = _H2.search(text, pos)
         section_end = next_h2.start() if next_h2 else len(text)
