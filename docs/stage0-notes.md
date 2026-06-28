@@ -86,3 +86,23 @@ be an OS-level autostart, not a harness cron. `/schedule` is the **cloud** watch
 > Amends §10: split "loop/conductor dies" into local-autostart vs cloud-`/schedule`
 > recovery; both re-invoke a reconcile-first `/conductor`. Local-autostart demonstrated
 > in E5.
+
+---
+
+## D. issue-sync must use `gh api`, not `gh issue` / `gh label` subcommands
+
+The environment pins **gh 2.4.0**, which has **no `gh label` command** and **no `gh issue`
+sub-issue subcommands**. E3 confirmed the GitHub REST API works fine through `gh api`
+regardless of CLI age (gh just proxies HTTP):
+
+- **labels:** `gh api -X POST repos/<o>/<r>/labels -f name=… -f color=…` (idempotent — PATCH
+  the label on a 422 "already exists").
+- **sub-issues:** `gh api --method POST repos/<o>/<r>/issues/<parent>/sub_issues -F sub_issue_id=<child DB id>`
+  — note `-F` (typed **integer**) and the child's **database id** (`.id`), NOT its display
+  number. Verify with `…/issues/<parent>/sub_issues` and `.sub_issues_summary.total`.
+
+Sub-issues are the design's preferred Tasks representation (§7) and they **work** here, so
+issue-sync should use real sub-issues (checklist remains the documented fallback).
+
+> Amends §7 issue-sync: pin the `gh api` surface so issue-sync is portable across gh
+> versions; do not depend on `gh issue` / `gh label` subcommand availability.
