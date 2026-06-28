@@ -154,15 +154,35 @@ Confirmed (claude-code-guide + on-disk plugin layout + Codex review of Plan 1): 
 not the command. Consequences for conductor (a plugin, §2.1/§11):
 
 - The design doc's bare `/conductor`, `/autodev`, `/expectations`, `/executable-assertions`
-  are **shorthand**. The real invocations are `/conductor:conductor` (supervisor — there is
-  **no** bare `/conductor` for a plugin), `/conductor:autodev`, `/conductor:expectations`,
-  `/conductor:executable-assertions`, `/conductor:assertions-to-tests`, `/conductor:issue-sync`.
+  are **shorthand**. Real invocations: `/conductor:conductor` (supervisor — there is **no**
+  bare `/conductor` for a plugin), `/conductor:autodev`, `/conductor:assertions-to-tests`,
+  `/conductor:issue-sync`. The two spec-authoring skills live in a **separate standalone
+  plugin `spec-craft`** (amendment G): `/spec-craft:expectations`,
+  `/spec-craft:executable-assertions`.
 - **No command aliases** exist; a skill can only invoke another skill internally.
 - Conducted external skills keep their own namespace: `/superpowers:test-driven-development`,
   `/superpowers:subagent-driven-development`, etc.
 - Layout: manifest at `.claude-plugin/plugin.json` (`name` required; rest optional);
   `skills/` and `commands/` auto-discovered. Validate with `claude plugin validate ./ [--strict]`.
 
-> Amends §3/§6/§11 naming: read every bare `/x` for a conductor-owned skill as
-> `/conductor:x`. If bare names are ever required, conductor must ship as **standalone
-> skills** (`.claude/skills/`), not a plugin — but that loses single-plugin install (§2.1).
+> Amends §3/§6/§11 naming: read every bare `/x` for a conductor-owned skill as `/conductor:x`
+> (the two spec-authoring skills are `/spec-craft:x` — amendment G). If bare names are ever
+> required, that plugin must ship as **standalone skills** (`.claude/skills/`), not a plugin —
+> but that loses single-plugin install (§2.1).
+
+---
+
+## G. Spec-authoring skills extracted into a standalone `spec-craft` plugin
+
+Decision (Jeff): components 1–2 (`expectations`, `executable-assertions`) must be usable in
+ANY project independent of conductor. They are extracted into a separate, standalone plugin
+**`spec-craft`** (`/spec-craft:expectations`, `/spec-craft:executable-assertions`), its own
+repo `automateintelligence/spec-craft`, with **no dependency on conductor**. The `conductor`
+plugin declares **`dependencies: ["spec-craft"]`** (a natively-supported manifest field —
+verified via claude-code-guide), so installing conductor auto-installs spec-craft and its
+skills are available to the recipe. spec-craft stays conductor-agnostic; conductor's done-gate
+(runner + `/conductor:assertions-to-tests`) consumes spec-craft's 4-part specs.
+
+> Amends §11: components 1–2 ship as the standalone `spec-craft` plugin (not conductor
+> skills); conductor depends on it. Build order: Plan 1 = spec-craft; Plan 2 = conductor
+> done-gate; then ledger (Plan 3); then `/conductor:autodev` + `/conductor:conductor` (Plan 4).
