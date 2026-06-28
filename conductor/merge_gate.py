@@ -54,15 +54,26 @@ def _unresolved_threads(repo: str, pr: int) -> list[str]:
     return [ln for ln in out.stdout.splitlines() if ln.strip()]
 
 
+def _remote_for(repo: str, run: Any = subprocess.run) -> str:
+    """Pick the git remote whose URL points at <owner/repo>; fall back to 'origin'."""
+    out = run(["git", "remote", "-v"], capture_output=True, text=True)
+    for line in (out.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and repo in parts[1]:
+            return parts[0]
+    return "origin"
+
+
 def _merge_ref_verify(
     repo: str, pr: int, local_verify: str, run: Any = subprocess.run
 ) -> bool:
     """§6.2: re-verify on the ACTUAL merge ref (base+PR merged), not the current workspace."""
+    remote = _remote_for(repo, run)
     wt = tempfile.mkdtemp(prefix=f"mergeref-{pr}-")
     try:
         if (
             run(
-                f"git fetch origin refs/pull/{pr}/merge && git worktree add --detach {wt} FETCH_HEAD",
+                f"git fetch {remote} refs/pull/{pr}/merge && git worktree add --detach {wt} FETCH_HEAD",
                 shell=True,
             ).returncode
             != 0

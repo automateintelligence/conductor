@@ -13,10 +13,11 @@ re-fires you; only a green done-gate (or an explicit escalation-halt) stops the 
 2. **RECONCILE (precedence git/tests > PR > label).** `ledger.reconcile(phase, ..., now_ts, L)`.
    On `stale-lease-reclaim`, **reset that phase's retry counter**. PROGRESS SELF-CHECK.
 3. **SPEC-DONE GATE.** `conductor assert run --level spec` (fail-closed; unrunnable = NOT done).
-   **All green AND no plans left** → mark done, `CronDelete` the loop, final handoff, STOP.
+   **All green AND no plans left** → mark done, use **`CronList`** to find the driver cron, then
+   **`CronDelete`** it, final handoff, STOP.
 4. **PICK the next eligible phase** (unassigned & not blocked/done; climb the ladder):
    - phase available → SPLIT-CHECK (§6.1); else run the recipe.
-   - plan done → `/superpowers:writing-plans` next plan → `ledger.generate`.
+   - plan done → `/superpowers:writing-plans` next plan → `ledger.generate` (or `ledger.convert`).
    - no plans left but assertions red → `/superpowers:writing-plans` to close the gap → generate.
 5. **CLAIM.** `ledger.claim(phase, worker, now_ts, ttl)`. If False, back off and re-pick.
 6. **EXECUTE the phase in a FRESH SUBAGENT** via the recipe (one PR per phase). Conducted skills:
@@ -39,4 +40,5 @@ re-fires you; only a green done-gate (or an explicit escalation-halt) stops the 
    human judgment → **halt** with handoff+issue (only branch that pages the user). Process failure
    → exit; next fire reconciles (§10).
 8. **RECORD.** label/progress; commit; update `plan.md` index; renew or `ledger.release` the lease.
-9. **WRITE HANDOFF (§4)** (`conductor.handoff.write`) + commit + **push**. EXIT.
+9. **WRITE HANDOFF (§4)** (`conductor.handoff.write`) to `.conductor/` (gitignored — local resume
+   scratch only); then commit + **push** the code changes and ledger state. EXIT.

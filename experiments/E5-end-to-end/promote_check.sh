@@ -2,8 +2,10 @@
 # promote_check.sh — Recorded agent smoke for Conductor E2E (E5).
 #
 # GATED: set RUN_CONDUCTOR_E2E=1 to run; otherwise exits 0 with a skip message.
-# PURPOSE: drive the REAL conductor skills in a TEMP working copy (no repo mutation),
-#   confirming the full autodev loop and idempotent re-run.
+# PURPOSE: drive the REAL conductor skills in a TEMP working copy of the working tree.
+#   NOTE: the WORKING TREE is an isolated temp copy, but the copied .git shares the REAL
+#   remote — a real run (RUN_CONDUCTOR_E2E=1) pushes branches, opens PRs, and merges
+#   against the live repo. Run only where that is intended.
 #
 # DO NOT run this script in CI or automated gates — it spawns claude and registers
 # a cron job, so it requires an interactive session with claude CLI configured.
@@ -41,8 +43,9 @@ echo "[E5 SMOKE] REPO_ROOT=$REPO_ROOT"
 echo "[E5 SMOKE] WORKDIR=$WORKDIR"
 echo "[E5 SMOKE] Evidence will be written to $EVIDENCE_DIR"
 
-# Copy the conductor repo into the temp working copy so skills run against
-# an isolated tree and cannot mutate the real repo.
+# Copy the conductor working tree into the temp directory so skills run against
+# an isolated copy of the files; however the copied .git still points at the real
+# remote (push/PR/merge operations affect the live repo — see header).
 cp -r "$REPO_ROOT/." "$WORKDIR/repo/"
 cd "$WORKDIR/repo"
 

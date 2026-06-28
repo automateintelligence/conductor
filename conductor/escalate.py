@@ -12,7 +12,8 @@ def file_followup(
     link_issue: int | None = None,
     gh: Any = _gh,
 ) -> int:
-    assert kind in ("debt", "feature")
+    if kind not in ("debt", "feature"):
+        raise ValueError(f"kind must be 'debt' or 'feature', got {kind!r}")
     gh.ensure_label(repo, kind)
     issue = gh.create_issue(repo, title, body, labels=[kind])
     if link_issue:

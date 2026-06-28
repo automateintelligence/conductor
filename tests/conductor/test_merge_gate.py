@@ -1,4 +1,25 @@
+from types import SimpleNamespace
+
 from conductor import merge_gate
+
+
+def _fake_run(stdout: str):
+    """Return a callable that mimics subprocess.run, returning stdout as given."""
+
+    def run(args, **kwargs):
+        return SimpleNamespace(stdout=stdout, returncode=0)
+
+    return run
+
+
+def test_remote_for_matches_named_remote():
+    remote_v = "github\thttps://github.com/o/r.git (fetch)\ngithub\thttps://github.com/o/r.git (push)\n"
+    assert merge_gate._remote_for("o/r", run=_fake_run(remote_v)) == "github"
+
+
+def test_remote_for_falls_back_to_origin():
+    remote_v = "upstream\thttps://github.com/other/repo.git (fetch)\n"
+    assert merge_gate._remote_for("o/r", run=_fake_run(remote_v)) == "origin"
 
 
 def _clean():

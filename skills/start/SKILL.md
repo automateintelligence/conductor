@@ -20,8 +20,9 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    AND the runner exit ∈ {0,1} (Codex #3). Otherwise (re)build it.
 4. **Plan exists?** No → `/superpowers:writing-plans` (or spec-kit), fresh subagent. SKIP if a plan/milestone exists.
 5. **issue-sync** — `ledger.generate` (or `convert`). SKIP if the hierarchy exists; else reconcile.
-6. **Record `/goal`** (`conductor goal set`) and **start the driver:** register cron
-   `/loop /conductor:autodev`. SKIP if already registered.
+6. **Record `/goal`** (`conductor goal set`) and **start the driver:** register a harness cron
+   via **`CronCreate`** that fires `/conductor:autodev` on the interval (a `/loop /conductor:autodev`
+   cadence); record its id. SKIP if already registered.
 7. **(Phase 2 only)** start the dispatcher loop.
 
 A restart = re-invoke `/conductor:start` → it reconciles and resumes (amendment C).
