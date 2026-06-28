@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock, patch
+
 from ledger import gh
 
 
@@ -43,3 +45,39 @@ def test_add_sub_issue_typed_int_db_id(monkeypatch):
         "repos/o/r/issues/1/sub_issues",
         {"sub_issue_id": 4761391764},
     )
+
+
+def test_gh_api_error_includes_response_body():
+    fake_result = MagicMock()
+    fake_result.returncode = 1
+    fake_result.stderr = "gh: Validation Failed (HTTP 422)"
+    fake_result.stdout = '{"errors":[{"code":"already_exists"}]}'
+
+    with patch("ledger.gh.subprocess.run", return_value=fake_result):
+        try:
+            gh._gh_api("POST", "repos/o/r/labels", body={"name": "x"})
+            assert False, "expected RuntimeError"
+        except RuntimeError as e:
+            assert "already_exists" in str(e)
+
+
+def test_ensure_label_idempotent_on_already_exists(monkeypatch):
+    def raise_already_exists(method, path, body=None, jq=None):
+        raise RuntimeError("gh api POST repos/o/r/labels failed: already_exists")
+
+    monkeypatch.setattr(gh, "_gh_api", raise_already_exists)
+    gh.ensure_label("o/r", "status:ready")  # must not raise
+
+
+def test_ensure_label_reraises_other_errors(monkeypatch):
+    def raise_server_error(method, path, body=None, jq=None):
+        raise RuntimeError(
+            "gh api POST repos/o/r/labels failed: some other failure (HTTP 500)"
+        )
+
+    monkeypatch.setattr(gh, "_gh_api", raise_server_error)
+    try:
+        gh.ensure_label("o/r", "x")
+        assert False, "expected RuntimeError"
+    except RuntimeError:
+        pass

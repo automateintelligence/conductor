@@ -13,7 +13,8 @@ def _gh_api(method: str, path: str, body: Any = None, jq: str | None = None) -> 
         stdin = json.dumps(body)
     out = subprocess.run(cmd, input=stdin, capture_output=True, text=True)
     if out.returncode != 0:
-        raise RuntimeError(f"gh api {method} {path} failed: {out.stderr.strip()}")
+        detail = " ".join(p for p in (out.stderr.strip(), out.stdout.strip()) if p)
+        raise RuntimeError(f"gh api {method} {path} failed: {detail}")
     if jq:
         return out.stdout.rstrip("\n")
     return json.loads(out.stdout) if out.stdout.strip() else None
