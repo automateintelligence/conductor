@@ -22,7 +22,8 @@ something half-finished. Conductor is built to remove each of those failure mode
 
 - **Done is a machine check, not a vibe.** The run ends only when `conductor assert run
   --level spec` exits 0 — real tests derived from your spec's assertions. The gate is
-  fail-closed: a missing or unrunnable gate counts as NOT done, never as done-by-default.
+  fail-closed (a missing or unrunnable gate counts as NOT done), and it is *frozen* at setup
+  so the worker can't weaken a check to fake done ([why](#why-the-worker-cant-cheat-the-gate)).
 - **It cannot quit early or wander.** The clock is external (a cron `/loop`), the goal is
   re-loaded from durable state on every fire, and the worker never ends the run itself. It
   works one phase, writes a handoff, and exits. The next tick picks up from ground truth.
@@ -58,6 +59,7 @@ SETUP  (you run this once)
     └─ /conductor:start <spec>   ── the supervisor; idempotent, reconcile-first ───┐
          0. conductor preflight ........... does every conducted skill resolve? (fail-closed)
          1. /conductor:assertions-to-tests  → assertions/manifest.yaml + RED tests  = the DONE-GATE
+            conductor gate freeze .......... snapshot + commit the gate (FROZEN; worker can't weaken it)
          2. /superpowers:writing-plans .... plan.md (phases → tasks)        [only if no plan yet]
          3. /conductor:issue-sync ......... GitHub milestone + phase issues + task sub-issues + labels
          4. conductor goal set ............ the durable target
@@ -89,6 +91,45 @@ Roles compose, they do not nest: `/conductor:start` is the supervisor you invoke
 `/conductor:autodev` is the worker the clock fires, the goal is the target, and the
 schedule is the clock. The full design lives in
 [`docs/specs/2026-06-28-autodev-design.md`](docs/specs/2026-06-28-autodev-design.md).
+
+### Why the clock is external
+
+An in-process loop would let the agent decide when it is done, let context bloat across
+iterations, and die when the process dies. An external cron `/loop` inverts all three: the
+worker cannot end the run (only a green gate or a halt does), every tick starts from durable
+ground truth in a fresh context, and a crash costs exactly one tick — the next fire
+reconciles from git and the issue ledger and continues.
+
+---
+
+## Why the worker can't cheat the gate
+
+"Done is a machine check" only holds if the check itself can't be quietly weakened. The
+worker writes product code *and* could, in principle, edit the done-gate tests in the same
+loop — turning a red assertion green by gutting the test instead of satisfying it. Conductor
+stops that mechanically:
+
+- **The gate is frozen at setup.** After `/conductor:start` builds the done-gate from your
+  human-confirmed assertions, `conductor gate freeze` records a digest baseline
+  (`assertions/.frozen`, committed) of every assertion's manifest entry and the test files
+  its command references.
+- **The runner fail-closes on tamper.** Before running, `conductor assert run` verifies the
+  baseline; if a frozen assertion's entry or test file changed, or an assertion was removed,
+  it exits `6` (done-gate tampered = NOT done). The worker can't reach green by weakening a
+  check — it has to implement the product.
+- **Adding is allowed, weakening is not.** Closing a genuine coverage gap *adds* new
+  assertions via `/conductor:assertions-to-tests`; frozen ones can't be edited or deleted.
+  Product code that a test merely imports is not frozen, so the worker still writes it.
+- **The baseline is git-tracked.** Editing `.frozen` itself to launder a weakened check shows
+  up in the PR diff, where `/codex` review and `conductor merge-gate`'s unresolved-thread
+  block can catch it. That last hop is review, not a mechanical proof — it is the one place
+  the gate's integrity still leans on a reviewer, and it is named here on purpose.
+
+This is distinct from the **merge-gate**. `conductor merge-gate <pr>` is per-PR merge
+*safety* (not a draft, mergeable, clean state, no changes-requested, no unresolved threads,
+and a verify command re-run on the real merge ref); its default verify is `pytest -q`, the
+project's test suite, **not** `conductor assert run --level spec`. The merge-gate guards each
+merge; the done-gate defines whole-spec completion. They are different checks.
 
 ---
 
@@ -161,7 +202,9 @@ Start from a spec file. Give it a checkable definition of done:
 
 See the [spec-craft README](https://github.com/automateintelligence/spec-craft) for what
 these produce. Conductor needs the assertions; `/conductor:start` stops and points you
-here if they are missing.
+here if they are missing. spec-craft stays runner-agnostic and emits an assertion `kind`;
+conductor is the runner that maps that `kind` onto the gate's `level` — the `level` column
+in `assertions/manifest.yaml` is that handoff boundary working as designed, not a leak.
 
 ### 2. Start the run
 
@@ -193,6 +236,28 @@ gate is green and no plans remain, the worker deletes its own cron and stops.
 - **Stop it early:** `CronList` then `CronDelete` the driver cron (the worker does this
   itself on completion).
 
+When the worker halts on `needs human judgment`, the handoff *is* the recoverable note —
+what it did, why it stopped, and the exact command to resume:
+
+```
+# Conductor handoff
+
+**Goal / done:** URL shortener passes its spec  (done = `conductor assert run --level spec` exits 0)
+
+**Reference docs:** spec=specs/shortener.md; expectations=specs/shortener.md#expectations;
+assertions=assertions/manifest.yaml; plan-index=plan.md; ADRs=docs/ADR/
+
+**Active:** plan=plan.md; milestone=#12; phase issue #18 (status:blocked)
+
+**Last unit:** a1b2c3d..e4f5a6b — implemented the redirect handler; expiry rule still undecided
+**Next unit:** HALTED — needs human judgment: the spec doesn't say whether an expired link 404s or 410s
+
+**Open:** debt=#21 feature=#22 blocked=#18
+**Branch/worktree:** phase-18-redirects
+
+**Resume:** `claude -p '/conductor:start specs/shortener.md'`
+```
+
 ---
 
 ## CLI reference
@@ -201,13 +266,14 @@ The `conductor` command (`bin/conductor`) fronts the Python modules.
 
 | Command | What it does |
 |---|---|
-| `conductor assert run [--level spec\|phase\|task]` | Run the done-gate. Exit `0` all green, `1` ≥1 red, `2` manifest missing, `3` manifest unparseable, `4` overall timeout, `5` no matching assertions / bad args. Fail-closed by design. |
+| `conductor assert run [--level spec\|phase\|task]` | Run the done-gate. Exit `0` all green, `1` ≥1 red, `2` manifest missing, `3` manifest unparseable, `4` overall timeout, `5` no matching assertions / bad args, `6` done-gate tampered. Fail-closed by design. |
 | `conductor ledger generate <plan.json>` | Create the GitHub milestone + phase issues + task sub-issues + labels from a plan dict. |
 | `conductor ledger convert <plan.md>` | Parse a Markdown plan (`# Title` / `## Phase [status]` / `- [ ] task`), then generate. |
 | `conductor ledger reconcile <issue#> [--tests-red] [--pr-merged] [--commits N] [--retries N] [-R N] [--now-ts N] [-L N]` | Apply the §7 reconcile rules (precedence git/tests > PR > label); returns `{action, new_status}`. |
 | `conductor goal set <text...>` / `conductor goal get` | Record / read the durable goal (`.conductor/goal.md`). |
 | `conductor preflight` | Static availability gate: every conducted skill resolves, else exit 1. |
 | `conductor merge-gate <pr>` | Autonomous merge safety gate (see below); exit 0 ok, 1 blocked. |
+| `conductor gate {freeze\|verify}` | Freeze the done-gate at setup / verify it is unchanged. The runner enforces this — see [Why the worker can't cheat the gate](#why-the-worker-cant-cheat-the-gate). |
 
 `conductor merge-gate` blocks a merge on any of: draft PR, merge state not `CLEAN`,
 mergeable not `MERGEABLE`, review decision `CHANGES_REQUESTED`, unresolved review threads,
@@ -245,14 +311,36 @@ CLI subcommands.
 | `conductor/handoff.py` | Durable handoff writer (§4). |
 | `conductor/escalate.py` | Escalation: follow-up issues, sub-plan blocks, ADRs (§9). |
 | `conductor/start_probe.py` | Idempotency probe for `/conductor:start`. |
+| `conductor/freeze.py` | Done-gate freeze guard: snapshot + verify gate integrity (§5). |
 | `docs/specs/2026-06-28-autodev-design.md` | The full design. |
 | `docs/plans/` | The build plans (1: spec-craft, 2: done-gate, 3: ledger, 4: autodev+start). |
+
+---
+
+## Cost and footprint
+
+Each tick is one phase executed in a fresh subagent, so cost scales with the number of
+phases, not with how long you leave it running. A tick with nothing to do is cheap: it
+re-loads the goal, reconciles, runs the done-gate, and exits without spawning the
+implementation subagent. The expensive ticks are the ones that actually build a phase
+(subagent-driven-development + reviews + merge). A stalled run (gate already green, or
+waiting on a halt) costs about a reconcile and a gate run per tick. Pick the cron interval
+to trade how fast phases get attempted against how much idle polling you want to pay for.
 
 ---
 
 ## Status
 
 The MVP is built and merged: the four `/conductor:*` skills, the `conductor` and `ledger`
-Python packages, and the done-gate runner. The end-to-end loop has reached green
-unattended and self-stopped in the recorded smoke test
-(`experiments/E5-end-to-end/promote_check.sh`, gated behind `RUN_CONDUCTOR_E2E=1`).
+Python packages, the done-gate runner, and the gate-freeze guard.
+
+Covered by deterministic tests: the assertion runner and its fail-closed exit codes
+(including freeze-tamper → exit 6), the ledger (claim/lease, §7 reconcile, issue sync), the
+merge-gate, escalation, the handoff writer, `/conductor:start`'s reconcile/idempotency probe,
+and stale-lease reclaim (the logic underneath crash-resume).
+
+Not yet in the deterministic suite: the full unattended cron loop end to end, and a
+real-process crash-and-resume. Those were exercised once by the gated recorded smoke
+(`experiments/E5-end-to-end/promote_check.sh`, behind `RUN_CONDUCTOR_E2E=1`), which reached
+green unattended and self-stopped. Read "runs overnight unattended" as validated by that one
+smoke run plus the unit-tested reconcile logic, not by a broad soak.
