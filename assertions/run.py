@@ -138,8 +138,9 @@ def _run(cmd: str, timeout: float, cwd: str = REPO_ROOT):
     FAIL-CLOSED on any non-zero/timeout/exception (never silently passes)."""
     try:
         proc = subprocess.run(
-            cmd,
+            "set -o pipefail\n" + cmd,
             shell=True,
+            executable="/bin/bash",
             cwd=cwd,
             timeout=timeout,
             stdout=subprocess.PIPE,
@@ -235,7 +236,13 @@ def main() -> int:
         setup = str(a.get("setup", "") or "")
         teardown = str(a.get("teardown", "") or "")
         kind = str(a.get("kind", "example"))
-        timeout = float(a.get("timeout", DEFAULT_TIMEOUT))
+        try:
+            timeout = float(a.get("timeout", DEFAULT_TIMEOUT))
+        except (TypeError, ValueError):
+            write_results({})
+            print(f"[GATE] FAIL: assertion {aid} has non-numeric timeout")
+            print("SUMMARY: gate NOT done (manifest unparseable) -> exit 3")
+            return EXIT_BAD_MANIFEST
         workdir = tempfile.mkdtemp(prefix=f"assert-{aid}-") if ISOLATE else REPO_ROOT
         start = time.monotonic()
         try:

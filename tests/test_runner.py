@@ -289,3 +289,22 @@ def test_freeze_guard_allows_intact_done_gate(tmp_path):  # gate-integrity (§5)
         RUN, env=_env(tmp_path, CONDUCTOR_FREEZE_BASELINE=baseline), cwd=ROOT
     )
     assert p.returncode == 0  # intact baseline -> runs normally, gate green
+
+
+def test_piped_failure_is_red(tmp_path):  # review: shell pipefail
+    # a failing command in a pipe must make the gate RED, not be masked by the last stage.
+    _manifest(
+        tmp_path,
+        'assertions:\n  - id: p\n    command: "false | cat"\n    level: spec\n',
+    )
+    p = subprocess.run(RUN, env=_env(tmp_path), cwd=ROOT)
+    assert p.returncode == 1  # piped failure -> red, not a false green
+
+
+def test_non_numeric_timeout_is_exit_3(tmp_path):  # review: manifest hygiene
+    _manifest(
+        tmp_path,
+        'assertions:\n  - id: a\n    command: "true"\n    timeout: "soon"\n    level: spec\n',
+    )
+    p = subprocess.run(RUN, env=_env(tmp_path), cwd=ROOT)
+    assert p.returncode == 3  # unparseable timeout -> manifest invalid, not a crash
