@@ -13,3 +13,8 @@ node_modules/
 .ruff_cache/
 .mypy_cache/
 .pyright/
+
+# Coverage (pytest-cov)
+.coverage
+.coverage.*
+htmlcov/
