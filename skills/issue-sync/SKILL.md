@@ -26,6 +26,10 @@ If the sub-issue API is unavailable, `generate` falls back to writing a checklis
 
 Returns `{milestone, phases: [{number, sub_issues: [int, ...], fallback}]}`.
 
+**Idempotent:** `generate` reuses an existing milestone/issues (matched by exact title within
+the milestone) instead of creating duplicates, so re-invoking `/conductor:start` — or retrying
+after a `gh` call fails partway — never duplicates the hierarchy or doubles the work.
+
 ### convert
 
 `conductor ledger convert <plan.md>`
@@ -35,7 +39,7 @@ plan dict, and delegates to `generate`. Returns the same shape.
 
 ### reconcile
 
-`conductor ledger reconcile <issue#> [--tests-red] [--pr-merged] [--commits N] [--retries N] [-R N] [--now-ts N] [-L N]`
+`conductor ledger reconcile <issue#> [--tests-red] [--pr-merged] [--commits N] [-R N] [--now-ts N] [-L N]`
 
 Applies §7 reconcile rules to a single issue. Returns `{action, new_status}`.
 
@@ -46,8 +50,10 @@ overrides the current status label. Rule evaluation order:
    `status:in-progress` with an assignee but the `conductor-lease` timestamp in the body is
    more than `L` seconds older than `now_ts`, reconcile unassigns all workers and resets to
    `status:ready`. This ensures a **stale** lease is reclaimed before the retry counter can
-   fire. The caller must reset the retry counter when the action is `stale-lease-reclaim`.
-2. **Retry cap**: `tests_red` and `retries >= R` with a live lease → `status:blocked`.
+   fire. reconcile **resets the durable retry counter itself** on a `stale-lease-reclaim`.
+2. **Retry cap**: a live-owned `status:in-progress` phase that is still `tests_red` has its
+   **durable** attempt count (a body marker) bumped; at `>= R` → `status:blocked` (escalates,
+   so a genuinely failing phase stops looping forever instead of retrying every fire).
 3. **Done + tests red**: reopen and set `status:in-progress` (invalid combination repair).
 4. **Abandoned** (`status:in-progress`, no assignee): reset to `status:ready`.
 5. **Closed, PR not merged**: reopen and set `status:in-progress`.
@@ -72,9 +78,16 @@ A lease is written as an HTML comment in the issue body during `claim`:
 <!-- conductor-lease worker=<login> ts=<unix-ts> -->
 ```
 
-`reconcile` reads this marker when checking for a **stale** lease. Reclaim runs before the
-retry cap so that a worker that crashed does not consume a retry slot — the caller resets its
-retry counter on a `stale-lease-reclaim` action.
+The durable per-phase retry count is a sibling marker in the same body, maintained entirely by
+`reconcile` (the worker never passes or resets it):
+
+```
+<!-- conductor-attempts n=<count> -->
+```
+
+`reconcile` reads the lease marker when checking for a **stale** lease. Reclaim runs before the
+retry cap so that a worker that crashed does not consume a retry slot — reconcile resets the
+durable `conductor-attempts` counter on a `stale-lease-reclaim` action.
 
 ## Design Constraints
 

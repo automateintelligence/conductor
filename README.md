@@ -274,9 +274,9 @@ The `conductor` command (`bin/conductor`) fronts the Python modules.
 | Command | What it does |
 |---|---|
 | `conductor assert run [--level spec\|phase\|task]` | Run the done-gate. Exit `0` all green, `1` ≥1 red, `2` manifest missing, `3` manifest unparseable, `4` overall timeout, `5` no matching assertions / bad args, `6` done-gate tampered. Fail-closed by design. |
-| `conductor ledger generate <plan.json>` | Create the GitHub milestone + phase issues + task sub-issues + labels from a plan dict. |
+| `conductor ledger generate <plan.json>` | Create the GitHub milestone + phase issues + task sub-issues + labels from a plan dict. Idempotent: a re-run reuses existing milestone/issues (matched by title), never duplicating the hierarchy. |
 | `conductor ledger convert <plan.md>` | Parse a Markdown plan (`# Title` / `## Phase [status]` / `- [ ] task`), then generate. |
-| `conductor ledger reconcile <issue#> [--tests-red] [--pr-merged] [--commits N] [--retries N] [-R N] [--now-ts N] [-L N]` | Apply the §7 reconcile rules (precedence git/tests > PR > label); returns `{action, new_status}`. |
+| `conductor ledger reconcile <issue#> [--tests-red] [--pr-merged] [--commits N] [-R N] [--now-ts N] [-L N]` | Apply the §7 reconcile rules (precedence git/tests > PR > label); the durable per-phase retry count is maintained by reconcile itself and escalates to `status:blocked` at the cap `R`; returns `{action, new_status}`. |
 | `conductor goal set <text...>` / `conductor goal get` | Record / read the durable goal (`.conductor/goal.md`). |
 | `conductor preflight` | Static availability gate: every conducted skill resolves, else exit 1. |
 | `conductor merge-gate <pr>` | Autonomous merge safety gate (see below); exit 0 ok, 1 blocked. |

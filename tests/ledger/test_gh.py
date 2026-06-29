@@ -61,6 +61,35 @@ def test_gh_api_error_includes_response_body():
             assert "already_exists" in str(e)
 
 
+def test_find_milestone_matches_title(monkeypatch):  # idempotency (review)
+    monkeypatch.setattr(
+        gh,
+        "_gh_api",
+        lambda m, p, body=None, jq=None: [
+            {"number": 4, "title": "Other"},
+            {"number": 7, "title": "Plan: X"},
+        ],
+    )
+    assert gh.find_milestone("o/r", "Plan: X") == 7
+    monkeypatch.setattr(gh, "_gh_api", lambda m, p, body=None, jq=None: [])
+    assert gh.find_milestone("o/r", "Plan: X") is None
+
+
+def test_find_issue_matches_title_and_excludes_prs(monkeypatch):  # idempotency (review)
+    rows = [
+        {
+            "number": 1,
+            "id": 100,
+            "title": "Phase A",
+            "pull_request": {"url": "x"},
+        },  # PR
+        {"number": 2, "id": 200, "title": "Phase A"},  # the real issue
+    ]
+    monkeypatch.setattr(gh, "_gh_api", lambda m, p, body=None, jq=None: rows)
+    assert gh.find_issue("o/r", "Phase A", milestone=7) == {"number": 2, "id": 200}
+    assert gh.find_issue("o/r", "Nope", milestone=7) is None
+
+
 def test_ensure_label_idempotent_on_already_exists(monkeypatch):
     def raise_already_exists(method, path, body=None, jq=None):
         raise RuntimeError("gh api POST repos/o/r/labels failed: already_exists")

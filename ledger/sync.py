@@ -38,23 +38,35 @@ def generate(repo: str, plan: dict[str, Any], gh: Any) -> dict[str, Any]:
             gh.ensure_label(repo, f"status:{status}")
             seen_statuses.add(status)
 
-    milestone: int = gh.create_milestone(repo, plan["title"])
+    # Idempotent (review): reuse an existing milestone/issues so a re-run of /conductor:start
+    # (or a retry after a mid-way gh failure) never duplicates the hierarchy.
+    milestone: int = gh.find_milestone(repo, plan["title"]) or gh.create_milestone(
+        repo, plan["title"]
+    )
 
     result_phases: list[dict[str, Any]] = []
 
     for phase in plan["phases"]:
-        phase_issue = gh.create_issue(
-            repo,
-            phase["title"],
-            body="",
-            milestone=milestone,
-            labels=[f"status:{phase['status']}"],
-        )
-        phase_number: int = phase_issue["number"]
+        existing_phase = gh.find_issue(repo, phase["title"], milestone)
+        if existing_phase:
+            phase_number = existing_phase["number"]
+        else:
+            phase_issue = gh.create_issue(
+                repo,
+                phase["title"],
+                body="",
+                milestone=milestone,
+                labels=[f"status:{phase['status']}"],
+            )
+            phase_number = phase_issue["number"]
         sub_issues: list[int] = []
         fallback = False
 
         for task in phase["tasks"]:
+            existing_task = gh.find_issue(repo, task, milestone)
+            if existing_task:  # already created + linked on a prior run
+                sub_issues.append(existing_task["number"])
+                continue
             task_issue = gh.create_issue(repo, task, body="", milestone=milestone)
             task_number: int = task_issue["number"]
             task_db_id: int = task_issue["id"]
@@ -66,8 +78,11 @@ def generate(repo: str, plan: dict[str, Any], gh: Any) -> dict[str, Any]:
                 fallback = True
                 existing = gh.get_body(repo, phase_number) or ""
                 line = f"- [ ] #{task_number}"
-                new_body = (existing + "\n" + line).lstrip("\n")
-                gh.set_body(repo, phase_number, new_body)
+                if (
+                    line not in existing
+                ):  # idempotent: don't duplicate the checklist line
+                    new_body = (existing + "\n" + line).lstrip("\n")
+                    gh.set_body(repo, phase_number, new_body)
 
         result_phases.append(
             {"number": phase_number, "sub_issues": sub_issues, "fallback": fallback}

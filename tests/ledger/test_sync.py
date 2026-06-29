@@ -46,6 +46,8 @@ def test_generate_happy_path():
     }
 
     gh = MagicMock()
+    gh.find_milestone.return_value = None  # first run: nothing exists yet
+    gh.find_issue.return_value = None
     gh.create_milestone.return_value = 7
 
     # Each create_issue call returns distinct {number, id}
@@ -120,6 +122,8 @@ def test_generate_fallback_on_add_sub_issue_error():
     }
 
     gh = MagicMock()
+    gh.find_milestone.return_value = None  # first run: nothing exists yet
+    gh.find_issue.return_value = None
     gh.create_milestone.return_value = 3
     gh.create_issue.side_effect = [
         {"number": 20, "id": 2001},  # Phase X issue
@@ -153,6 +157,8 @@ def test_generate_fallback_appends_to_existing_body():
     }
 
     gh = MagicMock()
+    gh.find_milestone.return_value = None  # first run: nothing exists yet
+    gh.find_issue.return_value = None
     gh.create_milestone.return_value = 5
     gh.create_issue.side_effect = [
         {"number": 30, "id": 3001},  # Phase Y
@@ -181,6 +187,8 @@ def test_convert_reads_file_and_delegates(tmp_path):
     plan_file.write_text(PLAN_MD)
 
     gh = MagicMock()
+    gh.find_milestone.return_value = None  # first run: nothing exists yet
+    gh.find_issue.return_value = None
     gh.create_milestone.return_value = 99
     gh.create_issue.side_effect = [
         {"number": 100, "id": 10001},
@@ -195,3 +203,31 @@ def test_convert_reads_file_and_delegates(tmp_path):
     assert result["milestone"] == 99
     assert len(result["phases"]) == 2
     gh.create_milestone.assert_called_once_with("owner/repo", "Plan: URL Shortener")
+
+
+def test_generate_is_idempotent_on_rerun():  # idempotency (review)
+    # second run: milestone + all issues already exist -> reuse, never duplicate.
+    plan = {
+        "title": "Plan: URL Shortener",
+        "phases": [
+            {"title": "Phase A", "status": "ready", "tasks": ["Task 1", "Task 2"]},
+        ],
+    }
+    existing = {
+        "Phase A": {"number": 10, "id": 1001},
+        "Task 1": {"number": 11, "id": 1002},
+        "Task 2": {"number": 12, "id": 1003},
+    }
+    gh = MagicMock()
+    gh.find_milestone.return_value = 7
+    gh.find_issue.side_effect = lambda repo, title, milestone=None: existing.get(title)
+
+    result = sync.generate("owner/repo", plan, gh)
+
+    gh.create_milestone.assert_not_called()  # reused
+    gh.create_issue.assert_not_called()  # reused
+    gh.add_sub_issue.assert_not_called()  # already linked on the prior run
+    assert result["milestone"] == 7
+    assert result["phases"][0]["number"] == 10
+    assert result["phases"][0]["sub_issues"] == [11, 12]
+    assert result["phases"][0]["fallback"] is False

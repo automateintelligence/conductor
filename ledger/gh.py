@@ -32,6 +32,35 @@ def create_milestone(repo: str, title: str) -> int:
     return _gh_api("POST", f"repos/{repo}/milestones", body={"title": title})["number"]
 
 
+def find_milestone(repo: str, title: str) -> int | None:
+    """Number of an existing milestone with this exact title, or None. Makes generate()
+    idempotent: a re-run reuses the milestone instead of creating a duplicate. (First 100;
+    a plan's milestone is created once, so this is a small set.)"""
+    data = _gh_api("GET", f"repos/{repo}/milestones?state=all&per_page=100")
+    for m in data or []:
+        if m.get("title") == title:
+            return m["number"]
+    return None
+
+
+def find_issue(
+    repo: str, title: str, milestone: int | None = None
+) -> dict[str, Any] | None:
+    """{number, id} of an existing (open or closed) issue with this exact title in the given
+    milestone, or None. Excludes pull requests (the issues endpoint returns both). Scopes the
+    query to the milestone so the title match is unambiguous within a plan."""
+    path = f"repos/{repo}/issues?state=all&per_page=100"
+    if milestone is not None:
+        path += f"&milestone={int(milestone)}"
+    data = _gh_api("GET", path)
+    for it in data or []:
+        if it.get("pull_request"):
+            continue
+        if it.get("title") == title:
+            return {"number": it["number"], "id": it["id"]}
+    return None
+
+
 def create_issue(
     repo: str,
     title: str,
