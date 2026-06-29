@@ -86,7 +86,6 @@ def test_refire_reclaims_stale_phase():
         tests_red=True,
         pr_merged=False,
         commits_since_baseline=0,
-        retries=0,
         R=3,
         gh=g,
         now_ts=100 + 5000,
