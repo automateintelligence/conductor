@@ -14,6 +14,9 @@ Make a red assertion green by implementing the **product**, never by weakening t
 a real coverage gap ADDS new assertions via `/conductor:assertions-to-tests`; it never edits or
 deletes existing ones.
 
+> **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
+> below); installed plugins are not on `PATH`.
+
 1. **RE-LOAD GOAL (fresh context).** Done only when `conductor assert run --level spec` exits 0.
    Re-read goal + paths from the durable handoff/ledger; trust git/issues, not memory.
 2. **RECONCILE (precedence git/tests > PR > label).** `ledger.reconcile(phase, ..., now_ts, L)`.
