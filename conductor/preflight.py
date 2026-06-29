@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 import sys
 from typing import TypedDict
@@ -25,10 +26,28 @@ REQUIRED_COMMANDS = [
 ]
 
 
+def _scan_plugin_dir(root: str, cmds: set[str]) -> None:
+    """Scan one plugin root (a `--plugin-dir` / CLAUDE_PLUGIN_ROOT layout) for its skills and
+    commands, namespaced by the plugin's manifest `name`."""
+    try:
+        with open(os.path.join(root, ".claude-plugin", "plugin.json")) as f:
+            name = json.load(f).get("name")
+    except (OSError, ValueError):
+        return
+    if not name:
+        return
+    for md in glob.glob(f"{root}/skills/*/SKILL.md"):
+        cmds.add(f"{name}:{os.path.basename(os.path.dirname(md))}")
+    for md in glob.glob(f"{root}/commands/*.md"):
+        cmds.add(f"{name}:{os.path.basename(md)[:-3]}")
+
+
 def available_commands(claude_home: str | None = None) -> set[str]:
     """Discover invocable slash-command names from disk. user skills -> bare; plugin
-    skills/commands -> '<plugin>:<name>'. (Runtime invocability is confirmed by the T7 smoke;
-    this is the static availability gate.)"""
+    skills/commands -> '<plugin>:<name>'. Covers marketplace/cache installs AND `--plugin-dir`
+    dev installs: conductor's own root (via __file__), plus any roots in CONDUCTOR_PLUGIN_DIRS
+    (colon-separated) and CLAUDE_PLUGIN_ROOT. (Runtime invocability is confirmed by the T7
+    smoke; this is the static availability gate.)"""
     home = claude_home or os.path.expanduser("~/.claude")
     cmds: set[str] = set()
     for md in glob.glob(f"{home}/skills/*/SKILL.md"):
@@ -41,6 +60,17 @@ def available_commands(claude_home: str | None = None) -> set[str]:
         parts = path.split(os.sep)
         plugin = parts[parts.index("cache") + 2]
         cmds.add(f"{plugin}:{os.path.basename(path)[:-3]}")
+    # Dev / --plugin-dir installs the cache glob can't see.
+    roots = [
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ]  # conductor's own root
+    roots += [
+        d for d in os.environ.get("CONDUCTOR_PLUGIN_DIRS", "").split(os.pathsep) if d
+    ]
+    if os.environ.get("CLAUDE_PLUGIN_ROOT"):
+        roots.append(os.environ["CLAUDE_PLUGIN_ROOT"])
+    for root in roots:
+        _scan_plugin_dir(root, cmds)
     return cmds
 
 
