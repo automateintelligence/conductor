@@ -54,7 +54,7 @@ Tasks→sub-issues, PR per phase `Closes #<phase>`, `plan.md` = thin index.
 | `ledger/reconcile.py` | §7 precedence + invalid-combo repairs + **stale-reclaim-before-retry-cap**. Promotes E3. |
 | `ledger/sync.py` | `generate(plan)` / `convert(plan_md)` → milestone/issues/sub-issues/labels. |
 | `skills/issue-sync/SKILL.md` | `/conductor:issue-sync` — generate / convert / reconcile. |
-| `bin/conductor` | add `ledger {generate|convert|reconcile|claim}` subcommands. |
+| `bin/conductor` | add `ledger {generate|convert|reconcile}` subcommands. (`claim`/`release` are Python lease ops on `ledger.claim`, not CLI.) |
 | `tests/ledger/test_*.py` | unit (gh mocked) + one integration (ephemeral milestone). |
 
 ---
