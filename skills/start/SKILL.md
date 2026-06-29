@@ -18,6 +18,9 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    `start_probe.assertions_ready(expected_ids, "assertions/manifest.yaml", <assert-run --level spec
    exit>)` is True** — i.e. the manifest has one entry per `/spec-craft:executable-assertions` id
    AND the runner exit ∈ {0,1} (Codex #3). Otherwise (re)build it.
+   **Then FREEZE the gate (§5):** `conductor gate freeze` records `assertions/.frozen` (commit it)
+   so the worker cannot later weaken a check; the runner fail-closes (exit 6) if a frozen
+   assertion or its test file changes. SKIP if `.frozen` exists and `conductor gate verify` is clean.
 4. **Plan exists?** No → `/superpowers:writing-plans` (or spec-kit), fresh subagent. SKIP if a plan/milestone exists.
 5. **issue-sync** — `ledger.generate` (or `convert`). SKIP if the hierarchy exists; else reconcile.
 6. **Record `/goal`** (`conductor goal set`) and **start the driver:** register a harness cron

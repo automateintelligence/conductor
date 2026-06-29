@@ -248,3 +248,44 @@ def test_teardown_counts_toward_overall_budget(tmp_path):  # Codex (teardown wal
     elapsed = time.monotonic() - start
     assert p.returncode == 4  # wall-clock overrun (incl. teardown) -> NOT done
     assert elapsed < 2.0  # teardown capped by remaining budget, not the full 3s
+
+
+def _frozen_manifest(tmp_path):
+    """A gate whose command references an ABSOLUTE test path (resolves regardless of the
+    runner's REPO_ROOT), frozen with conductor.freeze. Returns (body, baseline_path)."""
+    from conductor import freeze
+
+    gate_test = tmp_path / "gate_test.py"
+    gate_test.write_text("def test_gate():\n    assert True\n")
+    body = textwrap.dedent(
+        f"""\
+        assertions:
+          - id: g
+            command: "python3 -m pytest -q {gate_test}"
+            level: spec
+    """
+    )
+    _manifest(tmp_path, body)
+    baseline = tmp_path / ".frozen"
+    freeze.record(str(tmp_path / "manifest.yaml"), str(baseline), str(tmp_path))
+    return body, str(baseline)
+
+
+def test_freeze_guard_blocks_tampered_done_gate(tmp_path):  # gate-integrity (§5)
+    _, baseline = _frozen_manifest(tmp_path)
+    # worker weakens the gate: same id, real check swapped for `true`
+    _manifest(
+        tmp_path, 'assertions:\n  - id: g\n    command: "true"\n    level: spec\n'
+    )
+    p = subprocess.run(
+        RUN, env=_env(tmp_path, CONDUCTOR_FREEZE_BASELINE=baseline), cwd=ROOT
+    )
+    assert p.returncode == 6  # tampered done-gate -> fail-closed, NOT done
+
+
+def test_freeze_guard_allows_intact_done_gate(tmp_path):  # gate-integrity (§5)
+    _, baseline = _frozen_manifest(tmp_path)
+    p = subprocess.run(
+        RUN, env=_env(tmp_path, CONDUCTOR_FREEZE_BASELINE=baseline), cwd=ROOT
+    )
+    assert p.returncode == 0  # intact baseline -> runs normally, gate green
