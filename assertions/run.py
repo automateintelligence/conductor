@@ -17,6 +17,7 @@ Exit codes:
     3  manifest unparseable / wrong shape
     4  overall wall-clock timeout exceeded
     5  no assertions match the requested level
+    6  done-gate tampered (a frozen assertion was changed/removed)
 
 YAML loading uses pyyaml when available but does not hard-depend on it: a minimal
 built-in parser handles the flat manifest schema as a fallback.
@@ -29,6 +30,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -48,6 +50,7 @@ EXIT_NO_MANIFEST = 2
 EXIT_BAD_MANIFEST = 3
 EXIT_OVERALL_TIMEOUT = 4
 EXIT_NO_MATCH = 5
+EXIT_TAMPERED = 6
 
 DEFAULT_TIMEOUT = 60
 
@@ -193,6 +196,27 @@ def main() -> int:
         print(f"[GATE] FAIL: manifest unparseable: {exc}")
         print("SUMMARY: gate NOT done (manifest unparseable) -> exit 3")
         return EXIT_BAD_MANIFEST
+
+    # Done-gate integrity (§5): if /conductor:start froze a baseline, the manifest and the
+    # test files its commands reference must be unchanged. Fail-closed, so the worker cannot
+    # make a red gate green by weakening a check instead of satisfying it.
+    _baseline = os.environ.get(
+        "CONDUCTOR_FREEZE_BASELINE", os.path.join(ASSERTIONS_DIR, ".frozen")
+    )
+    if os.path.exists(_baseline):
+        if REPO_ROOT not in sys.path:
+            sys.path.insert(0, REPO_ROOT)
+        try:
+            from conductor import freeze
+
+            fr = freeze.verify(MANIFEST, _baseline, REPO_ROOT)
+        except Exception as exc:  # cannot verify integrity -> fail closed
+            fr = {"ok": False, "tampered": [f"freeze-check-error: {exc}"]}
+        if not fr["ok"]:
+            write_results({})
+            print("[GATE] FAIL: done-gate tampered — " + "; ".join(fr["tampered"]))
+            print("SUMMARY: gate NOT done (done-gate tampered) -> exit 6")
+            return EXIT_TAMPERED
     if args.level:
         assertions = [
             a for a in assertions if str(a.get("level", "spec")) == args.level

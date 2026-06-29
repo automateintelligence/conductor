@@ -8,6 +8,12 @@ description: The conductor worker. One fire = one phase of progress toward the s
 Autonomous. **Ask no questions.** Do exactly one coherent phase, then exit. The cron `/loop`
 re-fires you; only a green done-gate (or an explicit escalation-halt) stops the run.
 
+**The done-gate is frozen (§5).** Never edit an existing assertion in `assertions/manifest.yaml`
+or a test file it references — the runner fail-closes (`exit 6`) on any change to a frozen check.
+Make a red assertion green by implementing the **product**, never by weakening the check. Closing
+a real coverage gap ADDS new assertions via `/conductor:assertions-to-tests`; it never edits or
+deletes existing ones.
+
 1. **RE-LOAD GOAL (fresh context).** Done only when `conductor assert run --level spec` exits 0.
    Re-read goal + paths from the durable handoff/ledger; trust git/issues, not memory.
 2. **RECONCILE (precedence git/tests > PR > label).** `ledger.reconcile(phase, ..., now_ts, L)`.

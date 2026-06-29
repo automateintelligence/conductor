@@ -25,5 +25,6 @@ case "${1:-}" in
     ;;
   preflight) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.preflight "$@" ;;
   merge-gate) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.merge_gate "$@" ;;
-  *) printf "usage:\n  conductor assert run [--level spec|phase|task]\n  conductor ledger {generate <plan.json>|convert <plan.md>|reconcile <issue#> [flags]}\n  conductor goal {set <text...>|get}\n  conductor preflight\n  conductor merge-gate <pr>\n" >&2; exit 64 ;;
+  gate) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.freeze "$@" ;;
+  *) printf "usage:\n  conductor assert run [--level spec|phase|task]\n  conductor ledger {generate <plan.json>|convert <plan.md>|reconcile <issue#> [flags]}\n  conductor goal {set <text...>|get}\n  conductor preflight\n  conductor merge-gate <pr>\n  conductor gate {freeze|verify}\n" >&2; exit 64 ;;
 esac
