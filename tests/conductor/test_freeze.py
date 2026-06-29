@@ -105,3 +105,35 @@ def test_allows_added_assertion(tmp_path):
     )
     res = freeze.verify(manifest, baseline, str(tmp_path))
     assert res["ok"] is True and res["tampered"] == []
+
+
+def test_detects_edited_test_file_under_dir_target(
+    tmp_path,
+):  # reviewer: directory tokens
+    # command targets a DIRECTORY (pytest collects under it); editing a test there must be caught.
+    manifest, baseline = _setup(tmp_path, cmd="python3 -m pytest -q sub")
+    freeze.record(manifest, baseline, str(tmp_path))
+    (tmp_path / "sub" / "test_a.py").write_text(
+        "def test_a():\n    assert True  # gutted\n"
+    )
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False and any("test-file-changed" in t for t in res["tampered"])
+
+
+def test_detects_edited_test_file_under_glob_target(tmp_path):  # reviewer: glob tokens
+    manifest, baseline = _setup(tmp_path, cmd="python3 -m pytest -q sub/test_*.py")
+    freeze.record(manifest, baseline, str(tmp_path))
+    (tmp_path / "sub" / "test_a.py").write_text(
+        "def test_a():\n    assert True  # gutted\n"
+    )
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False and any("test-file-changed" in t for t in res["tampered"])
+
+
+def test_dir_target_leaves_product_code_editable(tmp_path):
+    # a.py (product) lives under sub but is not a test file -> still mutable by the worker.
+    manifest, baseline = _setup(tmp_path, cmd="python3 -m pytest -q sub")
+    freeze.record(manifest, baseline, str(tmp_path))
+    (tmp_path / "sub" / "a.py").write_text("def a():\n    return 42\n")
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True and res["tampered"] == []

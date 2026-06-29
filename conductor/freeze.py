@@ -12,6 +12,7 @@ command, so it is not frozen and the worker can still implement it.
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import os
@@ -48,10 +49,35 @@ def _entry_digest(entry: dict) -> str:
     return _sha256(canon.encode())
 
 
+def _sha256_file(path: str) -> str:
+    with open(path, "rb") as f:
+        return _sha256(f.read())
+
+
+def _is_test_file(name: str) -> bool:
+    return name == "conftest.py" or (
+        name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
+    )
+
+
+def _collect_test_files(directory: str) -> list:
+    """Files pytest treats as checks under a directory target: test_*.py / *_test.py /
+    conftest.py, recursively. Product modules a test merely imports are not collected."""
+    found: list = []
+    for root, _dirs, names in os.walk(directory):
+        if "__pycache__" in root:
+            continue
+        for name in names:
+            if _is_test_file(name):
+                found.append(os.path.join(root, name))
+    return found
+
+
 def _referenced_files(entry: dict, repo_root: str) -> dict:
-    """Existing files named in the assertion's command/setup/teardown -> sha256. These are the
-    gate's test files; imported product code is not named in the command, so it is left out
-    (and stays editable by the worker)."""
+    """The gate's check files named in command/setup/teardown -> sha256. A FILE token freezes
+    that file; a DIRECTORY token freezes the test files pytest would collect under it
+    (test_*.py / *_test.py / conftest.py); a GLOB token freezes its matching files. Imported
+    product code is never named, so it is not frozen and stays editable by the worker."""
     files: dict = {}
     for field in ("command", "setup", "teardown"):
         raw = str(entry.get(field, "") or "")
@@ -62,8 +88,14 @@ def _referenced_files(entry: dict, repo_root: str) -> dict:
         for tok in tokens:
             path = tok if os.path.isabs(tok) else os.path.join(repo_root, tok)
             if os.path.isfile(path):
-                with open(path, "rb") as f:
-                    files[tok] = _sha256(f.read())
+                files[tok] = _sha256_file(path)
+            elif os.path.isdir(path):
+                for fp in _collect_test_files(path):
+                    files[os.path.relpath(fp, repo_root)] = _sha256_file(fp)
+            elif any(c in tok for c in "*?["):
+                for fp in glob.glob(path, recursive=True):
+                    if os.path.isfile(fp):
+                        files[os.path.relpath(fp, repo_root)] = _sha256_file(fp)
     return files
 
 
