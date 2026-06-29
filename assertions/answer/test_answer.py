@@ -4,6 +4,7 @@ Encodes assertion-spec id `answer-42`. pytest (default prepend import mode) puts
 this file's directory on sys.path, so `from answer import answer` resolves to
 assertions/answer/answer.py.
 """
+
 from answer import answer
 
 

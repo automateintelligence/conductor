@@ -1,4 +1,7 @@
 # Assertion runner manifest (design §5.2) — the done-gate interface.
+# Schema: id, claim, command, setup, teardown, timeout, level (gate tier), kind (form)
+#   level ∈ {spec, phase, task}  — which gate tier this assertion belongs to
+#   kind  ∈ {example, property, contract} — the form of the assertion
 # Maps each assertion-spec id -> its runnable test (command), with setup, timeout, level.
 # The runner (assertions/run.py, via `conductor assert run`) reads this, runs each
 # command under a hard timeout, and is FAIL-CLOSED: missing/unparseable manifest,
