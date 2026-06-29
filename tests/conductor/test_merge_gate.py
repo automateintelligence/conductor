@@ -88,3 +88,18 @@ def test_merge_ref_verify_failure_blocks():
 
 def test_draft_blocks():
     assert "draft" in _call({**_clean(), "isDraft": True})["blockers"]
+
+
+def test_gh_error_is_fail_closed():  # review: bounded subprocess / no crash on gh failure
+    def boom(r, p, f):
+        raise RuntimeError("gh timed out")
+
+    out = merge_gate.check(
+        "o/r",
+        1,
+        local_verify="true",
+        gh_json=boom,
+        threads=lambda r, p: [],
+        merge_ref_verify=lambda r, p, lv: True,
+    )
+    assert out["ok"] is False and any("gh-error" in b for b in out["blockers"])

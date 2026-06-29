@@ -6,12 +6,16 @@ import sys
 import tempfile
 from typing import Any
 
+_GH_TIMEOUT = float(os.environ.get("CONDUCTOR_GH_TIMEOUT", "60"))
+_VERIFY_TIMEOUT = float(os.environ.get("CONDUCTOR_MERGE_VERIFY_TIMEOUT", "900"))
+
 
 def _gh_json(repo: str, pr: int, fields: str) -> Any:
     out = subprocess.run(
         ["gh", "pr", "view", str(pr), "-R", repo, "--json", fields],
         capture_output=True,
         text=True,
+        timeout=_GH_TIMEOUT,
     )
     if out.returncode != 0:
         raise RuntimeError(out.stderr.strip())
@@ -48,6 +52,7 @@ def _unresolved_threads(repo: str, pr: int) -> list[str]:
         ],
         capture_output=True,
         text=True,
+        timeout=_GH_TIMEOUT,
     )
     if out.returncode != 0:
         raise RuntimeError(out.stderr.strip())
@@ -56,7 +61,9 @@ def _unresolved_threads(repo: str, pr: int) -> list[str]:
 
 def _remote_for(repo: str, run: Any = subprocess.run) -> str:
     """Pick the git remote whose URL points at <owner/repo>; fall back to 'origin'."""
-    out = run(["git", "remote", "-v"], capture_output=True, text=True)
+    out = run(
+        ["git", "remote", "-v"], capture_output=True, text=True, timeout=_GH_TIMEOUT
+    )
     for line in (out.stdout or "").splitlines():
         parts = line.split()
         if len(parts) >= 2 and repo in parts[1]:
@@ -71,15 +78,22 @@ def _merge_ref_verify(
     remote = _remote_for(repo, run)
     wt = tempfile.mkdtemp(prefix=f"mergeref-{pr}-")
     try:
-        if (
-            run(
+        try:
+            fetched = run(
                 f"git fetch {remote} refs/pull/{pr}/merge && git worktree add --detach {wt} FETCH_HEAD",
                 shell=True,
-            ).returncode
-            != 0
-        ):
+                timeout=_GH_TIMEOUT,
+            )
+            if fetched.returncode != 0:
+                return False
+            return (
+                run(
+                    local_verify, shell=True, cwd=wt, timeout=_VERIFY_TIMEOUT
+                ).returncode
+                == 0
+            )
+        except subprocess.TimeoutExpired:  # a hung gh/fetch/test fails closed
             return False
-        return run(local_verify, shell=True, cwd=wt).returncode == 0
     finally:
         run(f"git worktree remove --force {wt}", shell=True)
         shutil.rmtree(wt, ignore_errors=True)
@@ -94,7 +108,10 @@ def check(
     threads: Any = _unresolved_threads,
     merge_ref_verify: Any = _merge_ref_verify,
 ) -> dict[str, Any]:
-    d: Any = gh_json(repo, pr, "mergeStateStatus,mergeable,reviewDecision,isDraft")
+    try:
+        d: Any = gh_json(repo, pr, "mergeStateStatus,mergeable,reviewDecision,isDraft")
+    except Exception as exc:  # gh failure/timeout -> fail closed, never crash the fire
+        return {"ok": False, "blockers": [f"gh-error: {exc}"]}
     blockers: list[str] = []
     if d.get("isDraft"):
         blockers.append("draft")
@@ -106,7 +123,10 @@ def check(
         blockers.append(f"mergeable:{d.get('mergeable')}")
     if d.get("reviewDecision") == "CHANGES_REQUESTED":
         blockers.append("changes-requested")
-    blockers += threads(repo, pr)  # 'unresolved' and/or 'threads-unpaginated'
+    try:
+        blockers += threads(repo, pr)  # 'unresolved' and/or 'threads-unpaginated'
+    except Exception as exc:
+        blockers.append(f"threads-error: {exc}")
     if not merge_ref_verify(repo, pr, local_verify):
         blockers.append("merge-ref-verify-failed")
     return {"ok": not blockers, "blockers": blockers}
