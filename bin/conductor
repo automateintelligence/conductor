@@ -4,5 +4,26 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 case "${1:-}" in
   assert) shift; [ "${1:-}" = "run" ] || { echo "usage: conductor assert run [--level spec|phase|task]" >&2; exit 64; }; shift; exec python3 "$HERE/assertions/run.py" "$@" ;;
   ledger) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m ledger "$@" ;;
-  *) printf "usage:\n  conductor assert run [--level spec|phase|task]\n  conductor ledger {generate <plan.json>|convert <plan.md>|reconcile <issue#> [flags]}\n" >&2; exit 64 ;;
+  goal)
+    shift
+    GOAL_FILE="$HERE/.conductor/goal.md"
+    case "${1:-}" in
+      set)
+        shift
+        mkdir -p "$HERE/.conductor"
+        printf '%s\n' "$*" > "$GOAL_FILE"
+        ;;
+      get)
+        if [ ! -f "$GOAL_FILE" ]; then
+          echo "no goal set" >&2
+          exit 1
+        fi
+        cat "$GOAL_FILE"
+        ;;
+      *) printf "usage:\n  conductor goal set <text...>\n  conductor goal get\n" >&2; exit 64 ;;
+    esac
+    ;;
+  preflight) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.preflight "$@" ;;
+  merge-gate) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.merge_gate "$@" ;;
+  *) printf "usage:\n  conductor assert run [--level spec|phase|task]\n  conductor ledger {generate <plan.json>|convert <plan.md>|reconcile <issue#> [flags]}\n  conductor goal {set <text...>|get}\n  conductor preflight\n  conductor merge-gate <pr>\n" >&2; exit 64 ;;
 esac
