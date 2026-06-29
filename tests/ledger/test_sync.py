@@ -206,21 +206,21 @@ def test_convert_reads_file_and_delegates(tmp_path):
 
 
 def test_generate_is_idempotent_on_rerun():  # idempotency (review)
-    # second run: milestone + all issues already exist -> reuse, never duplicate.
+    # second run: milestone + phase + its linked tasks already exist -> reuse, never duplicate.
     plan = {
         "title": "Plan: URL Shortener",
         "phases": [
             {"title": "Phase A", "status": "ready", "tasks": ["Task 1", "Task 2"]},
         ],
     }
-    existing = {
-        "Phase A": {"number": 10, "id": 1001},
-        "Task 1": {"number": 11, "id": 1002},
-        "Task 2": {"number": 12, "id": 1003},
-    }
     gh = MagicMock()
     gh.find_milestone.return_value = 7
-    gh.find_issue.side_effect = lambda repo, title, milestone=None: existing.get(title)
+    gh.find_issue.return_value = {"number": 10, "id": 1001}  # Phase A exists
+    gh.list_sub_issues.return_value = [  # its tasks are already linked under it
+        {"number": 11, "id": 1002, "title": "Task 1"},
+        {"number": 12, "id": 1003, "title": "Task 2"},
+    ]
+    gh.get_body.return_value = ""
 
     result = sync.generate("owner/repo", plan, gh)
 
@@ -231,3 +231,63 @@ def test_generate_is_idempotent_on_rerun():  # idempotency (review)
     assert result["phases"][0]["number"] == 10
     assert result["phases"][0]["sub_issues"] == [11, 12]
     assert result["phases"][0]["fallback"] is False
+
+
+def test_repeated_task_title_across_phases_are_distinct():  # review Finding 1
+    # two phases that share a task title ("Write tests") must get TWO separate task issues,
+    # each linked to its own phase — not one issue collapsed across both.
+    plan = {
+        "title": "P",
+        "phases": [
+            {"title": "Phase A", "status": "ready", "tasks": ["Write tests"]},
+            {"title": "Phase B", "status": "ready", "tasks": ["Write tests"]},
+        ],
+    }
+    issues: dict[int, dict] = {}  # stateful fake: find returns the FIRST title match
+    gh = MagicMock()
+    gh.find_milestone.return_value = None
+    gh.list_sub_issues.return_value = []
+    gh.get_body.return_value = ""
+
+    def _find(repo, title, milestone=None):
+        for num in sorted(issues):
+            if issues[num]["title"] == title:
+                return {"number": num, "id": issues[num]["id"]}
+        return None
+
+    def _create(repo, title, body="", milestone=None, labels=()):
+        num = 11 + len(issues)
+        issues[num] = {"title": title, "id": 1000 + num}
+        return {"number": num, "id": 1000 + num}
+
+    gh.find_issue.side_effect = _find
+    gh.create_issue.side_effect = _create
+
+    result = sync.generate("o/r", plan, gh)
+    a = result["phases"][0]["sub_issues"]
+    b = result["phases"][1]["sub_issues"]
+    assert len(a) == 1 and len(b) == 1
+    assert a != b, f"phases collapsed onto the same task issue: {a} == {b}"
+
+
+def test_existing_phase_relinks_unlinked_task_on_retry():  # review Finding 2
+    # prior run created the task issue but crashed before linking it -> the re-run must LINK
+    # the existing issue (not leave the phase taskless, and not create a duplicate).
+    plan = {
+        "title": "P",
+        "phases": [{"title": "Phase A", "status": "ready", "tasks": ["Build"]}],
+    }
+    gh = MagicMock()
+    gh.find_milestone.return_value = 7
+    gh.find_issue.side_effect = lambda repo, title, milestone=None: {
+        "Phase A": {"number": 10, "id": 1001},
+        "Build": {"number": 11, "id": 1002},  # created last run, never linked
+    }.get(title)
+    gh.list_sub_issues.return_value = []  # phase has NO linked children yet
+    gh.get_body.return_value = ""
+
+    result = sync.generate("o/r", plan, gh)
+
+    gh.create_issue.assert_not_called()  # the orphan is reused, not duplicated
+    gh.add_sub_issue.assert_called_once_with("o/r", 10, 1002)  # now linked to its phase
+    assert result["phases"][0]["sub_issues"] == [11]

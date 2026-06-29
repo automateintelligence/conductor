@@ -90,6 +90,32 @@ def test_find_issue_matches_title_and_excludes_prs(monkeypatch):  # idempotency 
     assert gh.find_issue("o/r", "Nope", milestone=7) is None
 
 
+def test_list_sub_issues_returns_children(
+    monkeypatch,
+):  # phase-scoped idempotency (review)
+    monkeypatch.setattr(
+        gh,
+        "_gh_api",
+        lambda m, p, body=None, jq=None: [
+            {"number": 11, "id": 1002, "title": "Task 1"},
+            {"number": 12, "id": 1003, "title": "Task 2"},
+        ],
+    )
+    assert gh.list_sub_issues("o/r", 10) == [
+        {"number": 11, "id": 1002, "title": "Task 1"},
+        {"number": 12, "id": 1003, "title": "Task 2"},
+    ]
+
+
+def test_issue_title_returns_title(
+    monkeypatch,
+):  # checklist-fallback resolution (review)
+    monkeypatch.setattr(
+        gh, "_gh_api", lambda m, p, body=None, jq=None: {"title": "Build"}
+    )
+    assert gh.issue_title("o/r", 5) == "Build"
+
+
 def test_ensure_label_idempotent_on_already_exists(monkeypatch):
     def raise_already_exists(method, path, body=None, jq=None):
         raise RuntimeError("gh api POST repos/o/r/labels failed: already_exists")

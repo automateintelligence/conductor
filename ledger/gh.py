@@ -85,6 +85,26 @@ def add_sub_issue(repo: str, parent: int, child_db_id: int) -> Any:
     )
 
 
+def list_sub_issues(repo: str, parent: int) -> list[dict[str, Any]]:
+    """Issues currently linked under a phase via the sub-issue API: [{number, id, title}].
+    Lets generate() reconcile a phase's tasks PHASE-scoped (a task title that appears in two
+    phases is two distinct issues). Raises if the sub-issue API is unavailable; callers fall
+    back to the body checklist."""
+    data = _gh_api("GET", f"repos/{repo}/issues/{parent}/sub_issues?per_page=100")
+    return [
+        {"number": c["number"], "id": c["id"], "title": c["title"]} for c in data or []
+    ]
+
+
+def issue_title(repo: str, n: int) -> str | None:
+    """Title of one issue, or None if it can't be read (used to resolve checklist-fallback
+    `- [ ] #N` references back to task titles for idempotent re-runs)."""
+    try:
+        return _gh_api("GET", f"repos/{repo}/issues/{n}").get("title")
+    except RuntimeError:
+        return None
+
+
 def set_labels(
     repo: str,
     n: int,
