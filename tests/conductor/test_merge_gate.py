@@ -1,3 +1,4 @@
+import subprocess
 from types import SimpleNamespace
 
 from conductor import merge_gate
@@ -103,3 +104,30 @@ def test_gh_error_is_fail_closed():  # review: bounded subprocess / no crash on 
         merge_ref_verify=lambda r, p, lv: True,
     )
     assert out["ok"] is False and any("gh-error" in b for b in out["blockers"])
+
+
+def test_merge_ref_verify_timeout_returns_false():  # review: timeout in remote/fetch fails closed
+    calls = []
+
+    def run(*a, **k):
+        calls.append(a)
+        if len(calls) == 1:  # the `git remote -v` lookup, which runs first
+            raise subprocess.TimeoutExpired(cmd="git remote -v", timeout=1)
+        return SimpleNamespace(stdout="", returncode=0)
+
+    assert merge_gate._merge_ref_verify("o/r", 1, "true", run=run) is False
+
+
+def test_merge_ref_verify_exception_is_fail_closed():  # review: check() must not crash
+    def boom(r, p, lv):
+        raise subprocess.TimeoutExpired(cmd="verify", timeout=1)
+
+    out = merge_gate.check(
+        "o/r",
+        1,
+        local_verify="true",
+        gh_json=lambda r, p, f: _clean(),
+        threads=lambda r, p: [],
+        merge_ref_verify=boom,
+    )
+    assert out["ok"] is False and any("merge-ref" in b for b in out["blockers"])

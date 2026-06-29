@@ -74,28 +74,29 @@ def _remote_for(repo: str, run: Any = subprocess.run) -> str:
 def _merge_ref_verify(
     repo: str, pr: int, local_verify: str, run: Any = subprocess.run
 ) -> bool:
-    """§6.2: re-verify on the ACTUAL merge ref (base+PR merged), not the current workspace."""
-    remote = _remote_for(repo, run)
+    """§6.2: re-verify on the ACTUAL merge ref (base+PR merged), not the current workspace.
+    Every subprocess (remote lookup, fetch, verify) is time-bounded; any hang fails closed."""
     wt = tempfile.mkdtemp(prefix=f"mergeref-{pr}-")
     try:
-        try:
-            fetched = run(
-                f"git fetch {remote} refs/pull/{pr}/merge && git worktree add --detach {wt} FETCH_HEAD",
-                shell=True,
-                timeout=_GH_TIMEOUT,
-            )
-            if fetched.returncode != 0:
-                return False
-            return (
-                run(
-                    local_verify, shell=True, cwd=wt, timeout=_VERIFY_TIMEOUT
-                ).returncode
-                == 0
-            )
-        except subprocess.TimeoutExpired:  # a hung gh/fetch/test fails closed
+        remote = _remote_for(repo, run)  # inside the try: its timeout fails closed too
+        fetched = run(
+            f"git fetch {remote} refs/pull/{pr}/merge && git worktree add --detach {wt} FETCH_HEAD",
+            shell=True,
+            timeout=_GH_TIMEOUT,
+        )
+        if fetched.returncode != 0:
             return False
+        return (
+            run(local_verify, shell=True, cwd=wt, timeout=_VERIFY_TIMEOUT).returncode
+            == 0
+        )
+    except subprocess.TimeoutExpired:  # a hung remote/fetch/verify fails closed
+        return False
     finally:
-        run(f"git worktree remove --force {wt}", shell=True)
+        try:
+            run(f"git worktree remove --force {wt}", shell=True, timeout=_GH_TIMEOUT)
+        except Exception:  # cleanup is best-effort; never let it escape the gate
+            pass
         shutil.rmtree(wt, ignore_errors=True)
 
 
@@ -127,8 +128,13 @@ def check(
         blockers += threads(repo, pr)  # 'unresolved' and/or 'threads-unpaginated'
     except Exception as exc:
         blockers.append(f"threads-error: {exc}")
-    if not merge_ref_verify(repo, pr, local_verify):
-        blockers.append("merge-ref-verify-failed")
+    try:
+        if not merge_ref_verify(repo, pr, local_verify):
+            blockers.append("merge-ref-verify-failed")
+    except (
+        Exception
+    ) as exc:  # timeout/error anywhere in the merge-ref path -> fail closed
+        blockers.append(f"merge-ref-error: {exc}")
     return {"ok": not blockers, "blockers": blockers}
 
 
