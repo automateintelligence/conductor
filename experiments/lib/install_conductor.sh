@@ -9,7 +9,7 @@
 # Idempotent:
 #   marketplace already configured -> `marketplace update` (re-reads the local tree)
 #                       else        -> `marketplace add <abs repo root>`
-#   plugin already installed        -> `plugin update conductor`
+#   plugin already installed        -> `plugin update conductor@automateintelligence`
 #                       else        -> `plugin install conductor@automateintelligence`
 #
 # Safe to `source` from multiple scripts: defines a function + two constants only, has
@@ -77,8 +77,9 @@ install_conductor() {
   plug_list="$(claude plugin list 2>/dev/null || true)"
   if [[ "$plug_list" == *"${plug}@"* ]]; then
     echo "[install_conductor] plugin '$plug' present -> update"
-    claude plugin update "$plug" \
-      || { echo "[install_conductor] FAIL: 'claude plugin update $plug'" >&2; return 1; }
+    # `claude plugin update` requires the plugin@marketplace form (the bare name is "not found").
+    claude plugin update "${plug}@${mkt}" \
+      || { echo "[install_conductor] FAIL: 'claude plugin update ${plug}@${mkt}'" >&2; return 1; }
   else
     echo "[install_conductor] plugin '$plug' absent -> install '${plug}@${mkt}'"
     claude plugin install "${plug}@${mkt}" \
