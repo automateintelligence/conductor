@@ -56,12 +56,20 @@ install_conductor() {
   #    in the caller.
   local mkt_list
   mkt_list="$(claude plugin marketplace list 2>/dev/null || true)"
-  if [[ "$mkt_list" == *"$mkt"* ]]; then
-    echo "[install_conductor] marketplace '$mkt' present -> update"
+  if [[ "$mkt_list" == *"$src"* ]]; then
+    echo "[install_conductor] marketplace '$mkt' (GitHub catalog) present -> update"
     claude plugin marketplace update "$mkt" \
       || { echo "[install_conductor] FAIL: 'claude plugin marketplace update $mkt'" >&2; return 1; }
   else
-    echo "[install_conductor] marketplace '$mkt' absent -> add '$src'"
+    if [[ "$mkt_list" == *"$mkt"* ]]; then
+      # A DIFFERENT source is registered under this name (e.g. an old local-path marketplace
+      # from before the catalog moved) -> remove it so we install from the published catalog.
+      echo "[install_conductor] marketplace '$mkt' present but not '$src' -> remove + re-add"
+      claude plugin marketplace remove "$mkt" \
+        || { echo "[install_conductor] FAIL: 'claude plugin marketplace remove $mkt'" >&2; return 1; }
+    else
+      echo "[install_conductor] marketplace '$mkt' absent -> add '$src'"
+    fi
     claude plugin marketplace add "$src" \
       || { echo "[install_conductor] FAIL: 'claude plugin marketplace add $src'" >&2; return 1; }
   fi

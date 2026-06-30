@@ -18,7 +18,8 @@ their default branch); for pre-push local checks use `claude --plugin-dir ./cond
 - Before cutting a release / merging the install cluster.
 - As a first-time dogfood check ("does `/plugin install` actually work?").
 
-It is **deterministic and headless** — no GitHub, no nested `claude -p`, no cron. Safe in CI.
+It is **deterministic and headless** — no nested `claude -p`, no cron, no GitHub *mutation*. It
+does need network to clone the published catalog + plugin repos.
 
 ## Run
 
@@ -52,9 +53,9 @@ No env vars, no gating. Exit `0` = all markers green; non-zero = at least one fa
 
 | Failing marker | Likely cause | Triage |
 |----------------|--------------|--------|
-| `[P1]` | `claude` not on PATH; bad `marketplace.json`; network. | `which claude`; `claude plugin validate . --strict`; `claude plugin marketplace list`. |
+| `[P1]` | `claude` not on PATH; bad/unreachable `automateintelligence/marketplace` catalog; network. | `which claude`; `claude plugin marketplace add automateintelligence/marketplace`; `claude plugin marketplace list`. |
 | `[P2]` — conductor missing | Install didn't land (usually `[P1]` already failed). | Re-read `[P1]` output; `claude plugin list`. |
-| `[P2]` — spec-craft missing | Dependency did **not** auto-install. | Confirm `marketplace.json` lists `spec-craft` with a reachable source; try `claude plugin install spec-craft@automateintelligence`. |
+| `[P2]` — spec-craft missing | Dependency did **not** auto-install. | Confirm the `automateintelligence/marketplace` catalog lists `spec-craft` with a reachable source; try `claude plugin install spec-craft@automateintelligence`. |
 | `[P3]` | No bin in the cache (install didn't materialize) or a different cache layout. | `find ~/.claude/plugins/cache -path '*conductor*/bin/conductor'`. |
 | `[P4]` — `MISSING: /spec-craft:*` | Dependency problem — same as `[P2]`. | See `[P2]` row. |
 | `[P4]` — `MISSING: /superpowers:*` or `/codex` etc. | Those conducted skills aren't installed in this environment. | Install the superpowers/gstack stack, or accept that a bare env can't pass preflight. For a dev tree, `export CONDUCTOR_PLUGIN_DIRS=<spec-craft path>` (not needed once installed). |
