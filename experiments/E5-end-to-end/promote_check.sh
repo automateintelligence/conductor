@@ -2,7 +2,12 @@
 # promote_check.sh — Recorded agent smoke for Conductor E2E (E5).
 #
 # GATED: set RUN_CONDUCTOR_E2E=1 to run; otherwise exits 0 with a skip message.
-# PURPOSE: drive the REAL conductor skills in a TEMP working copy of the working tree.
+# PURPOSE: install conductor live, then drive the REAL conductor skills in a TEMP working
+#   copy of the working tree.
+#   INSTALL-FIRST: Step 0 installs/updates the conductor plugin into the REAL ~/.claude
+#   (scope user) from the LOCAL working tree (shared helper, also used by E6), so the
+#   full live agent loop below runs against the actually-INSTALLED plugin. Per policy the
+#   install is NOT torn down (conductor stays installed).
 #   NOTE: the WORKING TREE is an isolated temp copy, but the copied .git shares the REAL
 #   remote — a real run (RUN_CONDUCTOR_E2E=1) pushes branches, opens PRs, and merges
 #   against the live repo. Run only where that is intended.
@@ -14,6 +19,7 @@
 #   RUN_CONDUCTOR_E2E=1 bash experiments/E5-end-to-end/promote_check.sh
 #
 # Pass conditions recorded (echoed inline):
+#   [P0] install/update conductor into the REAL ~/.claude (scope user) — exit 0
 #   [P1] /conductor:start preflight + setup + cron registered — exit 0
 #   [P2] /conductor:autodev implements one phase + merge-gate passes — exit 0
 #   [P3] conductor assert run --level spec exits 0 (gate GREEN), worker self-stopped
@@ -34,6 +40,9 @@ fi
 # Setup: temp working copy (no repo mutation)
 # ---------------------------------------------------------------------------
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Shared install helper (also used by E6). Sourcing only defines install_conductor().
+# shellcheck source=../lib/install_conductor.sh disable=SC1091
+source "$REPO_ROOT/experiments/lib/install_conductor.sh"
 WORKDIR="$(mktemp -d /tmp/conductor-e5-smoke.XXXXXX)"
 EVIDENCE_DIR="$WORKDIR/evidence"
 SPEC_DIR="$WORKDIR/spec"
@@ -79,6 +88,21 @@ MANIFEST_EOF
 
 echo "[E5 SMOKE] Spec written to $SPEC_FILE"
 echo "[E5 SMOKE] Manifest written to $MANIFEST_FILE"
+
+# ---------------------------------------------------------------------------
+# Step 0: install/update conductor into the REAL ~/.claude (scope user) from the LOCAL
+# working tree, so Steps 1-6 drive the actually-INSTALLED plugin. Idempotent; does NOT
+# uninstall. Shared with E6 via experiments/lib/install_conductor.sh.
+# [P0] Expect install/update to succeed (exit 0).
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== STEP 0: install/update conductor (live, scope user) ==="
+if install_conductor "$REPO_ROOT" 2>&1 | tee "$EVIDENCE_DIR/step0-install.log"; then
+  echo "[P0] PASS: conductor installed/updated from $REPO_ROOT"
+else
+  echo "[FAIL] install/update of conductor failed — see $EVIDENCE_DIR/step0-install.log"
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Step 1: /conductor:start — preflight + setup + register cron
@@ -193,6 +217,7 @@ echo "[P6] PASS: re-run completed, no questions asked"
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== E5 SMOKE SUMMARY ==="
+echo "[P0] conductor installed/updated (live, scope user): PASS"
 echo "[P1] /conductor:start preflight + setup + cron registered: PASS"
 echo "[P2] /conductor:autodev implements phase + merge-gate: PASS"
 echo "[P3] conductor assert run --level spec exits 0 (gate GREEN): PASS"
