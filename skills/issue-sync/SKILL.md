@@ -8,6 +8,9 @@ description: Automate GitHub issue hierarchy management — generate a milestone
 Fully automated. The skill **never prompts** the user or pauses for confirmation; all three
 operations run headlessly via `conductor ledger` sub-commands backed by `python3 -m ledger`.
 
+> **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
+> below); installed plugins are not on `PATH`.
+
 ## Operations
 
 ### generate

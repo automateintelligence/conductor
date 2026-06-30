@@ -95,9 +95,17 @@ def generate(repo: str, plan: dict[str, Any], gh: Any) -> dict[str, Any]:
             if task in children:  # already a child of THIS phase
                 sub_issues.append(children[task])
                 continue
-            orphan = gh.find_issue(repo, task, milestone)
-            if orphan and orphan["number"] not in linked:
-                # an unlinked leftover from a failed run -> reuse it, don't duplicate
+            # Reuse a SPECIFIC unlinked leftover from a failed run, skipping any same-titled
+            # issue already linked to another phase (review); else create fresh. Never duplicate.
+            orphan = next(
+                (
+                    c
+                    for c in gh.find_issues(repo, task, milestone)
+                    if c["number"] not in linked
+                ),
+                None,
+            )
+            if orphan:
                 task_number = orphan["number"]
                 task_db_id = orphan["id"]
             else:

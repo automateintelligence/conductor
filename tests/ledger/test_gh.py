@@ -90,6 +90,23 @@ def test_find_issue_matches_title_and_excludes_prs(monkeypatch):  # idempotency 
     assert gh.find_issue("o/r", "Nope", milestone=7) is None
 
 
+def test_find_issues_returns_all_matches_excluding_prs(
+    monkeypatch,
+):  # review: orphan reuse
+    rows = [
+        {"number": 10, "id": 110, "title": "Build"},
+        {"number": 13, "id": 113, "title": "Build"},
+        {"number": 9, "id": 109, "title": "Build", "pull_request": {"url": "x"}},  # PR
+        {"number": 7, "id": 107, "title": "Other"},
+    ]
+    monkeypatch.setattr(gh, "_gh_api", lambda m, p, body=None, jq=None: rows)
+    assert gh.find_issues("o/r", "Build", milestone=7) == [
+        {"number": 10, "id": 110},
+        {"number": 13, "id": 113},
+    ]
+    assert gh.find_issues("o/r", "Nope", milestone=7) == []
+
+
 def test_list_sub_issues_returns_children(
     monkeypatch,
 ):  # phase-scoped idempotency (review)

@@ -43,22 +43,31 @@ def find_milestone(repo: str, title: str) -> int | None:
     return None
 
 
-def find_issue(
+def find_issues(
     repo: str, title: str, milestone: int | None = None
-) -> dict[str, Any] | None:
-    """{number, id} of an existing (open or closed) issue with this exact title in the given
-    milestone, or None. Excludes pull requests (the issues endpoint returns both). Scopes the
-    query to the milestone so the title match is unambiguous within a plan."""
+) -> list[dict[str, Any]]:
+    """ALL {number, id} of existing (open or closed) issues with this exact title in the given
+    milestone, in API order. Excludes pull requests (the issues endpoint returns both). Lets
+    generate() reuse a SPECIFIC unlinked orphan when a same-titled issue is already linked to
+    another phase (review)."""
     path = f"repos/{repo}/issues?state=all&per_page=100"
     if milestone is not None:
         path += f"&milestone={int(milestone)}"
     data = _gh_api("GET", path)
-    for it in data or []:
-        if it.get("pull_request"):
-            continue
-        if it.get("title") == title:
-            return {"number": it["number"], "id": it["id"]}
-    return None
+    return [
+        {"number": it["number"], "id": it["id"]}
+        for it in data or []
+        if not it.get("pull_request") and it.get("title") == title
+    ]
+
+
+def find_issue(
+    repo: str, title: str, milestone: int | None = None
+) -> dict[str, Any] | None:
+    """First issue matching find_issues(), or None — for milestone-unique phase titles where
+    the first match is unambiguous."""
+    found = find_issues(repo, title, milestone)
+    return found[0] if found else None
 
 
 def create_issue(

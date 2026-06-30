@@ -48,6 +48,7 @@ def test_generate_happy_path():
     gh = MagicMock()
     gh.find_milestone.return_value = None  # first run: nothing exists yet
     gh.find_issue.return_value = None
+    gh.find_issues.return_value = []
     gh.create_milestone.return_value = 7
 
     # Each create_issue call returns distinct {number, id}
@@ -124,6 +125,7 @@ def test_generate_fallback_on_add_sub_issue_error():
     gh = MagicMock()
     gh.find_milestone.return_value = None  # first run: nothing exists yet
     gh.find_issue.return_value = None
+    gh.find_issues.return_value = []
     gh.create_milestone.return_value = 3
     gh.create_issue.side_effect = [
         {"number": 20, "id": 2001},  # Phase X issue
@@ -159,6 +161,7 @@ def test_generate_fallback_appends_to_existing_body():
     gh = MagicMock()
     gh.find_milestone.return_value = None  # first run: nothing exists yet
     gh.find_issue.return_value = None
+    gh.find_issues.return_value = []
     gh.create_milestone.return_value = 5
     gh.create_issue.side_effect = [
         {"number": 30, "id": 3001},  # Phase Y
@@ -189,6 +192,7 @@ def test_convert_reads_file_and_delegates(tmp_path):
     gh = MagicMock()
     gh.find_milestone.return_value = None  # first run: nothing exists yet
     gh.find_issue.return_value = None
+    gh.find_issues.return_value = []
     gh.create_milestone.return_value = 99
     gh.create_issue.side_effect = [
         {"number": 100, "id": 10001},
@@ -249,18 +253,22 @@ def test_repeated_task_title_across_phases_are_distinct():  # review Finding 1
     gh.list_sub_issues.return_value = []
     gh.get_body.return_value = ""
 
-    def _find(repo, title, milestone=None):
-        for num in sorted(issues):
-            if issues[num]["title"] == title:
-                return {"number": num, "id": issues[num]["id"]}
-        return None
+    def _find_all(repo, title, milestone=None):
+        return [
+            {"number": num, "id": issues[num]["id"]}
+            for num in sorted(issues)
+            if issues[num]["title"] == title
+        ]
 
     def _create(repo, title, body="", milestone=None, labels=()):
         num = 11 + len(issues)
         issues[num] = {"title": title, "id": 1000 + num}
         return {"number": num, "id": 1000 + num}
 
-    gh.find_issue.side_effect = _find
+    gh.find_issues.side_effect = _find_all
+    gh.find_issue.side_effect = lambda r, t, m=None: next(
+        iter(_find_all(r, t, m)), None
+    )
     gh.create_issue.side_effect = _create
 
     result = sync.generate("o/r", plan, gh)
@@ -279,10 +287,12 @@ def test_existing_phase_relinks_unlinked_task_on_retry():  # review Finding 2
     }
     gh = MagicMock()
     gh.find_milestone.return_value = 7
-    gh.find_issue.side_effect = lambda repo, title, milestone=None: {
-        "Phase A": {"number": 10, "id": 1001},
-        "Build": {"number": 11, "id": 1002},  # created last run, never linked
-    }.get(title)
+    gh.find_issue.side_effect = lambda repo, title, milestone=None: (
+        {"number": 10, "id": 1001} if title == "Phase A" else None
+    )
+    gh.find_issues.side_effect = lambda repo, title, milestone=None: (
+        [{"number": 11, "id": 1002}] if title == "Build" else []  # orphan, never linked
+    )
     gh.list_sub_issues.return_value = []  # phase has NO linked children yet
     gh.get_body.return_value = ""
 
@@ -291,3 +301,40 @@ def test_existing_phase_relinks_unlinked_task_on_retry():  # review Finding 2
     gh.create_issue.assert_not_called()  # the orphan is reused, not duplicated
     gh.add_sub_issue.assert_called_once_with("o/r", 10, 1002)  # now linked to its phase
     assert result["phases"][0]["sub_issues"] == [11]
+
+
+def test_unlinked_orphan_reused_when_linked_sibling_exists():  # review (PR#20 round 4)
+    # Phase A's "Build" is already LINKED (#10); Phase B has an UNLINKED orphan "Build" (#13)
+    # from a crashed run. Phase B must reuse #13 (not create a duplicate, not steal A's #10).
+    plan = {
+        "title": "P",
+        "phases": [
+            {"title": "Phase A", "status": "ready", "tasks": ["Build"]},
+            {"title": "Phase B", "status": "ready", "tasks": ["Build"]},
+        ],
+    }
+    gh = MagicMock()
+    gh.find_milestone.return_value = 7
+    gh.find_issue.side_effect = lambda repo, title, milestone=None: {
+        "Phase A": {"number": 1, "id": 101},
+        "Phase B": {"number": 2, "id": 102},
+    }.get(title)
+    # both Builds exist in the milestone; #10 is linked to A, #13 is the unlinked orphan.
+    gh.find_issues.side_effect = lambda repo, title, milestone=None: (
+        [{"number": 10, "id": 110}, {"number": 13, "id": 113}]
+        if title == "Build"
+        else []
+    )
+    gh.list_sub_issues.side_effect = lambda repo, parent: (
+        [{"number": 10, "id": 110, "title": "Build"}] if parent == 1 else []
+    )
+    gh.get_body.return_value = ""
+
+    result = sync.generate("o/r", plan, gh)
+
+    gh.create_issue.assert_not_called()  # orphan #13 reused, no duplicate
+    assert result["phases"][0]["sub_issues"] == [10]  # A keeps its linked task
+    assert result["phases"][1]["sub_issues"] == [
+        13
+    ]  # B reuses the orphan, not a new #14
+    gh.add_sub_issue.assert_any_call("o/r", 2, 113)  # B linked to the reused orphan

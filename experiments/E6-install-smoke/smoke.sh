@@ -101,10 +101,12 @@ fi
 echo ""
 echo "=== [P3] CLI REACHABLE ==="
 shopt -s nullglob
-declare -a BINS=( "$HOME"/.claude/plugins/cache/*/conductor/*/bin/conductor )
+# Pin to OUR marketplace so a stale/different marketplace's cached conductor can't false-green.
+_MKT="${CONDUCTOR_MARKETPLACE_NAME:-automateintelligence}"
+declare -a BINS=( "$HOME"/.claude/plugins/cache/"$_MKT"/conductor/*/bin/conductor )
 shopt -u nullglob
 if [ "${#BINS[@]}" -eq 0 ]; then
-  fail "[P3] no installed conductor bin under ~/.claude/plugins/cache/*/conductor/*/bin/conductor"
+  fail "[P3] no installed conductor bin under ~/.claude/plugins/cache/$_MKT/conductor/*/bin/conductor"
   P3_OK=0
 else
   BIN="$(printf '%s\n' "${BINS[@]}" | sort -V | tail -n1)"

@@ -138,20 +138,36 @@ def check(
     return {"ok": not blockers, "blockers": blockers}
 
 
+def _resolve_repo(run: Any = subprocess.run) -> str:
+    """The repo the gate runs against: CONDUCTOR_REPO if set, else `gh repo view` — time-bounded
+    and fail-closed (a hung or failed autodiscovery raises instead of stalling/crashing)."""
+    repo = os.environ.get("CONDUCTOR_REPO")
+    if repo:
+        return repo
+    out = run(
+        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        capture_output=True,
+        text=True,
+        timeout=_GH_TIMEOUT,
+    )
+    if out.returncode != 0:
+        raise RuntimeError(f"repo-discovery-failed: {(out.stderr or '').strip()}")
+    repo = (out.stdout or "").strip()
+    if not repo:
+        raise RuntimeError("repo-discovery-empty")
+    return repo
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("usage: conductor merge-gate <pr>", file=sys.stderr)
         sys.exit(2)
     pr_num = int(sys.argv[1])
-    repo = (
-        os.environ.get("CONDUCTOR_REPO")
-        or subprocess.run(
-            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-    )
+    try:
+        repo = _resolve_repo()
+    except (subprocess.TimeoutExpired, RuntimeError) as exc:  # bounded + fail closed
+        print(f"repo-error: {exc}", file=sys.stderr)
+        sys.exit(1)
     local_verify = os.environ.get("CONDUCTOR_MERGE_VERIFY", "pytest -q")
     result = check(repo, pr_num, local_verify=local_verify)
     ok: bool = result["ok"]

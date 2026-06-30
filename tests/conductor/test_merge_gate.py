@@ -1,6 +1,8 @@
 import subprocess
 from types import SimpleNamespace
 
+import pytest
+
 from conductor import merge_gate
 
 
@@ -131,3 +133,44 @@ def test_merge_ref_verify_exception_is_fail_closed():  # review: check() must no
         merge_ref_verify=boom,
     )
     assert out["ok"] is False and any("merge-ref" in b for b in out["blockers"])
+
+
+def test_resolve_repo_env_wins_without_subprocess(
+    monkeypatch,
+):  # review: bounded autodiscovery
+    monkeypatch.setenv("CONDUCTOR_REPO", "o/r")
+    called = []
+    assert merge_gate._resolve_repo(run=lambda *a, **k: called.append(1)) == "o/r"
+    assert not called  # env set -> no gh subprocess at all
+
+
+def test_resolve_repo_is_time_bounded(monkeypatch):
+    monkeypatch.delenv("CONDUCTOR_REPO", raising=False)
+    seen = {}
+
+    def run(*a, **k):
+        seen.update(k)
+        return SimpleNamespace(returncode=0, stdout="o/r\n", stderr="")
+
+    assert merge_gate._resolve_repo(run=run) == "o/r"
+    assert "timeout" in seen  # the `gh repo view` autodiscovery is bounded
+
+
+def test_resolve_repo_timeout_propagates(monkeypatch):
+    monkeypatch.delenv("CONDUCTOR_REPO", raising=False)
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="gh repo view", timeout=1)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        merge_gate._resolve_repo(run=boom)
+
+
+def test_resolve_repo_nonzero_raises(monkeypatch):
+    monkeypatch.delenv("CONDUCTOR_REPO", raising=False)
+
+    def run(*a, **k):
+        return SimpleNamespace(returncode=1, stdout="", stderr="gh boom")
+
+    with pytest.raises(RuntimeError):
+        merge_gate._resolve_repo(run=run)
