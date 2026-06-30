@@ -88,6 +88,23 @@ def test_claim_draft_phase_clears_draft_label():  # Fix 1: all status:* removed,
     assert "status:draft" in call_kwargs.kwargs["remove"]
 
 
+def test_attempts_marker_round_trip():  # durable retry count (review)
+    body = {"v": "Phase body. <!-- conductor-lease worker=w ts=5 -->"}
+    gh = MagicMock()
+    gh.get_body.side_effect = lambda r, n: body["v"]
+    gh.set_body.side_effect = lambda r, n, b: body.__setitem__("v", b)
+    assert claim.read_attempts("o/r", 1, gh) == 0
+    assert claim.bump_attempts("o/r", 1, gh) == 1
+    assert claim.bump_attempts("o/r", 1, gh) == 2
+    assert claim.read_attempts("o/r", 1, gh) == 2
+    assert body["v"].count("conductor-attempts") == 1  # replaced, not stacked
+    assert "conductor-lease" in body["v"]  # bump preserves the lease marker
+    claim.reset_attempts("o/r", 1, gh)
+    assert claim.read_attempts("o/r", 1, gh) == 0
+    assert "conductor-attempts" not in body["v"]  # marker removed on reset
+    assert "conductor-lease" in body["v"]  # reset doesn't touch the lease
+
+
 def test_release_unassigns_and_clears_lease():
     body = {"v": "x <!-- conductor-lease worker=alice ts=1 -->"}
     gh = MagicMock()

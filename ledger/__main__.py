@@ -48,7 +48,6 @@ def cmd_reconcile(args: argparse.Namespace) -> None:
         tests_red=args.tests_red,
         pr_merged=args.pr_merged,
         commits_since_baseline=args.commits,
-        retries=args.retries,
         R=args.R,
         gh=_gh,
         now_ts=args.now_ts,
@@ -88,7 +87,6 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("--tests-red", action="store_true", default=False)
     r.add_argument("--pr-merged", action="store_true", default=False)
     r.add_argument("--commits", type=int, default=0, metavar="N")
-    r.add_argument("--retries", type=int, default=0, metavar="N")
     r.add_argument("-R", type=int, default=3, metavar="N", help="Retry cap (default 3)")
     r.add_argument(
         "--now-ts", type=int, default=None, metavar="N", help="Current unix timestamp"

@@ -15,4 +15,4 @@ def assertions_ready(
         present = set(manifest_ids(manifest_path))
     except Exception:
         return False
-    return set(expected_ids) <= present and runner_exit in (0, 1)
+    return bool(expected_ids) and set(expected_ids) <= present and runner_exit in (0, 1)

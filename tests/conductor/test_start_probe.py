@@ -27,3 +27,10 @@ def test_ready_requires_full_coverage_and_determinate(tmp_path):
     assert (
         start_probe.assertions_ready(["a"], str(tmp_path / "none.yaml"), 1) is False
     )  # no manifest
+
+
+def test_empty_expected_ids_is_not_ready(tmp_path):  # review: vacuous coverage
+    # [] <= present is trivially true; an empty expected-id set must NOT report the gate built,
+    # or /conductor:start would skip assertions-to-tests and freeze the wrong (sample) gate.
+    m = _manifest(tmp_path, ["x"])
+    assert start_probe.assertions_ready([], m, runner_exit=0) is False

@@ -11,7 +11,6 @@ def reconcile(
     tests_red: bool,
     pr_merged: bool,
     commits_since_baseline: int,  # reserved: Plan-4 §7 git-commits precedence leg; not yet consumed by any repair
-    retries: int,
     R: int,
     gh: Any,
     now_ts: int | None = None,
@@ -46,11 +45,15 @@ def reconcile(
         if claim.lease_is_stale(lease["ts"] if lease else None, now_ts, L):
             for w in st["assignees"]:
                 gh.unassign(repo, n, w)
+            claim.reset_attempts(repo, n, gh)  # fresh owner -> fresh count (Codex #3)
             return repair("status:ready", "stale-lease-reclaim")
 
-    # 2. Retry cap (§6.1) — a LIVE owner's genuine repeated failures -> blocked.
-    if tests_red and retries >= R:
-        return repair("status:blocked", "retry-cap-exceeded")
+    # 2. Retry cap (§6.1) — a LIVE owner's genuine repeated failures -> blocked. The attempt
+    #    count is DURABLE (issue body), so it survives across fires and fresh worker contexts;
+    #    this fire's still-red result counts as one failed attempt.
+    if tests_red and status == "status:in-progress" and st["assignees"]:
+        if claim.bump_attempts(repo, n, gh) >= R:
+            return repair("status:blocked", "retry-cap-exceeded")
 
     # 3. done/closed but tests red -> reopen -> in-progress.
     if (status == "status:done" or closed) and tests_red:

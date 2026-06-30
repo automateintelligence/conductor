@@ -146,27 +146,27 @@ marketplace install pulls in spec-craft automatically.
 - **`gh` CLI**, authenticated (`gh auth status`). GitHub issues are the ledger.
 - **Python 3.12** on PATH (the runner, ledger, and gate modules are Python).
 
-### Install as a plugin (shared)
+### Install as a plugin (recommended)
 
-Once the plugins are published to a marketplace (a `.claude-plugin/marketplace.json`
-listing both `conductor` and `spec-craft`):
+The conductor repo ships a marketplace manifest, so one install pulls in the `spec-craft`
+dependency too:
 
 ```
 /plugin marketplace add automateintelligence/conductor
-/plugin install conductor@<marketplace-name>     # auto-installs the spec-craft dependency
+/plugin install conductor@automateintelligence     # auto-installs the spec-craft dependency
 ```
 
 CLI equivalents:
 
 ```bash
 claude plugin marketplace add automateintelligence/conductor
-claude plugin install conductor@<marketplace-name>
+claude plugin install conductor@automateintelligence
 ```
 
-> **Note:** these repos do not ship a `marketplace.json` yet, so the one-command install
-> above is not wired up today. Until it is, use the local method below.
+> This is newly wired — `claude plugin validate --strict` passes on the marketplace manifest,
+> but confirm the install + dependency auto-install on your first run.
 
-### Install locally (works today)
+### Install locally (dev / `--plugin-dir`)
 
 Clone both repos side by side and load them as plugin directories:
 
@@ -174,6 +174,13 @@ Clone both repos side by side and load them as plugin directories:
 git clone https://github.com/automateintelligence/spec-craft
 git clone https://github.com/automateintelligence/conductor
 claude --plugin-dir ./spec-craft --plugin-dir ./conductor
+```
+
+In dev mode the plugins aren't in the marketplace cache, so point preflight at spec-craft
+(conductor's own root is found automatically):
+
+```bash
+export CONDUCTOR_PLUGIN_DIRS="$PWD/spec-craft"
 ```
 
 ### Verify
@@ -267,9 +274,9 @@ The `conductor` command (`bin/conductor`) fronts the Python modules.
 | Command | What it does |
 |---|---|
 | `conductor assert run [--level spec\|phase\|task]` | Run the done-gate. Exit `0` all green, `1` ≥1 red, `2` manifest missing, `3` manifest unparseable, `4` overall timeout, `5` no matching assertions / bad args, `6` done-gate tampered. Fail-closed by design. |
-| `conductor ledger generate <plan.json>` | Create the GitHub milestone + phase issues + task sub-issues + labels from a plan dict. |
+| `conductor ledger generate <plan.json>` | Create the GitHub milestone + phase issues + task sub-issues + labels from a plan dict. Idempotent: a re-run reuses existing milestone/issues (matched by title), never duplicating the hierarchy. |
 | `conductor ledger convert <plan.md>` | Parse a Markdown plan (`# Title` / `## Phase [status]` / `- [ ] task`), then generate. |
-| `conductor ledger reconcile <issue#> [--tests-red] [--pr-merged] [--commits N] [--retries N] [-R N] [--now-ts N] [-L N]` | Apply the §7 reconcile rules (precedence git/tests > PR > label); returns `{action, new_status}`. |
+| `conductor ledger reconcile <issue#> [--tests-red] [--pr-merged] [--commits N] [-R N] [--now-ts N] [-L N]` | Apply the §7 reconcile rules (precedence git/tests > PR > label); the durable per-phase retry count is maintained by reconcile itself and escalates to `status:blocked` at the cap `R`; returns `{action, new_status}`. |
 | `conductor goal set <text...>` / `conductor goal get` | Record / read the durable goal (`.conductor/goal.md`). |
 | `conductor preflight` | Static availability gate: every conducted skill resolves, else exit 1. |
 | `conductor merge-gate <pr>` | Autonomous merge safety gate (see below); exit 0 ok, 1 blocked. |

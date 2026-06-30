@@ -32,6 +32,44 @@ def create_milestone(repo: str, title: str) -> int:
     return _gh_api("POST", f"repos/{repo}/milestones", body={"title": title})["number"]
 
 
+def find_milestone(repo: str, title: str) -> int | None:
+    """Number of an existing milestone with this exact title, or None. Makes generate()
+    idempotent: a re-run reuses the milestone instead of creating a duplicate. (First 100;
+    a plan's milestone is created once, so this is a small set.)"""
+    data = _gh_api("GET", f"repos/{repo}/milestones?state=all&per_page=100")
+    for m in data or []:
+        if m.get("title") == title:
+            return m["number"]
+    return None
+
+
+def find_issues(
+    repo: str, title: str, milestone: int | None = None
+) -> list[dict[str, Any]]:
+    """ALL {number, id} of existing (open or closed) issues with this exact title in the given
+    milestone, in API order. Excludes pull requests (the issues endpoint returns both). Lets
+    generate() reuse a SPECIFIC unlinked orphan when a same-titled issue is already linked to
+    another phase (review)."""
+    path = f"repos/{repo}/issues?state=all&per_page=100"
+    if milestone is not None:
+        path += f"&milestone={int(milestone)}"
+    data = _gh_api("GET", path)
+    return [
+        {"number": it["number"], "id": it["id"]}
+        for it in data or []
+        if not it.get("pull_request") and it.get("title") == title
+    ]
+
+
+def find_issue(
+    repo: str, title: str, milestone: int | None = None
+) -> dict[str, Any] | None:
+    """First issue matching find_issues(), or None — for milestone-unique phase titles where
+    the first match is unambiguous."""
+    found = find_issues(repo, title, milestone)
+    return found[0] if found else None
+
+
 def create_issue(
     repo: str,
     title: str,
@@ -54,6 +92,26 @@ def add_sub_issue(repo: str, parent: int, child_db_id: int) -> Any:
         f"repos/{repo}/issues/{parent}/sub_issues",
         body={"sub_issue_id": int(child_db_id)},
     )
+
+
+def list_sub_issues(repo: str, parent: int) -> list[dict[str, Any]]:
+    """Issues currently linked under a phase via the sub-issue API: [{number, id, title}].
+    Lets generate() reconcile a phase's tasks PHASE-scoped (a task title that appears in two
+    phases is two distinct issues). Raises if the sub-issue API is unavailable; callers fall
+    back to the body checklist."""
+    data = _gh_api("GET", f"repos/{repo}/issues/{parent}/sub_issues?per_page=100")
+    return [
+        {"number": c["number"], "id": c["id"], "title": c["title"]} for c in data or []
+    ]
+
+
+def issue_title(repo: str, n: int) -> str | None:
+    """Title of one issue, or None if it can't be read (used to resolve checklist-fallback
+    `- [ ] #N` references back to task titles for idempotent re-runs)."""
+    try:
+        return _gh_api("GET", f"repos/{repo}/issues/{n}").get("title")
+    except RuntimeError:
+        return None
 
 
 def set_labels(

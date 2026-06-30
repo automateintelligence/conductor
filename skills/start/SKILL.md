@@ -7,6 +7,11 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 
 **Idempotent (amendment B): each step probes durable state first and SKIPS if already done.**
 
+> **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
+> below). Installed plugins are not on `PATH`; if `$CLAUDE_PLUGIN_ROOT` is unset (dev/`--plugin-dir`),
+> run the plugin's `bin/conductor` by absolute path and export `CONDUCTOR_PLUGIN_DIRS` with the
+> spec-craft dir so preflight can see it.
+
 0. **PREFLIGHT (`conductor preflight`).** Confirm every conducted command resolves (Codex #1):
    `/spec-craft:*`, `/superpowers:*`, and environment-provided `/code-review`, `/codex`,
    `/document-release`. Any **missing → STOP** and tell the user to install it (fail-closed,

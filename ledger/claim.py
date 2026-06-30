@@ -3,6 +3,7 @@ from typing import Any
 
 BLOCKING = {"status:blocked", "status:done"}
 _LEASE = re.compile(r"<!--\s*conductor-lease worker=(\S+) ts=(\d+)\s*-->")
+_ATTEMPTS = re.compile(r"<!--\s*conductor-attempts n=(\d+)\s*-->")
 
 
 def eligible(state: dict[str, Any]) -> bool:
@@ -29,6 +30,30 @@ def renew_lease(repo: str, n: int, worker: str, now_ts: int, gh: Any) -> None:
     gh.set_body(
         repo, n, f"{body}\n\n<!-- conductor-lease worker={worker} ts={now_ts} -->"
     )
+
+
+def read_attempts(repo: str, n: int, gh: Any) -> int:
+    """The DURABLE per-phase failed-attempt count (issue body), so the retry cap survives
+    across fires and fresh worker contexts — not an in-memory counter that resets to 0."""
+    m = _ATTEMPTS.search(gh.get_body(repo, n) or "")
+    return int(m.group(1)) if m else 0
+
+
+def _write_attempts(repo: str, n: int, count: int, gh: Any) -> None:
+    body = _ATTEMPTS.sub("", gh.get_body(repo, n) or "").rstrip()
+    if count > 0:
+        body = f"{body}\n\n<!-- conductor-attempts n={count} -->".lstrip("\n")
+    gh.set_body(repo, n, body)
+
+
+def bump_attempts(repo: str, n: int, gh: Any) -> int:
+    count = read_attempts(repo, n, gh) + 1
+    _write_attempts(repo, n, count, gh)
+    return count
+
+
+def reset_attempts(repo: str, n: int, gh: Any) -> None:
+    _write_attempts(repo, n, 0, gh)
 
 
 def claim(repo: str, n: int, worker: str, now_ts: int, ttl: int, gh: Any) -> bool:

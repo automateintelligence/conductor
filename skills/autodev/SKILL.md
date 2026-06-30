@@ -14,10 +14,16 @@ Make a red assertion green by implementing the **product**, never by weakening t
 a real coverage gap ADDS new assertions via `/conductor:assertions-to-tests`; it never edits or
 deletes existing ones.
 
+> **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
+> below); installed plugins are not on `PATH`.
+
 1. **RE-LOAD GOAL (fresh context).** Done only when `conductor assert run --level spec` exits 0.
    Re-read goal + paths from the durable handoff/ledger; trust git/issues, not memory.
 2. **RECONCILE (precedence git/tests > PR > label).** `ledger.reconcile(phase, ..., now_ts, L)`.
-   On `stale-lease-reclaim`, **reset that phase's retry counter**. PROGRESS SELF-CHECK.
+   The per-phase retry count is **durable** (issue body) and maintained by reconcile itself: a
+   still-red live-owned phase is counted, and at the cap `retry-cap-exceeded` → `status:blocked`
+   (escalates — a genuinely failing phase stops instead of looping every fire); `stale-lease-reclaim`
+   resets it. PROGRESS SELF-CHECK.
 3. **SPEC-DONE GATE.** `conductor assert run --level spec` (fail-closed; unrunnable = NOT done).
    **All green AND no plans left** → mark done, use **`CronList`** to find the driver cron, then
    **`CronDelete`** it, final handoff, STOP.
