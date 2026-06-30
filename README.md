@@ -148,23 +148,24 @@ marketplace install pulls in spec-craft automatically.
 
 ### Install as a plugin (recommended)
 
-The conductor repo ships a marketplace manifest, so one install pulls in the `spec-craft`
-dependency too:
+Add the `automateintelligence` marketplace once, then install conductor — its `spec-craft`
+dependency is pulled automatically:
 
 ```
-/plugin marketplace add automateintelligence/conductor
+/plugin marketplace add automateintelligence/marketplace
 /plugin install conductor@automateintelligence     # auto-installs the spec-craft dependency
 ```
 
 CLI equivalents:
 
 ```bash
-claude plugin marketplace add automateintelligence/conductor
+claude plugin marketplace add automateintelligence/marketplace
 claude plugin install conductor@automateintelligence
 ```
 
-> This is newly wired — `claude plugin validate --strict` passes on the marketplace manifest,
-> but confirm the install + dependency auto-install on your first run.
+> The catalog lives in [automateintelligence/marketplace](https://github.com/automateintelligence/marketplace)
+> and lists both plugins, so `claude plugin install spec-craft@automateintelligence` installs
+> spec-craft on its own.
 
 ### Install locally (dev / `--plugin-dir`)
 

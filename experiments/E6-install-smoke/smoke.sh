@@ -50,7 +50,7 @@ echo "[E6 SMOKE] REPO_ROOT=$REPO_ROOT"
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== [P1] INSTALL/UPDATE ==="
-if install_conductor "$REPO_ROOT"; then
+if install_conductor; then
   P1_OK=1
   echo "[P1] PASS: marketplace added/updated + conductor installed/updated"
 else

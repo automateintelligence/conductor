@@ -97,8 +97,8 @@ echo "[E5 SMOKE] Manifest written to $MANIFEST_FILE"
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== STEP 0: install/update conductor (live, scope user) ==="
-if install_conductor "$REPO_ROOT" 2>&1 | tee "$EVIDENCE_DIR/step0-install.log"; then
-  echo "[P0] PASS: conductor installed/updated from $REPO_ROOT"
+if install_conductor 2>&1 | tee "$EVIDENCE_DIR/step0-install.log"; then
+  echo "[P0] PASS: conductor installed/updated from the automateintelligence GitHub catalog"
 else
   echo "[FAIL] install/update of conductor failed — see $EVIDENCE_DIR/step0-install.log"
   exit 1

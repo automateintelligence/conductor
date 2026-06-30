@@ -1,17 +1,20 @@
 # E6 — Install Smoke Runbook
 
 `smoke.sh` is the live **install + machinery** smoke for the conductor plugin. It installs
-conductor (and its `spec-craft` dependency) from the **local working tree** into your real
-`~/.claude`, then proves the installed cluster works end to end on a tiny spec.
+conductor (and its `spec-craft` dependency) from the **published GitHub catalog**
+(`automateintelligence/marketplace`) into your real `~/.claude`, then proves the installed
+cluster works end to end on a tiny spec.
 
-It is the only test that exercises the *install path* — `marketplace.json`, dependency
-auto-install, preflight discovery, the `${CLAUDE_PLUGIN_ROOT}` CLI location, and the installed
-done-gate. Everything else (`tests/`) runs against the working tree, not an install.
+It is the only test that exercises the *real install path* — the published marketplace catalog,
+dependency auto-install, preflight discovery, the `${CLAUDE_PLUGIN_ROOT}` CLI location, and the
+installed done-gate. It tests **pushed** code (whatever the catalog's plugin repos serve on
+their default branch); for pre-push local checks use `claude --plugin-dir ./conductor` +
+`conductor preflight`. Everything else (`tests/`) runs against the working tree, not an install.
 
 ## When to run it
 
-- After any change to `.claude-plugin/marketplace.json`, `bin/conductor`, `conductor/preflight.py`,
-  or the install instructions in the README.
+- After any change to the marketplace catalog (the `automateintelligence/marketplace` repo),
+  `bin/conductor`, `conductor/preflight.py`, or the install instructions in the README.
 - Before cutting a release / merging the install cluster.
 - As a first-time dogfood check ("does `/plugin install` actually work?").
 
@@ -39,7 +42,7 @@ No env vars, no gating. Exit `0` = all markers green; non-zero = at least one fa
 
 | Marker | Checks | Proves |
 |--------|--------|--------|
-| `[P1] INSTALL/UPDATE` | Adds the local tree as the `automateintelligence` marketplace (or updates it), then installs `conductor@automateintelligence` (or updates it). Idempotent. | The marketplace manifest is installable; `/plugin install` succeeds non-interactively. |
+| `[P1] INSTALL/UPDATE` | Adds the `automateintelligence/marketplace` GitHub catalog (or updates it), then installs `conductor@automateintelligence` (or updates it). Idempotent. | The published catalog is installable; `/plugin install` succeeds non-interactively. |
 | `[P2] PLUGINS PRESENT` | `claude plugin list` shows **both** `conductor@` and `spec-craft@`. | The `dependencies: ["spec-craft"]` declaration auto-installs the dependency. |
 | `[P3] CLI REACHABLE` | Resolves the installed bin by globbing `~/.claude/plugins/cache/*/conductor/*/bin/conductor` (newest version), asserts it is executable. | The CLI is reachable from the cache even though plugins are not on `PATH`. |
 | `[P4] PREFLIGHT` | The **installed** `<bin> preflight` exits 0. | The whole conducted skill stack resolves post-install (the preflight-discovery fix). |
