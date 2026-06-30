@@ -236,6 +236,14 @@ reconciles state, checks the done-gate, claims and builds the next phase in a fr
 subagent, merges it through `conductor merge-gate`, writes a handoff, and exits. When the
 gate is green and no plans remain, the worker deletes its own cron and stops.
 
+The interval is just a **heartbeat**: `CronCreate` fires only while the session is idle, so a tick
+never overlaps a running fire (it no-ops until the current phase finishes), and the interval need
+not match how long a phase takes. Two limits to know: the recurring cron **auto-expires after 7
+days** (re-run `/conductor:start` to continue), and an in-session cron **dies when the terminal
+closes**. For a run that survives reboots and closed terminals, start it on an always-on host with
+the **Tier-B OS autostart** (`@reboot … claude -p "/conductor:start <spec>"`, reconcile-first so it
+resumes) — see [`experiments/E5-end-to-end/recovery.md`](experiments/E5-end-to-end/recovery.md).
+
 ### 4. Check in, resume, or stop
 
 - **Where is it?** Read the latest handoff in `.conductor/` (local resume scratch), or the
@@ -334,7 +342,8 @@ re-loads the goal, reconciles, runs the done-gate, and exits without spawning th
 implementation subagent. The expensive ticks are the ones that actually build a phase
 (subagent-driven-development + reviews + merge). A stalled run (gate already green, or
 waiting on a halt) costs about a reconcile and a gate run per tick. Pick the cron interval
-to trade how fast phases get attempted against how much idle polling you want to pay for.
+to trade how fast phases get attempted against how much idle polling you want to pay for — a
+short interval is safe, since the cron only fires when idle and can never overlap a running fire.
 
 ---
 
