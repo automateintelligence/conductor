@@ -155,7 +155,7 @@ execution contract) + E4 (the real machine done-gate) + the §6 recipe
 **Recovery — two complementary tiers, for different failure modes** (plain-language detail
 + install snippets: `experiments/E5-end-to-end/recovery.md`):
 - **Tier B (local — machine available: reboot/crash/closed terminal):** OS autostart →
-  `claude -p "/conductor resume"`. **Tested live** — a fresh `claude -p` re-ran
+  `claude -p "/conductor:start <spec>"`. **Tested live** — a fresh `claude -p` re-ran
   reconcile-first `/conductor` and skipped every already-done step (clean resume, no
   double-work). The literal `@reboot`/systemd trigger is a snippet, not reboot-tested.
 - **Durable "walk away for days" tier — an always-on host the user controls** (home server

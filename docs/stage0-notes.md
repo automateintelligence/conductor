@@ -75,7 +75,7 @@ issues + handoff) and resume from the **last pushed point**.
 
 | Tier | Situation | Mechanism | Status |
 |---|---|---|---|
-| **B (local)** | machine **available** — reboot, Claude crashed, terminal closed | OS autostart (`@reboot` cron / systemd / login agent) → `claude -p "/conductor resume" </dev/null` | **tested** (fresh `claude -p` reconcile-resume skipped all done steps; OS trigger = snippet, not reboot-tested) |
+| **B (local)** | machine **available** — reboot, Claude crashed, terminal closed | OS autostart (`@reboot` cron / systemd / login agent) → `claude -p "/conductor:start <spec>" </dev/null` | **tested** (fresh `claude -p` reconcile-resume skipped all done steps; OS trigger = snippet, not reboot-tested) |
 | **A (cloud)** | machine **off / unreachable**, work must continue | cloud `/schedule` → fresh container runs `/conductor`+in-cloud `/loop` (Option 1 in the cloud), clones from GitHub | **design only — untested (E7)**; needs cloud repo+`gh` access |
 
 If progress is only needed while the machine is on, **Tier B alone is complete** (no cloud)
