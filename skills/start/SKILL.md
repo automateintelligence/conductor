@@ -29,15 +29,16 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 4. **Plan exists?** No → `/superpowers:writing-plans` (or spec-kit), fresh subagent. SKIP if a plan/milestone exists.
 5. **issue-sync** — `ledger.generate` (or `convert`). SKIP if the hierarchy exists; else reconcile.
 6. **Record `/goal`** (`conductor goal set`) and **start the driver:** register a harness cron via
-   **`CronCreate`** — `prompt: "/conductor:autodev"`, `cron: "*/7 * * * *"` (≈7 min; an off-:00/:30
-   minute), `durable: true`. Record its id. SKIP if already registered. The interval is only a
+   **`CronCreate`** — `prompt: "/conductor:autodev"`, `cron: "*/7 * * * *"` (≈ every 7 min),
+   `durable: true`. Record its id. SKIP if already registered. The interval is only a
    **heartbeat**: `CronCreate` fires **only while the REPL is idle**, so a tick never overlaps a
    running fire — it no-ops until the current phase finishes, so the interval need not match phase
    duration. `durable: true` lets the cron survive a Claude restart.
    **Tell the user two limits:** (a) recurring crons **auto-expire after 7 days** — re-invoke
    `/conductor:start` to keep a longer run going; (b) the in-session cron **dies when the terminal
    closes** — for true cross-session survival set up the **Tier-B OS autostart**
-   (`@reboot … claude -p "/conductor resume <spec>"`; see `experiments/E5-end-to-end/recovery.md`).
+   (`@reboot … claude -p "/conductor:start <spec>"` — reconcile-first, so it resumes; see
+   `experiments/E5-end-to-end/recovery.md`).
 7. **(Phase 2 only)** start the dispatcher loop — the supervisor that caps concurrency and assigns
    eligible phases to parallel workers. Single-loop needs no cap (`CronCreate` can't overlap fires);
    controlled parallelism is the dispatcher's job, not the cron cadence.

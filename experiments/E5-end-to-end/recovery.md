@@ -15,10 +15,10 @@ Both restart paths re-invoke the **reconcile-first `/conductor`** over the durab
 
 ## Tier B — same machine, just restart the driver (reboot / crash / closed terminal)
 
-OS autostart → `claude -p "/conductor resume" </dev/null`:
+OS autostart → `claude -p "/conductor:start <spec>" </dev/null` (reconcile-first, so it resumes):
 ```cron
 @reboot sleep 30 && cd /path/to/checkout && \
-  claude -p "/conductor resume <spec>" --permission-mode bypassPermissions \
+  claude -p "/conductor:start <spec>" --permission-mode bypassPermissions \
   --no-session-persistence </dev/null >> ~/conductor-resume.log 2>&1
 ```
 (or a systemd user service / login agent running the same line.)
