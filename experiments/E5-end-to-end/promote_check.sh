@@ -5,7 +5,8 @@
 # PURPOSE: install conductor live, then drive the REAL conductor skills in a TEMP working
 #   copy of the working tree.
 #   INSTALL-FIRST: Step 0 installs/updates the conductor plugin into the REAL ~/.claude
-#   (scope user) from the LOCAL working tree (shared helper, also used by E6), so the
+#   (scope user) from the published automateintelligence/marketplace catalog (shared helper,
+#   also used by E6), so the
 #   full live agent loop below runs against the actually-INSTALLED plugin. Per policy the
 #   install is NOT torn down (conductor stays installed).
 #   NOTE: the WORKING TREE is an isolated temp copy, but the copied .git shares the REAL
@@ -97,8 +98,8 @@ echo "[E5 SMOKE] Manifest written to $MANIFEST_FILE"
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== STEP 0: install/update conductor (live, scope user) ==="
-if install_conductor "$REPO_ROOT" 2>&1 | tee "$EVIDENCE_DIR/step0-install.log"; then
-  echo "[P0] PASS: conductor installed/updated from $REPO_ROOT"
+if install_conductor 2>&1 | tee "$EVIDENCE_DIR/step0-install.log"; then
+  echo "[P0] PASS: conductor installed/updated from the automateintelligence GitHub catalog"
 else
   echo "[FAIL] install/update of conductor failed — see $EVIDENCE_DIR/step0-install.log"
   exit 1

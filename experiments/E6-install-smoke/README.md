@@ -1,21 +1,25 @@
 # E6 — Install Smoke Runbook
 
 `smoke.sh` is the live **install + machinery** smoke for the conductor plugin. It installs
-conductor (and its `spec-craft` dependency) from the **local working tree** into your real
-`~/.claude`, then proves the installed cluster works end to end on a tiny spec.
+conductor (and its `spec-craft` dependency) from the **published GitHub catalog**
+(`automateintelligence/marketplace`) into your real `~/.claude`, then proves the installed
+cluster works end to end on a tiny spec.
 
-It is the only test that exercises the *install path* — `marketplace.json`, dependency
-auto-install, preflight discovery, the `${CLAUDE_PLUGIN_ROOT}` CLI location, and the installed
-done-gate. Everything else (`tests/`) runs against the working tree, not an install.
+It is the only test that exercises the *real install path* — the published marketplace catalog,
+dependency auto-install, preflight discovery, the `${CLAUDE_PLUGIN_ROOT}` CLI location, and the
+installed done-gate. It tests **pushed** code (whatever the catalog's plugin repos serve on
+their default branch); for pre-push local checks use `claude --plugin-dir ./conductor` +
+`conductor preflight`. Everything else (`tests/`) runs against the working tree, not an install.
 
 ## When to run it
 
-- After any change to `.claude-plugin/marketplace.json`, `bin/conductor`, `conductor/preflight.py`,
-  or the install instructions in the README.
+- After any change to the marketplace catalog (the `automateintelligence/marketplace` repo),
+  `bin/conductor`, `conductor/preflight.py`, or the install instructions in the README.
 - Before cutting a release / merging the install cluster.
 - As a first-time dogfood check ("does `/plugin install` actually work?").
 
-It is **deterministic and headless** — no GitHub, no nested `claude -p`, no cron. Safe in CI.
+It is **deterministic and headless** — no nested `claude -p`, no cron, no GitHub *mutation*. It
+does need network to clone the published catalog + plugin repos.
 
 ## Run
 
@@ -39,7 +43,7 @@ No env vars, no gating. Exit `0` = all markers green; non-zero = at least one fa
 
 | Marker | Checks | Proves |
 |--------|--------|--------|
-| `[P1] INSTALL/UPDATE` | Adds the local tree as the `automateintelligence` marketplace (or updates it), then installs `conductor@automateintelligence` (or updates it). Idempotent. | The marketplace manifest is installable; `/plugin install` succeeds non-interactively. |
+| `[P1] INSTALL/UPDATE` | Adds the `automateintelligence/marketplace` GitHub catalog (or updates it), then installs `conductor@automateintelligence` (or updates it). Idempotent. | The published catalog is installable; `/plugin install` succeeds non-interactively. |
 | `[P2] PLUGINS PRESENT` | `claude plugin list` shows **both** `conductor@` and `spec-craft@`. | The `dependencies: ["spec-craft"]` declaration auto-installs the dependency. |
 | `[P3] CLI REACHABLE` | Resolves the installed bin by globbing `~/.claude/plugins/cache/*/conductor/*/bin/conductor` (newest version), asserts it is executable. | The CLI is reachable from the cache even though plugins are not on `PATH`. |
 | `[P4] PREFLIGHT` | The **installed** `<bin> preflight` exits 0. | The whole conducted skill stack resolves post-install (the preflight-discovery fix). |
@@ -49,9 +53,9 @@ No env vars, no gating. Exit `0` = all markers green; non-zero = at least one fa
 
 | Failing marker | Likely cause | Triage |
 |----------------|--------------|--------|
-| `[P1]` | `claude` not on PATH; bad `marketplace.json`; network. | `which claude`; `claude plugin validate . --strict`; `claude plugin marketplace list`. |
+| `[P1]` | `claude` not on PATH; bad/unreachable `automateintelligence/marketplace` catalog; network. | `which claude`; `claude plugin marketplace add automateintelligence/marketplace`; `claude plugin marketplace list`. |
 | `[P2]` — conductor missing | Install didn't land (usually `[P1]` already failed). | Re-read `[P1]` output; `claude plugin list`. |
-| `[P2]` — spec-craft missing | Dependency did **not** auto-install. | Confirm `marketplace.json` lists `spec-craft` with a reachable source; try `claude plugin install spec-craft@automateintelligence`. |
+| `[P2]` — spec-craft missing | Dependency did **not** auto-install. | Confirm the `automateintelligence/marketplace` catalog lists `spec-craft` with a reachable source; try `claude plugin install spec-craft@automateintelligence`. |
 | `[P3]` | No bin in the cache (install didn't materialize) or a different cache layout. | `find ~/.claude/plugins/cache -path '*conductor*/bin/conductor'`. |
 | `[P4]` — `MISSING: /spec-craft:*` | Dependency problem — same as `[P2]`. | See `[P2]` row. |
 | `[P4]` — `MISSING: /superpowers:*` or `/codex` etc. | Those conducted skills aren't installed in this environment. | Install the superpowers/gstack stack, or accept that a bare env can't pass preflight. For a dev tree, `export CONDUCTOR_PLUGIN_DIRS=<spec-craft path>` (not needed once installed). |

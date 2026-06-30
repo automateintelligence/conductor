@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # smoke.sh — E6 live install + end-to-end smoke for the `conductor` plugin.
 #
-# Deterministic + headless. Installs/updates conductor into the REAL ~/.claude (scope
-# user) from the LOCAL working tree, then validates the installed cluster end to end.
-# NO GitHub mutation, NO nested `claude -p`, NO cron. Per the dogfood policy it does
-# NOT uninstall — conductor stays installed afterward. Runnable in CI / unattended.
+# Deterministic + headless. Installs/updates conductor into the REAL ~/.claude (scope user)
+# from the published `automateintelligence/marketplace` GitHub catalog, then validates the
+# installed cluster end to end. Requires network (clones the catalog + plugin repos) but makes
+# NO GitHub mutation, NO nested `claude -p`, NO cron. Per the dogfood policy it does NOT
+# uninstall — conductor stays installed afterward. Runnable unattended (needs the claude CLI).
 #
 # Run:
 #   bash experiments/E6-install-smoke/smoke.sh
@@ -46,11 +47,11 @@ status() { if [ "$1" -eq 1 ]; then echo "PASS"; else echo "FAIL"; fi; }
 echo "[E6 SMOKE] REPO_ROOT=$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
-# [P1] INSTALL / UPDATE — idempotent marketplace add(local) + plugin install/update.
+# [P1] INSTALL / UPDATE — idempotent marketplace add(automateintelligence/marketplace) + plugin install/update.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== [P1] INSTALL/UPDATE ==="
-if install_conductor "$REPO_ROOT"; then
+if install_conductor; then
   P1_OK=1
   echo "[P1] PASS: marketplace added/updated + conductor installed/updated"
 else
