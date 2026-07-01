@@ -84,6 +84,18 @@ single forgotten one silently points the gate at the wrong place.
 - *Fix:* a **project-committed config** (e.g. `.conductor/config` with a gate-dir field) so a monorepo
   can point the gate at a subdir with no env var and no per-call plumbing.
 
+### LOW–MED — Supervised setup has no auto-recovery from transient interruptions
+The **autonomous** loop is self-healing: an API error / dropped connection mid-phase just means the
+next cron fire reconciles and continues. But the **supervised setup** phase (build gate → plan →
+ledger → goal) is interactive, with no cron re-firing — so a "connection closed mid-response" simply
+**stalls until a human types "continue."** During the dogfood run the operator hit this (API error
+while writing the plan) and had to hand-roll resilience with a recovery `/loop` (fire a "resume if
+stalled, but stop at the supervised checkpoint" prompt every ~15m).
+- *Fix options:* make `/conductor:start`'s setup resumable-by-default under a light self-heartbeat, or
+  simply **document the recovery `/loop`** for supervised setup so operators don't invent it. The loop
+  prompt must scope to "resume setup only; do NOT arm the cron / start phases" or it can push past the
+  supervised checkpoint.
+
 ### LOW–MED — `$CLAUDE_PLUGIN_ROOT` unreliability
 The run saw `$CLAUDE_PLUGIN_ROOT=.claude` (a bogus relative path); the agent fell back to the absolute
 0.3.0 `bin/conductor`. The `start` skill leans on the variable — it should validate it (absolute dir
