@@ -82,6 +82,24 @@ reverse-engineering).
   allows adding, never weakening) but aren't required when the frozen assertions already specify the
   unit. So no run re-derives the inversion.
 
+### MEDIUM — User coding principles (CLAUDE.md) must propagate to subagents + the codex review
+Conductor is (correctly) **principle-agnostic** — it should inherit each user's project/global
+`CLAUDE.md` rather than hardcode standards ("use libraries, don't reinvent" is Jeff's; other users
+bring their own). The general-plugin answer is "rely on CLAUDE.md for all users." The design work is
+**propagation**, not encoding:
+- **Enforcement lives in the reviews, not the gate.** The done-gate checks *behavior*, not *style* — it
+  can't tell "used a library" from "hand-rolled it." So qualitative principles are a `/code-review` +
+  `/codex` + receiving-code-review concern.
+- **Implementation subagents** (fresh context per phase): verify they inherit the project `CLAUDE.md`;
+  if not, the autodev recipe should anchor them to it explicitly (prevention as the code is written).
+- **codex is the leak:** `/code-review` + receiving-code-review are Claude in-project (get `CLAUDE.md`
+  automatically), but `/codex` is an external CLI that won't auto-load it — the codex review invocation
+  should point it at the project `CLAUDE.md` so it enforces the user's principles too.
+- *Nuance:* a few principles ARE gateable (coverage thresholds, "no TODOs") and could become assertions;
+  qualitative dogma stays in review — don't assert the un-assertable.
+- *Fix:* (a) verify/ensure `CLAUDE.md` reaches fresh subagents; (b) the codex review references the
+  project `CLAUDE.md`.
+
 ### MEDIUM — Gate runtime is O(N × cold-pytest-startup), run serially
 `assertions/run.py` runs assertions **sequentially**, one cold subprocess each. On this monorepo:
 ~2 min before the pinned-command fix (heavy plugin autoload ×19), ~57s after (≈3s/assertion cold
