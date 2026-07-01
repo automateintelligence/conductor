@@ -11,6 +11,14 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 > below). Installed plugins are not on `PATH`; if `$CLAUDE_PLUGIN_ROOT` is unset (dev/`--plugin-dir`),
 > run the plugin's `bin/conductor` by absolute path and export `CONDUCTOR_PLUGIN_DIRS` with the
 > spec-craft dir so preflight can see it.
+>
+> **Plugin dir vs project (where things live):** the plugin dir is read-only tool code; the **run
+> state and the done-gate live in the PROJECT** — the git repo you invoke conductor from. **Run
+> `/conductor:start` from the project root** (or set `CONDUCTOR_HOME=<project>`); the CLI resolves
+> the project as the git repo of the current directory and writes `.conductor/` (goal, handoff),
+> `assertions/manifest.yaml`, `assertions/.frozen`, and the RED tests **there**, git-committed with
+> your project — never into the plugin cache. `conductor gate freeze` / `assert run` then operate on
+> the project gate automatically; no `CONDUCTOR_MANIFEST` plumbing is needed when you run from the root.
 
 0. **PREFLIGHT (`conductor preflight`).** Confirm every conducted command resolves (Codex #1):
    `/spec-craft:*`, `/superpowers:*`, and environment-provided `/code-review`, `/codex`,

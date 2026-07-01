@@ -35,13 +35,39 @@ import tempfile
 import time
 
 ASSERTIONS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(ASSERTIONS_DIR)
+# PLUGIN_ROOT holds the TOOL CODE (imports); kept only for sys.path / module imports.
+PLUGIN_ROOT = os.path.dirname(ASSERTIONS_DIR)
+
+
+def _project_root() -> str:
+    """The PROJECT that owns run state + the done-gate: ``$CONDUCTOR_HOME``, else the git
+    repo of the current directory, else cwd. ``bin/conductor`` resolves this once and exports
+    ``CONDUCTOR_HOME`` so the runner and the freeze guard agree. Distinct from PLUGIN_ROOT
+    (the installed tool code), which must not hold a project's gate/state."""
+    home = os.environ.get("CONDUCTOR_HOME")
+    if home:
+        return home
+    try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).stdout.strip()
+        if top:
+            return top
+    except Exception:
+        pass
+    return os.getcwd()
+
+
+PROJECT = _project_root()
 MANIFEST = os.environ.get(
-    "CONDUCTOR_MANIFEST", os.path.join(ASSERTIONS_DIR, "manifest.yaml")
+    "CONDUCTOR_MANIFEST", os.path.join(PROJECT, "assertions", "manifest.yaml")
 )
 OVERALL_TIMEOUT = float(os.environ.get("CONDUCTOR_OVERALL_TIMEOUT", "0"))  # 0 = none
 ISOLATE = os.environ.get("CONDUCTOR_ISOLATE", "") not in ("", "0")
-RUN_DIR = os.path.join(ASSERTIONS_DIR, "run")
+RUN_DIR = os.path.join(PROJECT, "assertions", "run")
 RESULTS = os.path.join(RUN_DIR, "results.json")
 
 EXIT_OK = 0
@@ -133,7 +159,7 @@ def load_assertions(path: str) -> list:
     return items
 
 
-def _run(cmd: str, timeout: float, cwd: str = REPO_ROOT):
+def _run(cmd: str, timeout: float, cwd: str = PROJECT):
     """Run a shell command at the given working directory. Returns (rc, reason).
     FAIL-CLOSED on any non-zero/timeout/exception (never silently passes)."""
     try:
@@ -202,15 +228,15 @@ def main() -> int:
     # test files its commands reference must be unchanged. Fail-closed, so the worker cannot
     # make a red gate green by weakening a check instead of satisfying it.
     _baseline = os.environ.get(
-        "CONDUCTOR_FREEZE_BASELINE", os.path.join(ASSERTIONS_DIR, ".frozen")
+        "CONDUCTOR_FREEZE_BASELINE", os.path.join(PROJECT, "assertions", ".frozen")
     )
     if os.path.exists(_baseline):
-        if REPO_ROOT not in sys.path:
-            sys.path.insert(0, REPO_ROOT)
+        if PLUGIN_ROOT not in sys.path:
+            sys.path.insert(0, PLUGIN_ROOT)
         try:
             from conductor import freeze
 
-            fr = freeze.verify(MANIFEST, _baseline, REPO_ROOT)
+            fr = freeze.verify(MANIFEST, _baseline, PROJECT)
         except Exception as exc:  # cannot verify integrity -> fail closed
             fr = {"ok": False, "tampered": [f"freeze-check-error: {exc}"]}
         if not fr["ok"]:
@@ -243,7 +269,7 @@ def main() -> int:
             print(f"[GATE] FAIL: assertion {aid} has non-numeric timeout")
             print("SUMMARY: gate NOT done (manifest unparseable) -> exit 3")
             return EXIT_BAD_MANIFEST
-        workdir = tempfile.mkdtemp(prefix=f"assert-{aid}-") if ISOLATE else REPO_ROOT
+        workdir = tempfile.mkdtemp(prefix=f"assert-{aid}-") if ISOLATE else PROJECT
         start = time.monotonic()
         try:
             # setup (if any) then command — each capped by the REAL remaining budget (no round-up),
@@ -297,7 +323,7 @@ def main() -> int:
                 rem = _remaining(deadline)
                 if rem is None or rem > 0:
                     _run(teardown, 5.0 if rem is None else min(5.0, rem), workdir)
-            if ISOLATE and workdir != REPO_ROOT:
+            if ISOLATE and workdir != PROJECT:
                 shutil.rmtree(workdir, ignore_errors=True)
             if deadline is not None and time.monotonic() > deadline:
                 overall_timed_out = True

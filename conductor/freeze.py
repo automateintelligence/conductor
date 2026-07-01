@@ -17,11 +17,37 @@ import hashlib
 import json
 import os
 import shlex
+import subprocess
 import sys
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(_THIS)
-ASSERTIONS_DIR = os.path.join(REPO_ROOT, "assertions")
+PLUGIN_ROOT = os.path.dirname(
+    _THIS
+)  # tool code (imports) — NOT where a project's gate lives
+
+
+def _project_root() -> str:
+    """PROJECT that owns the done-gate: ``$CONDUCTOR_HOME``, else the git repo of cwd, else
+    cwd. ``bin/conductor`` exports CONDUCTOR_HOME so the runner and this guard agree."""
+    home = os.environ.get("CONDUCTOR_HOME")
+    if home:
+        return home
+    try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).stdout.strip()
+        if top:
+            return top
+    except Exception:
+        pass
+    return os.getcwd()
+
+
+PROJECT = _project_root()
+ASSERTIONS_DIR = os.path.join(PROJECT, "assertions")
 DEFAULT_MANIFEST = os.path.join(ASSERTIONS_DIR, "manifest.yaml")
 DEFAULT_BASELINE = os.path.join(ASSERTIONS_DIR, ".frozen")
 
@@ -31,8 +57,8 @@ _ENTRY_FIELDS = ("command", "setup", "teardown", "timeout", "level", "kind", "cl
 
 def _load(manifest_path: str) -> list:
     """Single-source the manifest parse through the runner's own loader."""
-    if REPO_ROOT not in sys.path:
-        sys.path.insert(0, REPO_ROOT)
+    if PLUGIN_ROOT not in sys.path:
+        sys.path.insert(0, PLUGIN_ROOT)
     from assertions import run as runner
 
     return runner.load_assertions(manifest_path)
@@ -112,7 +138,7 @@ def gate_state(manifest_path: str, repo_root: str) -> dict:
 def record(
     manifest_path: str = DEFAULT_MANIFEST,
     baseline_path: str = DEFAULT_BASELINE,
-    repo_root: str = REPO_ROOT,
+    repo_root: str = PROJECT,
 ) -> str:
     """Snapshot the current gate to the baseline file (called at /conductor:start)."""
     state = gate_state(manifest_path, repo_root)
@@ -124,7 +150,7 @@ def record(
 def verify(
     manifest_path: str = DEFAULT_MANIFEST,
     baseline_path: str = DEFAULT_BASELINE,
-    repo_root: str = REPO_ROOT,
+    repo_root: str = PROJECT,
 ) -> dict:
     """Return {ok, tampered: [reasons], frozen}. No baseline -> frozen False, ok True (the
     guard is opt-in by the baseline's presence). Otherwise fail-closed: a frozen id removed,

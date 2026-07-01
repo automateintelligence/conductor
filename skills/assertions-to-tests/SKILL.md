@@ -34,5 +34,10 @@ For each assertion spec:
 4. **Verify the gate sees it RED:** `conductor assert run --level spec` lists the new id as
    `[FAIL]`. The spec is "done" exactly when every spec-level assertion goes green (§5.1, §7).
 
+**Where it lives:** the manifest is the **project's** `assertions/manifest.yaml` at the project root
+(conductor resolves the project as the git repo of cwd — run from the project root), and the tests
+live in the project too, referenced by the manifest command. Both are git-committed with the
+project, never written into the plugin cache.
+
 **Scope:** one test per assertion spec; do not implement product behavior. `level` is the gate
 tier (assigned here); `kind` is the assertion form (from the spec) — never conflate them.
