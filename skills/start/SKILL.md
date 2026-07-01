@@ -16,9 +16,15 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    `/spec-craft:*`, `/superpowers:*`, and environment-provided `/code-review`, `/codex`,
    `/document-release`. Any **missing → STOP** and tell the user to install it (fail-closed,
    amendment E). Do not launch a loop that dies at the first conducted call.
-1. **Detect spec source**; load spec + Expectations + Executable Assertions.
-2. **PRECONDITION — assertions present?** No → STOP and point the user at `/spec-craft:expectations`
-   then `/spec-craft:executable-assertions` (or, with `--auto-assert`, launch them).
+1. **Detect spec source**; load spec + Expectations. The **executable-assertion specs** live in
+   `<spec>.assertions.md` — the sibling file `/spec-craft:executable-assertions` writes — **not**
+   inline in the spec; load them from there if it exists.
+2. **PRECONDITION — assertion specs present?** "Present" = **`<spec>.assertions.md`** exists (the
+   4-part specs from `/spec-craft:executable-assertions`) — do not look for the specs inline in the
+   spec. If it exists the precondition is met: **use it as-is; it may have been hand-edited, so never
+   re-run `/spec-craft:executable-assertions` over it** (that clobbers the edits). Absent → STOP and
+   point the user at `/spec-craft:expectations` then `/spec-craft:executable-assertions` (or, with
+   `--auto-assert`, launch them — which writes `<spec>.assertions.md`).
 3. **Implement assertions as runnable tests** via `/conductor:assertions-to-tests`. **SKIP only if
    `start_probe.assertions_ready(expected_ids, "assertions/manifest.yaml", <assert-run --level spec
    exit>)` is True** — i.e. the manifest has one entry per `/spec-craft:executable-assertions` id

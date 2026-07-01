@@ -5,9 +5,11 @@ description: Use after /spec-craft:executable-assertions to turn each 4-part ass
 
 # /conductor:assertions-to-tests
 
-Input: the assertion specs (claim / setup / observation / kind) produced by
-`/spec-craft:executable-assertions`. For **each** spec, produce exactly one runnable test and
-one manifest entry, traceable by `id`. **Use `/superpowers:test-driven-development`** for the test.
+Input: the 4-part assertion specs (claim / setup / observation / kind) from
+`/spec-craft:executable-assertions`, which persists them to **`<spec>.assertions.md`** (a sibling of
+the spec). **Read them from that file** — it is the source of truth and may have been hand-edited
+after generation, so use it as-is; do not regenerate. For **each** spec, produce exactly one runnable
+test and one manifest entry, traceable by `id`. **Use `/superpowers:test-driven-development`** for the test.
 
 For each assertion spec:
 

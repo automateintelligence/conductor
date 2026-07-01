@@ -55,11 +55,11 @@ SETUP  (you run this once)
     │
     ├─ /spec-craft:expectations ........... writes "## Expectations" (success · failure · must-nots)
     │
-    ├─ /spec-craft:executable-assertions .. 4-part assertion specs (claim · setup · observation · kind)
+    ├─ /spec-craft:executable-assertions .. 4-part specs → <spec>.assertions.md (claim · setup · observation · kind)
     │
     └─ /conductor:start <spec>   ── the supervisor; idempotent, reconcile-first ───┐
          0. conductor preflight ........... does every conducted skill resolve? (fail-closed)
-         1. /conductor:assertions-to-tests  → assertions/manifest.yaml + RED tests  = the DONE-GATE
+         1. /conductor:assertions-to-tests  reads <spec>.assertions.md → assertions/manifest.yaml + RED tests = DONE-GATE
             conductor gate freeze .......... snapshot + commit the gate (FROZEN; worker can't weaken it)
          2. /superpowers:writing-plans .... plan.md (phases → tasks)        [only if no plan yet]
          3. /conductor:issue-sync ......... GitHub milestone + phase issues + task sub-issues + labels
