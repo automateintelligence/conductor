@@ -17,36 +17,15 @@ import hashlib
 import json
 import os
 import shlex
-import subprocess
 import sys
+
+from conductor.paths import project_root
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_ROOT = os.path.dirname(
     _THIS
 )  # tool code (imports) — NOT where a project's gate lives
-
-
-def _project_root() -> str:
-    """PROJECT that owns the done-gate: ``$CONDUCTOR_HOME``, else the git repo of cwd, else
-    cwd. ``bin/conductor`` exports CONDUCTOR_HOME so the runner and this guard agree."""
-    home = os.environ.get("CONDUCTOR_HOME")
-    if home:
-        return home
-    try:
-        top = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).stdout.strip()
-        if top:
-            return top
-    except Exception:
-        pass
-    return os.getcwd()
-
-
-PROJECT = _project_root()
+PROJECT = project_root()
 ASSERTIONS_DIR = os.path.join(PROJECT, "assertions")
 DEFAULT_MANIFEST = os.path.join(ASSERTIONS_DIR, "manifest.yaml")
 DEFAULT_BASELINE = os.path.join(ASSERTIONS_DIR, ".frozen")

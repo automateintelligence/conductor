@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+
+from conductor.paths import project_root
+
 REQUIRED = [
     "goal",
     "paths",
@@ -39,10 +43,20 @@ plan-index={p["plan_index"]}; ADRs={p["adr_dir"]}
 """
 
 
-def write(ctx: dict, path: str) -> str:
+def write(ctx: dict, path: str | None = None) -> str:
+    """Write the handoff into the PROJECT's ``.conductor/`` (goal + handoff live with the
+    project, not the plugin dir). A relative ``path`` resolves against the project root; an
+    absolute ``path`` is used as-is; the default is ``<project>/.conductor/handoff.md``."""
     missing = [k for k in REQUIRED if k not in ctx]
     if missing:
         raise ValueError(f"handoff missing required fields: {missing}")
+    if path is None:
+        path = os.path.join(project_root(), ".conductor", "handoff.md")
+    elif not os.path.isabs(path):
+        path = os.path.join(project_root(), path)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(build(ctx))
     return path

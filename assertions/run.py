@@ -37,31 +37,12 @@ import time
 ASSERTIONS_DIR = os.path.dirname(os.path.abspath(__file__))
 # PLUGIN_ROOT holds the TOOL CODE (imports); kept only for sys.path / module imports.
 PLUGIN_ROOT = os.path.dirname(ASSERTIONS_DIR)
+if PLUGIN_ROOT not in sys.path:
+    sys.path.insert(0, PLUGIN_ROOT)
 
+from conductor.paths import project_root  # noqa: E402  (needs PLUGIN_ROOT on sys.path first)
 
-def _project_root() -> str:
-    """The PROJECT that owns run state + the done-gate: ``$CONDUCTOR_HOME``, else the git
-    repo of the current directory, else cwd. ``bin/conductor`` resolves this once and exports
-    ``CONDUCTOR_HOME`` so the runner and the freeze guard agree. Distinct from PLUGIN_ROOT
-    (the installed tool code), which must not hold a project's gate/state."""
-    home = os.environ.get("CONDUCTOR_HOME")
-    if home:
-        return home
-    try:
-        top = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).stdout.strip()
-        if top:
-            return top
-    except Exception:
-        pass
-    return os.getcwd()
-
-
-PROJECT = _project_root()
+PROJECT = project_root()
 MANIFEST = os.environ.get(
     "CONDUCTOR_MANIFEST", os.path.join(PROJECT, "assertions", "manifest.yaml")
 )
