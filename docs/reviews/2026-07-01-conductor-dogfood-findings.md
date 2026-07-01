@@ -51,6 +51,21 @@ Feeds the freeze fix above. The runner stays command-agnostic; the skill (which 
 pytest) is the right place to pin the environment. Also note where assertion tests are placed so they
 don't inherit a heavy ancestor `conftest.py`.
 
+### MED–HIGH — autodev recipe (TDD) vs the frozen-gate model: the phase cycle is ambiguous
+The autodev recipe runs each phase through `/superpowers:subagent-driven-development`, which is
+**TDD-first** ("write a failing test → implement"). But conductor's done-gate tests are **pre-written
+and frozen at setup**, and the worker must never edit a frozen test. So the TDD "write the test" step
+is wrong/redundant for a conductor phase — the correct cycle is **"confirm the phase's frozen
+assertions are RED → implement the product → confirm GREEN → review → commit."** The dogfood agent had
+to *reverse-engineer this inversion on its own* (same class of problem as the integration-model
+reverse-engineering).
+- *Evidence:* dogfood run, agent's own words: *"each task's cycle isn't 'write failing test →
+  implement' — it's 'confirm the frozen assertion is RED → implement the stub → confirm GREEN.'"*
+- *Fix:* the `autodev` skill should state the conductor phase cycle explicitly — implement **to** the
+  frozen gate; frozen tests are never written or touched; task-level tests may be *added* (freeze
+  allows adding, never weakening) but aren't required when the frozen assertions already specify the
+  unit. So no run re-derives the inversion.
+
 ### MEDIUM — Gate runtime is O(N × cold-pytest-startup), run serially
 `assertions/run.py` runs assertions **sequentially**, one cold subprocess each. On this monorepo:
 ~2 min before the pinned-command fix (heavy plugin autoload ×19), ~57s after (≈3s/assertion cold
