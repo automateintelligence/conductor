@@ -51,6 +51,22 @@ Feeds the freeze fix above. The runner stays command-agnostic; the skill (which 
 pytest) is the right place to pin the environment. Also note where assertion tests are placed so they
 don't inherit a heavy ancestor `conftest.py`.
 
+### HIGH — Setup never codex-reviews the plan, and the generated plan drops the recipe's review/merge steps
+Two related gaps, same root: the plan comes from conductor-unaware `/superpowers:writing-plans`.
+1. **The plan artifact is never codex-reviewed.** `/conductor:start` step 4 generates `plan.md` and
+   goes straight to issue-sync — no review gate. The plan dictates every phase yet is the *least*-reviewed
+   setup artifact, and it contradicts the standing "codex-review before proceeding" order. *(Operator
+   caught this live: "/conductor did not require a codex review for the plan.")*
+2. **The generated plan's per-phase workflow omits conductor's recipe.** The dogfood plan's per-phase
+   flow is `RED → implement → GREEN → ruff/pyright → commit → gate-verify`. Missing vs the autodev
+   recipe: `/code-review` per task, **`/codex review`**, receiving-code-review, `conductor merge-gate`,
+   `/document-release`. Full-auto still runs the recipe (the autodev skill applies it regardless), but a
+   **supervised** build that follows the plan literally silently skips codex-per-PR and the merge-gate.
+- *Fix:* (a) `/conductor:start` runs a **codex review of the plan** (step 4→5), surfaces findings,
+  revises before the ledger/build; (b) the plan template / writing-plans invocation carries conductor's
+  per-phase recipe steps (codex, merge-gate, document-release), or the plan explicitly states "each
+  phase executes via the autodev recipe" so the discipline can't be dropped by reading it literally.
+
 ### MED–HIGH — autodev recipe (TDD) vs the frozen-gate model: the phase cycle is ambiguous
 The autodev recipe runs each phase through `/superpowers:subagent-driven-development`, which is
 **TDD-first** ("write a failing test → implement"). But conductor's done-gate tests are **pre-written
