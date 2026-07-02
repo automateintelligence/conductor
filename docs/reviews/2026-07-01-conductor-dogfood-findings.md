@@ -473,4 +473,12 @@ Start step 6 now verifies the response and installs the Tier-B fallback (flock-g
 script + `# conductor-autodev <project>`-tagged crontab lines) for unattended runs; the autodev
 STOP branch removes the tagged lines so a finished run isn't resurrected. *Upstream note: this
 looks like a Claude Code CLI gap worth reporting — the durable param is schema-documented but
-inert.*
+inert (confirmed on build 2.1.198, twice, plus a clean probe here).*
+
+**Worker's watchdog design — better than the generic Tier-B; fold into the 0.4.1/prepare docs:**
+its resume script no-ops while any claude process runs with cwd in the project (zero cost while a
+terminal is open), **exits once the gate is green** (finished runs get no-op fires, not
+resurrection — the lingering crontab lines still need removal, which 0.4.1's STOP branch does),
+and flock-guards overlap. One trade-off surfaced for the owner: headless fires use
+`--permission-mode bypassPermissions` per the recovery doc — unattended git/gh/edit power in the
+production checkout; a scoped settings.json allowlist is the tighter alternative if wanted.
