@@ -116,6 +116,26 @@ intentionally incremental. *(Dogfood Phase 1→2 boundary, 2026-07-01, confirmed
   a **phase-level** criterion (this phase's assertions), not blanket `pytest`; (c) document the gate ↔
   CI/merge-gate relationship. Same "per-phase merge vs all-green-when-done" theme as the recipe finding.
 
+### HIGH — Interactive single-session runs forfeit conductor's fresh-context (compaction) immunity
+Conductor is *designed* to be compaction-proof: the cron fires `/conductor:autodev`, and **each fire is
+fresh context that reconciles from durable state and reloads the recipe from the skill.** But the
+dogfood ran all phases in **one long interactive session** (agent dispatches a subagent per phase and
+applies the cycle from its own accumulating context). That forfeits the immunity — the session hit
+auto-compact mid-build (≈33%→20%).
+- **What survives compaction:** the *place* — reconcile-first re-derives progress from git + plan +
+  gate. Solid.
+- **What's at risk:** the *how* — the codex/merge-gate discipline lives in the accumulating context,
+  not reloaded per phase, so a compact summary can drop "always codex" and leave the agent following
+  the plan (stops at commit) → skips codex, now unsupervised + merging to `main`. Auto-compact is the
+  most likely trigger of the recipe-authoritative risk above.
+- *Fix (operator):* drive phases via `/conductor:autodev` fires (fresh context + recipe-from-skill each
+  fire) — conductor's designed walk-away mode; needs the ledger (GH issues). Or restart into a fresh
+  session at each phase boundary and re-anchor to the recipe. Don't let auto-compact summarize mid-phase.
+- *Fix (conductor):* the design's compaction-immunity only holds when phases run as discrete
+  `/conductor:autodev` fires — so the skills/docs should steer supervised runs to *also* execute per
+  fresh fire (or checkpoint+restart at phase boundaries), not one accumulating interactive session.
+  Same root as recipe-not-authoritative: the recipe must come from the skill each fire, never memory.
+
 ### MED–HIGH — autodev recipe (TDD) vs the frozen-gate model: the phase cycle is ambiguous
 The autodev recipe runs each phase through `/superpowers:subagent-driven-development`, which is
 **TDD-first** ("write a failing test → implement"). But conductor's done-gate tests are **pre-written
