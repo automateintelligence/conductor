@@ -158,3 +158,18 @@ def test_gh_failure_midway_never_advertises_done():
     assert out["ok"] is False and out["error"].startswith("gh-error")
     assert "status:done" not in store["labels"]  # nothing advertises done
     assert 10 not in store["closed"]
+
+
+def test_plan_unwritable_is_best_effort_not_fatal(tmp_path):
+    # codex round-2: a WRITE error must honor the same best-effort contract as reads —
+    # the ledger bookkeeping already completed; the result reports, never raises.
+    plan = tmp_path / "plan.md"
+    plan.write_text("# T\n\n## Phase 1 — X (A3)\n\n- [ ] one\n")
+    plan.chmod(0o400)
+    g, store = _store_gh(f"body\n{MARKER}")
+    try:
+        out = phase_done.phase_done("o/r", 10, gh=g, results=GREEN, plan_path=str(plan))
+    finally:
+        plan.chmod(0o600)
+    assert out["ok"] is True and 10 in store["closed"]
+    assert out["plan"]["error"].startswith("plan-unwritable")

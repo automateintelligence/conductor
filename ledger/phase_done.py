@@ -129,7 +129,10 @@ def _tick_plan_section(plan_path: str, issue_title: str) -> dict[str, Any]:
         end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
         section, count = _UNTICKED.subn(r"\1- [x]", text[m.end() : end])
         if count:
-            with open(plan_path, "w", encoding="utf-8") as f:
-                f.write(text[: m.end()] + section + text[end:])
+            try:
+                with open(plan_path, "w", encoding="utf-8") as f:
+                    f.write(text[: m.end()] + section + text[end:])
+            except OSError as exc:  # same best-effort contract as the read side
+                return {"error": f"plan-unwritable: {exc}"}
         return {"ticked": count}
     return {"error": "section-not-found"}
