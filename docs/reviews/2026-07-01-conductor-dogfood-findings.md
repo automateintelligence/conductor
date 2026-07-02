@@ -436,3 +436,17 @@ Also resolved (operator question): Phases 4–6 need **no additional spec detail
 richest binding in the plan (856ca61's "Spec intent — REQUIRED READING" blocks with 4/3/2
 distilled requirement bullets); 8b86e30 deliberately added only archival pointers to the done
 phases 1–3 + optional 7.
+
+### Prepare recipe — as executed by hand on ai-platform (2026-07-02, owner picked align-now)
+1. Renamed milestone → plan H1 and issues #127–132 → canonical phase headings, **matched by
+   assertion-id set** (paraphrase-immune; `sync.parse_plan_md` itself was the title source so
+   nothing could drift). 2. `conductor ledger convert <plan.md>` → reused all six phases (zero
+   duplicates), upserted markers, created + linked 12 task sub-issues (#133–144) for Phases 4–6;
+   Phases 1–3 produced no spurious tasks because their boxes are `[x]` (`_TASK` matches unchecked
+   only — the tick discipline pays off). 3. Parked the auto-created optional Phase 7 (#145) with
+   `status:draft` + `dep-blocked`.
+
+**Gap found: `status:draft` is claim-eligible.** `ledger/claim.py::eligible()` excludes only
+blocked/done/dep-blocked/assigned/closed — a `status:draft` phase can be claimed and executed.
+Draft should mean "not scheduled". Workaround this run: `dep-blocked` on #145. Fix (0.5.0 /
+prepare pass): add `status:draft` to the blocking set.
