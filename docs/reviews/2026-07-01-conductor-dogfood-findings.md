@@ -72,10 +72,16 @@ disagreed, the plan won. So the fix must make the recipe **authoritative** over 
 shorthand, not just add steps to one plan. Also surfaced: it committed setup + Phase 1 onto **one
 branch** instead of per-phase PRs off `main` — the branching model ("one PR per phase off `main`;
 setup its own PR") needs to be explicit too.
-- *Fix:* (a) `/conductor:start` runs a **codex review of the plan** (step 4→5), surfaces findings,
-  revises before the ledger/build; (b) the plan template / writing-plans invocation carries conductor's
-  per-phase recipe steps (codex, merge-gate, document-release), or the plan explicitly states "each
-  phase executes via the autodev recipe" so the discipline can't be dropped by reading it literally.
+- *Root cause (verified 2026-07-01):* `start` step 4 is a bare `/superpowers:writing-plans` invocation
+  — it passes **nothing** about the workflow. The recipe is defined only in **autodev step 6** and is
+  never handed to the plan-writer, so the generated plan can't encode it.
+- *Fix — defense in depth (the "add it vs check it" binary collapses to both):*
+  1. **Input:** step 4 hands `writing-plans` the conductor per-phase recipe so the plan encodes it.
+  2. **Check:** a post-plan verification that the plan actually carries the recipe — `writing-plans` is
+     a general LLM skill, so "asked" ≠ "included." Natural home = the **codex-review-of-the-plan** step
+     `start` also lacks (one step does both: catch a bad plan + confirm the recipe is present).
+  3. **Execution:** make the recipe **authoritative** so autodev + the supervised path apply it
+     regardless of the plan (Phase 1 proved a plan can *override* the recipe, so 1+2 alone aren't safe).
 
 ### MED–HIGH — autodev recipe (TDD) vs the frozen-gate model: the phase cycle is ambiguous
 The autodev recipe runs each phase through `/superpowers:subagent-driven-development`, which is
