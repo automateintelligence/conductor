@@ -48,6 +48,11 @@ def lint(text: str, spec_path: str | None = None) -> list[str]:
             reasons.append(f"phase-no-tasks:{title}")
         if not _SPEC_POINTER.search(section):
             reasons.append(f"phase-no-spec-pointer:{title}")
+        # A phase without assertion ids can't be gate-verified downstream (--from-gate /
+        # phase-done fail closed on a missing marker) — gatelessness must be deliberate,
+        # declared with a literal `gate: none` in the phase section (codex PR-28 #1).
+        if not parsed[2] and "gate: none" not in section.lower():
+            reasons.append(f"phase-no-assertions:{title}")
     if not found_phase:
         reasons.append("no-phases")
 

@@ -79,7 +79,7 @@ def test_old_dialect_phase_headings_also_lint():
     text = (
         "# T\n\n**Normative spec:** s.md\n\n"
         "codex /code-review merge-gate closes #\n\n"
-        "## Backend [ready]\n\n**Spec:** §2\n\n- [ ] build it\n"
+        "## Backend [ready]\n\n**Spec:** §2\n\ngate: none\n\n- [ ] build it\n"
     )
     assert plan_lint.lint(text) == []
 
@@ -91,3 +91,31 @@ def test_spec_intent_annotated_pointer_accepted():
         "**Spec intent — REQUIRED READING (build to these, not just A8):**",
     )
     assert plan_lint.lint(text) == []
+
+
+def test_phase_without_assertion_ids_flagged():
+    # codex PR-28 #1: a gateless phase breaks --from-gate/phase-done downstream; it must
+    # be deliberate, not accidental.
+    text = GOOD_PLAN.replace(" (A8)", "")
+    reasons = plan_lint.lint(text)
+    assert "phase-no-assertions:Phase 2 — Reporting" in reasons
+
+
+def test_gate_none_escape_hatch_for_deliberate_gateless_phase():
+    text = GOOD_PLAN.replace(" (A8)", "").replace(
+        "**Spec:** §10 Sample Report",
+        "**Spec:** §10 Sample Report\n\ngate: none",
+    )
+    assert plan_lint.lint(text) == []
+
+
+def test_lint_is_a_presence_floor_not_a_position_check():
+    # Pins the smoke-check semantics (codex PR-28 #4): needles anywhere satisfy the lint;
+    # SUBSTANCE is the plan codex-review's job (start step 4b runs both).
+    reordered = GOOD_PLAN.replace(
+        "Per-phase cycle: implement via subagent → /code-review per task → commit per task →\n"
+        "one PR per phase (`Closes #<phase-issue>`) → codex review ×2 → `conductor merge-gate`\n"
+        "→ merge → `conductor ledger phase-done`.",
+        "notes: /code-review, codex, merge-gate, Closes #",
+    )
+    assert plan_lint.lint(reordered) == []

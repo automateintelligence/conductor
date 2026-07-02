@@ -22,7 +22,9 @@ deletes existing ones.
 2. **RECONCILE (precedence git/tests > PR > label).** `conductor ledger reconcile <n> --from-gate`
    — test state is **derived** from `assertions/run/results.json` via the issue's
    `conductor-assertions` marker; never hand-report `--tests-red` (worker-reported truth decays).
-   Run `conductor assert run --level spec` first so results.json is fresh.
+   Run `conductor assert run --level spec` first so results.json is fresh. A closed
+   `status:done` phase whose gate is green is **terminal** — reconcile leaves it closed even
+   without PR state (git/tests > PR); pass `--pr-merged` only when you have verified it.
    The per-phase retry count is **durable** (issue body) and maintained by reconcile itself: a
    still-red live-owned phase is counted, and at the cap `retry-cap-exceeded` → `status:blocked`
    (escalates — a genuinely failing phase stops instead of looping every fire); `stale-lease-reclaim`
