@@ -83,6 +83,28 @@ setup its own PR") needs to be explicit too.
   3. **Execution:** make the recipe **authoritative** so autodev + the supervised path apply it
      regardless of the plan (Phase 1 proved a plan can *override* the recipe, so 1+2 alone aren't safe).
 
+### HIGH — Frozen-RED gate collides with every "run-all-tests-green" mechanism (CI *and* merge-gate)
+Conductor's done-gate is tests that are **frozen RED and go green phase-by-phase**, living in the
+project's test tree (`tests/model_eval/`). Any "run the whole suite" step collects them and fails until
+the gate is fully green (Phase 6):
+- **Project CI** runs `pytest tests/` → collects the 16 not-yet-implemented gate tests → **red CI on
+  every phase PR**.
+- **conductor's own merge-gate**: `CONDUCTOR_MERGE_VERIFY` defaults to **`pytest -q`**
+  (`merge_gate.py:171`), re-run on the merged ref → same full suite → `merge-ref-verify-failed`
+  **blocks every per-phase merge**.
+So both the project CI *and conductor's merge-gate* bake in "all-green-when-done" (autodev's
+merge-when-the-whole-gate-is-green), fighting the **per-phase merge** workflow where the gate is
+intentionally incremental. *(Dogfood Phase 1→2 boundary, 2026-07-01, confirmed by code.)*
+- *Fix (this run):* exclude the gate from full-suite runs until Phase 6 in **both** places — CI
+  (`--ignore=tests/model_eval`) and merge-gate (`CONDUCTOR_MERGE_VERIFY="pytest -q --ignore=tests/model_eval"`,
+  which *keeps* merge-gate's mergeability/thread/draft/behind checks rather than bypassing the gate).
+  Re-include at Phase 6 — **track as a checkbox**; if forgotten, the gate never runs in CI/merge-gate again.
+- *Fix (conductor):* (a) make gate tests a recognizable, **auto-excludable class** — a pytest marker
+  (`conductor_gate` + `-m "not conductor_gate"`) or dir convention — so full-suite runs skip the
+  not-yet-green gate with no per-project `--ignore` to remember/remove; (b) scope merge-gate's verify to
+  a **phase-level** criterion (this phase's assertions), not blanket `pytest`; (c) document the gate ↔
+  CI/merge-gate relationship. Same "per-phase merge vs all-green-when-done" theme as the recipe finding.
+
 ### MED–HIGH — autodev recipe (TDD) vs the frozen-gate model: the phase cycle is ambiguous
 The autodev recipe runs each phase through `/superpowers:subagent-driven-development`, which is
 **TDD-first** ("write a failing test → implement"). But conductor's done-gate tests are **pre-written
