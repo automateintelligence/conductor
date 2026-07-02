@@ -64,10 +64,13 @@ def tests_red_from_results(
     tokens: list[str], results: dict[str, Any]
 ) -> dict[str, Any]:
     """Per-phase test state derived from a runner ``results.json`` dict (id -> {pass, ...}).
-    A matched id whose ``pass`` is not True counts red; an unresolvable token is reported in
-    ``unresolved`` so callers fail closed instead of treating a typo as green."""
+    A matched id whose ``pass`` is not True counts red. Fail-closed reporting: an
+    unresolvable token lands in ``unresolved`` and a token matching MORE than one id lands
+    in ``ambiguous`` (codex #1: a broken mapping must never silently read as green) —
+    callers must reject on either."""
     ids = list(results.keys())
     unresolved: list[str] = []
+    ambiguous: dict[str, list[str]] = {}
     red_ids: set[str] = set()
     matched: dict[str, list[str]] = {}
     for token in tokens:
@@ -75,14 +78,28 @@ def tests_red_from_results(
         if not found:
             unresolved.append(token)
             continue
+        if len(found) > 1:  # exact match returns exactly one by construction
+            ambiguous[token] = found
+            continue
         matched[token] = found
         red_ids.update(i for i in found if results[i].get("pass") is not True)
     return {
         "red": bool(red_ids),
         "red_ids": sorted(red_ids),
         "unresolved": unresolved,
+        "ambiguous": ambiguous,
         "matched": matched,
     }
+
+
+def remove_marker(body: str | None) -> str | None:
+    """Body with the marker removed, or None if there was no marker (nothing to write).
+    Used when a plan explicitly declares a phase's assertions empty — a stale marker must
+    not keep gating the phase against ids the plan no longer owns (codex #2)."""
+    body = body or ""
+    if not _MARKER.search(body):
+        return None
+    return _MARKER.sub("", body).rstrip()
 
 
 def load_results(path: str) -> dict[str, Any]:

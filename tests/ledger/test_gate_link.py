@@ -69,8 +69,34 @@ def test_upsert_marker_appends_replaces_and_noops():
     appended = gate_link.upsert_marker("body", ["A1"])
     assert appended == "body\n\n<!-- conductor-assertions: A1 -->"
     replaced = gate_link.upsert_marker(appended, ["A1", "A2"])
+    assert replaced is not None
     assert replaced.count("conductor-assertions") == 1
     assert "A1,A2" in replaced
     assert (
         gate_link.upsert_marker(replaced, ["A1", "A2"]) is None
     )  # unchanged -> no rewrite
+
+
+# --- codex round-1: ambiguity must fail closed, not resolve silently ---
+
+
+def test_ambiguous_prefix_match_reported_not_resolved():
+    results = {"a03-x": {"pass": True}, "a3-y": {"pass": True}}
+    out = gate_link.tests_red_from_results(["A3"], results)
+    assert out["ambiguous"] == {"A3": ["a03-x", "a3-y"]}
+    assert "A3" not in out["matched"]  # never silently green on a broken mapping
+    assert out["red"] is False and out["unresolved"] == []
+
+
+def test_exact_match_is_never_ambiguous():
+    results = {"A3": {"pass": True}, "a03-x": {"pass": True}}
+    out = gate_link.tests_red_from_results(["A3"], results)
+    assert out["ambiguous"] == {}
+    assert out["matched"] == {"A3": ["A3"]}
+
+
+def test_remove_marker():
+    body = "body\n\n<!-- conductor-assertions: A1 -->"
+    assert gate_link.remove_marker(body) == "body"
+    assert gate_link.remove_marker("no marker") is None
+    assert gate_link.remove_marker(None) is None

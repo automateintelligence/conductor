@@ -510,3 +510,61 @@ def test_generate_marker_unchanged_is_not_rewritten():
     gh.get_body.return_value = "body\n\n<!-- conductor-assertions: A3 -->"
     sync.generate("o/r", plan, gh)
     gh.set_body.assert_not_called()
+
+
+# --- codex round-1: token shape + stale-marker lifecycle ---
+
+
+def test_prose_single_word_parens_rejected_digit_required():
+    md = "# T\n\n## Phase 1 — Cleanup (optional)\n\n- [ ] task\n"
+    (phase,) = sync.parse_plan_md(md)["phases"]
+    assert phase["assertions"] == []  # no digit -> prose, not an assertion id
+
+
+def test_mixed_valid_invalid_tokens_reject_whole_group():
+    md = "# T\n\n## Phase 1 — Cleanup (A3, optional)\n\n- [ ] task\n"
+    (phase,) = sync.parse_plan_md(md)["phases"]
+    assert phase["assertions"] == []  # half-parsed bindings are worse than none
+
+
+def test_generate_removes_marker_when_assertions_explicitly_empty():
+    plan = {
+        "title": "P",
+        "phases": [
+            {
+                "title": "Phase 1 — Cleanup",
+                "status": "ready",
+                "tasks": [],
+                "assertions": [],
+            },
+        ],
+    }
+    gh = MagicMock()
+    gh.find_milestone.return_value = 1
+    gh.find_issue.return_value = {"number": 10, "id": 1001}
+    gh.find_issues.return_value = []
+    gh.list_sub_issues.return_value = []
+    gh.get_body.return_value = "body\n\n<!-- conductor-assertions: A3 -->"
+    sync.generate("o/r", plan, gh)
+    new_body = gh.set_body.call_args[0][2]
+    assert "conductor-assertions" not in new_body
+    assert "body" in new_body
+
+
+def test_generate_preserves_marker_when_assertions_key_absent():
+    # A hand-built JSON dict that carries no assertion info must not destroy an
+    # existing (e.g. manually backfilled) marker.
+    plan = {
+        "title": "P",
+        "phases": [
+            {"title": "Phase 1 — Cleanup", "status": "ready", "tasks": []},
+        ],
+    }
+    gh = MagicMock()
+    gh.find_milestone.return_value = 1
+    gh.find_issue.return_value = {"number": 10, "id": 1001}
+    gh.find_issues.return_value = []
+    gh.list_sub_issues.return_value = []
+    gh.get_body.return_value = "body\n\n<!-- conductor-assertions: A3 -->"
+    sync.generate("o/r", plan, gh)
+    gh.set_body.assert_not_called()

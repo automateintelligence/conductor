@@ -57,9 +57,13 @@ marker:
 <!-- conductor-assertions: A3,A4,A5 -->
 ```
 
-`generate` also backfills/updates this marker on reused phase issues (idempotent — an
-unchanged marker is never rewritten). The marker is what lets `reconcile --from-gate` and
-`phase-done` DERIVE test state from the done-gate instead of trusting caller flags.
+Token rules (one bad token rejects the whole group — never half-parsed): whitespace-free AND
+contains a digit (`(optional)` is prose, not an id). Marker lifecycle on a REUSED phase issue:
+ids present → backfill/replace (idempotent — unchanged is never rewritten); `assertions`
+key present but **empty** → a stale marker is REMOVED (the plan is the truth); key **absent**
+(hand-built JSON dict, no assertion info) → an existing marker is preserved. The marker is
+what lets `reconcile --from-gate` and `phase-done` DERIVE test state from the done-gate
+instead of trusting caller flags.
 
 ### reconcile
 
@@ -70,8 +74,9 @@ test state from the runner's `results.json` (default `<project>/assertions/run/r
 run `conductor assert run --level spec` first) via the issue's `conductor-assertions` marker —
 ground truth instead of a worker-reported flag. Marker tokens resolve to manifest ids
 exactly, case-insensitively, or by letters+number prefix (`A3` → `a03-…`, never `a30-…`).
-Fail-closed: a missing marker, missing results file, or unresolved token exits with a
-distinct error — it can never silently read as green.
+Fail-closed: a missing marker, missing results file, unresolved token, or **ambiguous**
+token (matching more than one manifest id) exits with a distinct error — it can never
+silently read as green.
 
 Applies §7 reconcile rules to a single issue. Returns `{action, new_status}`.
 
@@ -98,16 +103,17 @@ overrides the current status label. Rule evaluation order:
 **Atomic end-of-phase bookkeeping** — one command replacing the clerical steps workers
 reliably drop (dogfood evidence: 0/27 plan checkboxes, labels never maintained). Fail-closed:
 it first verifies every id in the issue's `conductor-assertions` marker is GREEN in
-`results.json` (same resolution rules as `--from-gate`); a red/unresolved/missing anything
-returns an error and touches **nothing**. Only `--no-gate-check` (explicit) skips that.
-On success, in order:
+`results.json` (same resolution rules as `--from-gate`); a red/unresolved/ambiguous/missing
+anything returns an error and touches **nothing**. Only `--no-gate-check` (explicit) skips
+that. On success, in order (the done label is deliberately LAST before close, so a gh
+failure mid-way can never leave the ledger falsely advertising done — a `gh-error` result
+is returned instead and the command is safely re-runnable):
 
-1. Label `status:done` (other `status:*` removed).
-2. Close every task sub-issue (checklist-fallback bodies get `- [ ] #N` → `- [x] #N`).
-3. Unassign all workers; strip the `conductor-lease` + `conductor-attempts` markers
+1. Close every task sub-issue (checklist-fallback bodies get `- [ ] #N` → `- [x] #N`).
+2. Unassign all workers; strip the `conductor-lease` + `conductor-attempts` markers
    (the `conductor-assertions` marker is preserved).
-4. Close the phase issue.
-5. With `--plan`: tick every `- [ ]` in the plan section whose phase heading equals the
+3. Label `status:done` (other `status:*` removed), then close the phase issue.
+4. With `--plan`: tick every `- [ ]` in the plan section whose phase heading equals the
    issue title (best-effort: a missing section is reported in the result, never fatal).
 
 Returns `{ok, issue, sub_issues_closed, checklist_ticked, plan?}`; exits 1 when not ok.

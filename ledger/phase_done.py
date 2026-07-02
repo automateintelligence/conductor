@@ -42,6 +42,13 @@ def phase_done(
                 "unresolved": state["unresolved"],
                 "issue": n,
             }
+        if state["ambiguous"]:
+            return {
+                "ok": False,
+                "error": "ambiguous-assertions",
+                "ambiguous": state["ambiguous"],
+                "issue": n,
+            }
         if state["red"]:
             return {
                 "ok": False,
@@ -50,34 +57,48 @@ def phase_done(
                 "issue": n,
             }
 
+    # Mutation order (codex #3): sub-issues, lease, assignees FIRST; the done label is the
+    # LAST mutation before close, so a gh failure mid-way can never leave the ledger falsely
+    # advertising done. Any gh error returns a failure dict — the command is re-runnable.
     st = gh.issue_state(repo, n)
-    gh.set_labels(
-        repo,
-        n,
-        add=["status:done"],
-        remove=[lbl for lbl in st["labels"] if lbl.startswith("status:")],
-    )
-
     sub_issues_closed: list[int] = []
     checklist_ticked = 0
     try:
-        for child in gh.list_sub_issues(repo, n):
-            gh.close_issue(repo, child["number"])
-            sub_issues_closed.append(child["number"])
-    except RuntimeError:  # sub-issue API unavailable -> tick the checklist fallback
+        try:
+            children = gh.list_sub_issues(repo, n)
+        except RuntimeError:  # ONLY the list call falls back (API unavailable);
+            children = None  # a failing child close below is a real gh error
+        if children is None:
+            current = gh.get_body(repo, n) or ""
+            new_body, checklist_ticked = _CHECKLIST_REF.subn(r"- [x] #\1", current)
+            if checklist_ticked:
+                gh.set_body(repo, n, new_body)
+        else:
+            for child in children:
+                gh.close_issue(repo, child["number"])
+                sub_issues_closed.append(child["number"])
+
+        for worker in list(st["assignees"]):
+            gh.unassign(repo, n, worker)
         current = gh.get_body(repo, n) or ""
-        new_body, checklist_ticked = _CHECKLIST_REF.subn(r"- [x] #\1", current)
-        if checklist_ticked:
-            gh.set_body(repo, n, new_body)
+        stripped = claim.strip_markers(current)
+        if stripped != current:
+            gh.set_body(repo, n, stripped)
 
-    for worker in list(st["assignees"]):
-        gh.unassign(repo, n, worker)
-    current = gh.get_body(repo, n) or ""
-    stripped = claim.strip_markers(current)
-    if stripped != current:
-        gh.set_body(repo, n, stripped)
-
-    gh.close_issue(repo, n)
+        gh.set_labels(
+            repo,
+            n,
+            add=["status:done"],
+            remove=[lbl for lbl in st["labels"] if lbl.startswith("status:")],
+        )
+        gh.close_issue(repo, n)
+    except RuntimeError as exc:
+        return {
+            "ok": False,
+            "error": f"gh-error: {exc}",
+            "issue": n,
+            "sub_issues_closed": sub_issues_closed,
+        }
 
     result: dict[str, Any] = {
         "ok": True,

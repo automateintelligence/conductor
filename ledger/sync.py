@@ -14,13 +14,18 @@ _CHECKLIST = re.compile(r"- \[[ xX]\] #(\d+)")
 
 def _assertion_tokens(title: str) -> list[str]:
     """Assertion ids named by a phase heading's TRAILING parens — ``(A3, A4, A5)`` or
-    ``(A8/A16/A19)``. A token containing whitespace means the parens are prose
-    (``(build-only, NOT executed)``), so the whole group is rejected, never half-parsed."""
+    ``(A8/A16/A19)``. Every token must be whitespace-free AND contain a digit (assertion
+    ids are numbered; ``(optional)`` is prose — codex #4); one bad token rejects the whole
+    group, never half-parsed."""
     m = _TRAILING_PARENS.search(title)
     if not m:
         return []
     tokens = [t.strip() for t in re.split(r"[,/]", m.group(1)) if t.strip()]
-    if not tokens or any(re.search(r"\s", t) for t in tokens):
+    if (
+        not tokens
+        or any(re.search(r"\s", t) for t in tokens)
+        or not all(re.search(r"\d", t) for t in tokens)
+    ):
         return []
     return tokens
 
@@ -120,7 +125,10 @@ def generate(repo: str, plan: dict[str, Any], gh: Any) -> dict[str, Any]:
     for phase, (phase_number, children) in zip(plan["phases"], phase_state):
         # The gate-link marker makes the phase->assertion mapping MACHINE-readable, so
         # reconcile --from-gate / phase-done derive test state instead of trusting flags.
-        tokens = [str(t) for t in (phase.get("assertions") or [])]
+        # Key ABSENT (hand-built dict, no assertion info) preserves any existing marker;
+        # key present but EMPTY removes a stale one (codex #2 — the plan is the truth).
+        raw_assertions = phase.get("assertions")
+        tokens = [str(t) for t in (raw_assertions or [])]
         if phase_number is None:
             phase_number = gh.create_issue(
                 repo,
@@ -134,6 +142,10 @@ def generate(repo: str, plan: dict[str, Any], gh: Any) -> dict[str, Any]:
             if (
                 new_body is not None
             ):  # backfill or replace-stale; never rewrite unchanged
+                gh.set_body(repo, phase_number, new_body)
+        elif raw_assertions is not None:
+            new_body = gate_link.remove_marker(gh.get_body(repo, phase_number))
+            if new_body is not None:
                 gh.set_body(repo, phase_number, new_body)
         sub_issues: list[int] = []
         fallback = False

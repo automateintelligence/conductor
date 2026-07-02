@@ -72,6 +72,11 @@ def _tests_red_from_gate(
             f"from-gate: unresolved assertion tokens {state['unresolved']} "
             f"on issue #{issue}"
         )
+    if state["ambiguous"]:
+        sys.exit(
+            f"from-gate: ambiguous assertion tokens {state['ambiguous']} "
+            f"on issue #{issue} — fix the marker to name exact manifest ids"
+        )
     return bool(state["red"])
 
 

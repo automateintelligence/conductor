@@ -127,3 +127,34 @@ def test_plan_section_not_found_is_reported_not_fatal(tmp_path):
     assert out["ok"] is True
     assert out["plan"] == {"error": "section-not-found"}
     assert 10 in store["closed"]  # ledger bookkeeping still completed
+
+
+def test_ambiguous_token_fails_closed():
+    g, store = _store_gh(f"body\n{MARKER}")
+    out = phase_done.phase_done(
+        "o/r", 10, gh=g, results={"a03-x": {"pass": True}, "a3-y": {"pass": True}}
+    )
+    assert out["ok"] is False and out["error"] == "ambiguous-assertions"
+    assert out["ambiguous"] == {"A3": ["a03-x", "a3-y"]}
+    assert store["closed"] == []
+
+
+def test_gh_failure_midway_never_advertises_done():
+    # codex round-1 #3: the done label must be the LAST mutation before close, so a
+    # failure in earlier bookkeeping can't leave the ledger falsely claiming done.
+    g, store = _store_gh(
+        f"body\n{MARKER}",
+        sub_issues=[{"number": 21, "id": 2001, "title": "t"}],
+    )
+    original_close = g.close_issue.side_effect
+
+    def failing_close(r, n):
+        if n == 21:
+            raise RuntimeError("gh 500")
+        return original_close(r, n)
+
+    g.close_issue.side_effect = failing_close
+    out = phase_done.phase_done("o/r", 10, gh=g, results=GREEN)
+    assert out["ok"] is False and out["error"].startswith("gh-error")
+    assert "status:done" not in store["labels"]  # nothing advertises done
+    assert 10 not in store["closed"]
