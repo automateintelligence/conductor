@@ -19,7 +19,10 @@ deletes existing ones.
 
 1. **RE-LOAD GOAL (fresh context).** Done only when `conductor assert run --level spec` exits 0.
    Re-read goal + paths from the durable handoff/ledger; trust git/issues, not memory.
-2. **RECONCILE (precedence git/tests > PR > label).** `ledger.reconcile(phase, ..., now_ts, L)`.
+2. **RECONCILE (precedence git/tests > PR > label).** `conductor ledger reconcile <n> --from-gate`
+   — test state is **derived** from `assertions/run/results.json` via the issue's
+   `conductor-assertions` marker; never hand-report `--tests-red` (worker-reported truth decays).
+   Run `conductor assert run --level spec` first so results.json is fresh.
    The per-phase retry count is **durable** (issue body) and maintained by reconcile itself: a
    still-red live-owned phase is counted, and at the cap `retry-cap-exceeded` → `status:blocked`
    (escalates — a genuinely failing phase stops instead of looping every fire); `stale-lease-reclaim`
@@ -32,14 +35,29 @@ deletes existing ones.
    - plan done → `/superpowers:writing-plans` next plan → `ledger.generate` (or `ledger.convert`).
    - no plans left but assertions red → `/superpowers:writing-plans` to close the gap → generate.
 5. **CLAIM.** `ledger.claim(phase, worker, now_ts, ttl)`. If False, back off and re-pick.
-6. **EXECUTE the phase in a FRESH SUBAGENT** via the recipe (one PR per phase). Conducted skills:
-   `/superpowers:*` are plugin skills; `/code-review`, `/codex`, `/document-release` are
-   **environment-provided** commands (verified by `/conductor:start` preflight):
+6. **EXECUTE the phase in a FRESH SUBAGENT** via the recipe (one PR per phase). **Build to the
+   SPEC:** hand the subagent the plan's `Normative spec:` path plus this phase's `**Spec:**`
+   sections and require reading them BEFORE implementing. The plan is a summary and the assertions
+   are only the mechanical done-floor — the spec's spirit and intent is the work, so gate-green is
+   necessary, never sufficient. Conducted skills: `/superpowers:*` are plugin skills;
+   `/code-review`, `/codex`, `/document-release` are **environment-provided** commands (verified
+   by `/conductor:start` preflight):
+   0. **Reconcile-within-phase (restart safety):** diff the phase's `- [ ]` tasks against
+      `git log` on the phase branch (per-task commits are the breadcrumbs) and the gate's
+      per-assertion state; skip tasks already done. A dirty tree left by a dead worker: commit it
+      to the phase branch as `wip: reclaimed partial work` — never discard it, never build over
+      it blind.
    1. `/superpowers:subagent-driven-development` to implement the phase's tasks.
-   2. `/code-review` (self-review) per task. 3. **commit after every task.**
-   4. **one PR per phase** (`Closes #<phase-issue>`).
-   5. `/codex $superpowers:requesting-code-review Provide read-only, pre-merge review of PR#<n>`.
-   6. `/superpowers:receiving-code-review` — apply Codex fixes, commit, comment on the PR.
+   2. `/code-review` (self-review) per task — review against the phase's Spec sections, not just
+      the diff. 3. **commit after every task.**
+   4. **one PR per phase** (`Closes #<phase-issue>` — merge-gate blocks without it).
+   5. `/codex $superpowers:requesting-code-review Provide read-only, pre-merge review of PR#<n>
+      against the phase's Spec sections` — post the result as a PR comment starting
+      **"Codex review"**.
+   6. `/superpowers:receiving-code-review` — apply fixes, commit, then **codex re-reviews the
+      FINAL state** (posted as another "Codex review" comment); repeat until the last review
+      postdates the last commit and raises nothing blocking. merge-gate enforces both: ≥2 marker
+      comments (`CONDUCTOR_MIN_REVIEWS`) and review-of-final-state.
    7. **merge ONLY if `conductor merge-gate <pr>` returns ok** (§6.2). Then `gh pr merge --merge`
       (no squash), or `--merge --auto` if a merge queue is configured. Gate blocks → resolve
       (e.g. rebase on `merge-state:BEHIND`) or escalate; **never force-merge**.
@@ -51,6 +69,11 @@ deletes existing ones.
    `escalate.block_on_subplan(phase)`; on completion `escalate.write_adr`. build-now AND needs
    human judgment → **halt** with handoff+issue (only branch that pages the user). Process failure
    → exit; next fire reconciles (§10).
-8. **RECORD.** label/progress; commit; update `plan.md` index; renew or `ledger.release` the lease.
+8. **RECORD — MECHANICAL, one command.** Phase complete = `conductor ledger phase-done
+   <phase-issue#> --plan <plan.md>`: it verifies the phase's gate assertions are GREEN
+   (fail-closed), then labels `status:done`, closes task sub-issues, strips the lease, closes the
+   issue, and ticks the plan's checkboxes. NEVER do these by hand — hand bookkeeping decays
+   (dogfood: 0/27 checkboxes, labels never maintained). Phase incomplete this fire: renew the
+   lease and commit progress.
 9. **WRITE HANDOFF (§4)** (`conductor.handoff.write`) to `.conductor/` (gitignored — local resume
    scratch only); then commit + **push** the code changes and ledger state. EXIT.
