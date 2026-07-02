@@ -370,3 +370,38 @@ Dogfood paused before Phases 4–6; **they become the validation run for these f
 - Ship: merge → bump 0.4.0 → marketplace update → plugin update → restart worker session → resume.
 - **Deferred unchanged:** freeze conftest-chain walk (pinned commands close most of it), gate
   runtime, configurable gate location, dispatcher/parallelism.
+
+---
+
+## Fix pass 1 — SHIPPED as 0.4.0 (2026-07-02)
+
+All three PRs merged to main, each after codex ×2-or-3 with the final review postdating the last
+commit (the new standard, applied to ourselves):
+
+- **#27 ledger core** (3 rounds): tolerant `convert` dialect; `conductor-assertions` markers;
+  `reconcile --from-gate` (derived truth, fail-closed on unresolved/ambiguous tokens);
+  `ledger phase-done` (gate-verified atomic bookkeeping, done-label-last, gh-error re-runnable,
+  best-effort plan tick). Codex caught 5 real issues across rounds — all fixed.
+- **#26 merge-gate process legs** (3 rounds, built by a subagent): `Closes #` required; ≥2
+  `CONDUCTOR_MIN_REVIEWS` "Codex review" comments; review-of-final-state via
+  `max(committedDate, pushedDate)` from GraphQL `commits(last:1)`; optional
+  `CONDUCTOR_REVIEW_AUTHOR` provenance filter; negative/malformed env fails closed. Trust model
+  documented: defends against negligent workers, not adversarial ones. Caveat verified live:
+  github.com returns null `pushedDate` (deprecated) so the committedDate fallback is operative.
+- **#29 spec-bound plans** (2 rounds; supersedes #28, auto-closed by a base-branch deletion):
+  `conductor plan-lint` (presence floor; substance = plan codex review); start step 4/4b
+  (spec+Expectations+assertions passed into plan-writing; plan lint + codex review before
+  issue-sync); autodev spec-first briefs + reconcile-within-phase + dirty-tree policy +
+  phase-done wiring; assertions-to-tests pinned standalone commands; reconcile rule 5 requires
+  `tests_red` (codex caught that a routine `--from-gate` reconcile would have REOPENED every
+  completed phase).
+
+Live-repo work: ai-platform plan carries `Normative spec:`/`Assertion specs:` anchors + Spec
+pointers on all 7 phases (worker's own 856ca61 did 4–6 + the 13 ticks; we added 1–3 + 7 with
+`gate: none`); issues #127–132 backfilled with assertion markers. plan-lint learned the live
+run's organic "Spec intent — REQUIRED READING (…):" dialect instead of forcing a rewrite.
+
+Suite: 101 → 199 passed. **Phases 4–6 of the dogfood are the validation run for all of this.**
+
+Owner decision still open: backfill A1's concrete secret-pattern list (assertions-doc-only)
+into spec §12 MN1.
