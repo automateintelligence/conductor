@@ -62,6 +62,16 @@ Two related gaps, same root: the plan comes from conductor-unaware `/superpowers
    recipe: `/code-review` per task, **`/codex review`**, receiving-code-review, `conductor merge-gate`,
    `/document-release`. Full-auto still runs the recipe (the autodev skill applies it regardless), but a
    **supervised** build that follows the plan literally silently skips codex-per-PR and the merge-gate.
+
+**CONFIRMED LIVE (Phase 1, 2026-07-01).** The agent built + committed Phase 1 per the plan and
+**stopped — no PR, no `/codex`** — presenting it as "complete for your review." Only the operator's
+catch ("shouldn't there be a /codex-reviewed PR?") triggered the correction. Crucially the agent
+*knew* the recipe (it recited it and self-corrected instantly), so the plan didn't merely omit the
+steps — **it overrode the recipe in execution**: when the operative plan and the skill's recipe
+disagreed, the plan won. So the fix must make the recipe **authoritative** over the plan's per-phase
+shorthand, not just add steps to one plan. Also surfaced: it committed setup + Phase 1 onto **one
+branch** instead of per-phase PRs off `main` — the branching model ("one PR per phase off `main`;
+setup its own PR") needs to be explicit too.
 - *Fix:* (a) `/conductor:start` runs a **codex review of the plan** (step 4→5), surfaces findings,
   revises before the ledger/build; (b) the plan template / writing-plans invocation carries conductor's
   per-phase recipe steps (codex, merge-gate, document-release), or the plan explicitly states "each
