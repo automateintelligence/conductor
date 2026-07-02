@@ -257,3 +257,65 @@ location" finding — the proper long-term answer is the committed config.
   full suite ran during the 0.3.0 work.
 - **`plugin update` no-ops without a `plugin.json` version bump.** To ship: merge → bump version →
   `marketplace update` → `plugin update <plugin>@<marketplace>` → **restart the session**.
+
+---
+
+## 2026-07-02 — Restart resilience: clerical state decays to zero (live, Phases 1–3)
+
+Operator question: *"What is the restart resiliency if a phase is interrupted mid-execution? Do we
+rely on the model figuring that out before it starts building something that is already done?"*
+Honest answer: **at task granularity, yes** — and the live run quantifies how bad the reliance on
+model-performed bookkeeping is.
+
+**Live evidence (3 phases complete).** What the model maintained vs dropped:
+
+| State surface | Design says | Live run after 3 phases |
+|---|---|---|
+| Per-phase branch + PR + codex round + merge | recipe steps 3–7 | ✅ kept (after Phase-1 prodding) |
+| Per-task commits | recipe step 3 | ✅ kept — pinned messages, recoverable |
+| Plan checkboxes | step 8 "update plan.md index" | ❌ **0 of 27 ever ticked** |
+| Ledger status labels | step 8 | ❌ painted once by issue-sync (baked into the dict), never maintained |
+| Handoff (`.conductor/handoff.md`) | step 9, every fire | ❌ **never written** (only `goal.md` exists) |
+| Lease / claim / reconcile | steps 2, 5 | ❌ never invoked (interactive mode never enters the loop) |
+
+**The pattern:** a step survives iff its output is load-bearing for the model's *immediate next
+action* (can't open a PR without a commit). Pure bookkeeping whose value is deferred to a future
+context — checkboxes, labels, handoffs — decays to zero. Same root as the Phase-1 skipped-PR
+finding: prompt-listed steps are not a durable mechanism.
+
+### HIGH — State transitions must be mechanical side effects, not prompt steps
+Phase completion currently asks the model to separately: flip the label, tick plan boxes, write the
+handoff, release the lease (autodev steps 8–9). All four decayed live. But the model *reliably* runs
+`conductor merge-gate` (it blocks the merge it wants). Fix: one `conductor phase-done <issue>`
+(or merge-gate side effect) that atomically flips the label, ticks the plan's phase boxes, writes
+the handoff, releases the lease. One load-bearing command it must run > four clerical steps it
+will drop.
+
+### HIGH — reconcile trusts caller-supplied truth instead of deriving it
+`ledger/reconcile.py:11-12` takes `tests_red` / `pr_merged` as **flags from the caller** — the
+repair loop that exists to fix model bookkeeping drift is itself fed by model-reported state. Fix:
+reconcile (or a wrapper) derives `tests_red` from `conductor assert run` output directly. Needs the
+phase→assertion-ID mapping to be machine-readable (assertion `id`s in the phase-issue body or a
+`phase:` field in manifest entries); today it lives only in prose phase titles. Then labels become
+derived state, repaired from ground truth with no model honesty in the loop.
+
+### MED — No intra-phase resume procedure (task-grain recovery = model inference)
+On stale-lease reclaim a fresh worker gets the plan + git. The recipe's per-task commits with pinned
+messages ARE machine-readable breadcrumbs — but nothing in autodev step 6 mandates "diff the plan's
+tasks against `git log` on the phase branch and the gate's per-assertion RED/GREEN **before**
+implementing", and an uncommitted dirty tree at crash time is entirely unspecified (stash? commit
+WIP? reset?). Add both to the recipe: reconcile-within-phase first, and a dirty-tree policy.
+
+### MED — `ledger convert` can't parse real plans → hand-built dicts → task layer silently dropped
+Why the ledger is titles-only: `sync.py:5` `_H2` requires the conductor dialect `## Title [status]`,
+but `/superpowers:writing-plans` emits `## Phase N — Title (A3, A4, A5)` — zero phases parse, so the
+agent hand-built the `generate` dict and dropped every phase's `tasks[]` (hence: empty bodies —
+by design — but also **zero task sub-issues/checklists**, which is the real loss). Milestone
+description empty is by design (`sync.py:62-64` passes title only). Fix: tolerant `_H2` (optional
+trailing `[status]`, default `ready`) so `convert <plan.md>` harvests the `- [ ]` task lines real
+plans already contain.
+
+**Also strengthens** the existing MED "interactive/supervised runs operate outside the resilient
+loop": it's not just that cron/reconcile don't fire — a supervised run accrues **no durable run
+state at all beyond git**. Restart resilience today = git history + the frozen gate + the model
+re-deriving everything else.
