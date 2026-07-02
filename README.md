@@ -240,9 +240,11 @@ The interval is just a **heartbeat**: `CronCreate` fires only while the session 
 never overlaps a running fire (it no-ops until the current phase finishes), and the interval need
 not match how long a phase takes. Two limits to know: the recurring cron **auto-expires after 7
 days** (re-run `/conductor:start` to continue), and an in-session cron **dies when the terminal
-closes**. For a run that survives reboots and closed terminals, start it on an always-on host with
-the **Tier-B OS autostart** (`@reboot … claude -p "/conductor:start <spec>"`, reconcile-first so it
-resumes) — see [`experiments/E5-end-to-end/recovery.md`](experiments/E5-end-to-end/recovery.md).
+closes**. For a run that survives reboots and closed terminals, install the **Tier-B OS
+watchdog**: a flock-guarded resume script firing `claude -p "/conductor:autodev"` (session-detect
+no-op while a terminal is live; exits once the gate is green) plus `@reboot` + heartbeat crontab
+lines tagged `# conductor-autodev <project-root>` — spec in
+[`experiments/E5-end-to-end/recovery.md`](experiments/E5-end-to-end/recovery.md).
 
 ### 4. Check in, resume, or stop
 
