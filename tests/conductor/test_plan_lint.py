@@ -82,3 +82,12 @@ def test_old_dialect_phase_headings_also_lint():
         "## Backend [ready]\n\n**Spec:** §2\n\n- [ ] build it\n"
     )
     assert plan_lint.lint(text) == []
+
+
+def test_spec_intent_annotated_pointer_accepted():
+    # The dialect that emerged in the first live run (ai-platform plan, commit 856ca61).
+    text = GOOD_PLAN.replace(
+        "**Spec:** §10 Sample Report",
+        "**Spec intent — REQUIRED READING (build to these, not just A8):**",
+    )
+    assert plan_lint.lint(text) == []

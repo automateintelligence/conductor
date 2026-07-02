@@ -17,7 +17,9 @@ import sys
 from ledger import sync
 
 _NORMATIVE = re.compile(r"(?im)^\s*(?:[>*-]\s*)*\*{0,2}normative spec\*{0,2}\s*:")
-_SPEC_POINTER = re.compile(r"(?im)^\s*(?:[>*-]\s*)*\*{0,2}spec\*{0,2}\s*:")
+# Accepts both the minimal pointer ("**Spec:** §6; §7") and the annotated form real plans
+# grew organically ("**Spec intent — REQUIRED READING (build to these, not just A6):**").
+_SPEC_POINTER = re.compile(r"(?im)^\s*(?:[>*-]\s*)*\*{0,2}spec\b[^:\n]*:")
 # The per-phase recipe's load-bearing markers: self-review per task, codex review of the PR,
 # the merge gate, and the PR<->phase-issue link. Substring, case-insensitive.
 _RECIPE_NEEDLES = ("/code-review", "codex", "merge-gate", "closes #")
