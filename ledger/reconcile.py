@@ -63,8 +63,12 @@ def reconcile(
     if status == "status:in-progress" and not st["assignees"]:
         return repair("status:ready", "reset-abandoned")
 
-    # 5. closed but PR not merged -> reopen.
-    if closed and not pr_merged:
+    # 5. closed but PR not merged -> reopen — ONLY while the gate is red. A closed phase
+    #    with a GREEN gate is terminal even when the caller can't supply PR state
+    #    (--pr-merged defaults False): git/tests > PR, so derived test truth outranks the
+    #    flag. Without this guard a routine `reconcile --from-gate` reopens every
+    #    completed phase (codex PR-28 #3).
+    if closed and not pr_merged and tests_red:
         return repair("status:in-progress", "reopen-unmerged", reopen=True)
 
     return {"action": "none", "new_status": status}

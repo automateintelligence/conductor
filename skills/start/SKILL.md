@@ -45,13 +45,16 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    **The plan builds to the SPEC.** The executable assertions are only the mechanical done-floor
    that gates objective expectations; the spec's spirit and intent — architecture, behaviors,
    qualities — is the actual work, and there is far more of it than the assertions capture.
-   The plan MUST carry (`conductor plan-lint` enforces every item):
+   The plan MUST carry every item below. `conductor plan-lint` mechanically enforces their
+   **presence** (the floor); the step-4b codex review judges their **substance** — coverage
+   and intent (the same division of labor as the done-gate itself):
    - a `**Normative spec:** <path>` header line (plus the assertions path) directly after the H1,
      stating the spec is normative over the plan on any conflict and that workers read the phase's
      `Spec:` sections **before** implementing;
    - phases as `## Phase N — Title (A-ids)`: scope each phase by SPEC sections/capabilities, then
      attach the assertion ids it must turn green in the trailing parens (issue-sync turns those
-     into the ledger's machine-readable gate mapping);
+     into the ledger's machine-readable gate mapping). A deliberately gateless phase (rare —
+     `phase-done` cannot gate-verify it) must declare `gate: none` in its section;
    - per phase: a `**Spec:** §N <section name>; …` pointer line and `- [ ]` task lines;
    - the per-phase recipe verbatim: subagent implement → `/code-review` per task (against the
      phase's Spec sections, not just the diff) → commit per task → one PR per phase

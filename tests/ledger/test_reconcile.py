@@ -139,3 +139,15 @@ def test_stale_reclaim_resets_attempts():  # reclaim must zero the durable count
     )
     assert out["action"] == "stale-lease-reclaim"
     assert "conductor-attempts" not in store["v"]  # counter reset on reclaim
+
+
+def test_closed_green_phase_is_terminal_even_without_pr_state():
+    # codex PR-28 #3: git/tests > PR — a closed phase with a GREEN (derived) gate must stay
+    # closed even when the caller cannot supply pr_merged (defaults False), else every
+    # completed phase gets reopened by a routine reconcile.
+    g = _gh({"state": "closed", "labels": ["status:done"], "assignees": [], "id": 1})
+    out = reconcile.reconcile(
+        "o/r", 1, tests_red=False, pr_merged=False, commits_since_baseline=0, R=3, gh=g
+    )
+    assert out["action"] == "none"
+    g.reopen_issue.assert_not_called()
