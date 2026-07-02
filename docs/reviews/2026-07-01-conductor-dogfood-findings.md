@@ -72,6 +72,17 @@ disagreed, the plan won. So the fix must make the recipe **authoritative** over 
 shorthand, not just add steps to one plan. Also surfaced: it committed setup + Phase 1 onto **one
 branch** instead of per-phase PRs off `main` — the branching model ("one PR per phase off `main`;
 setup its own PR") needs to be explicit too.
+
+**Autonomous 3–6 (2026-07-01).** After two clean cycles the operator let phases 3–6 run unsupervised.
+The codex step is *earning its keep* — it caught **2 real edge-case bugs** in Phase 2's `axis_verdict`
+(a float delta-boundary suppressing a legit BEATS; a zero-width-band containment mislabeled) that the
+subagent introduced and the frozen fixtures didn't cover — exactly what skipping codex would ship. But
+the discipline is living in the **agent's working context** (it applies the full cycle from memory, not
+from the plan), so a mid-run context loss that resumes from the plan could silently skip codex on the
+remaining phases — now *unsupervised, merging to `main`*. Reinforces: the recipe must be **enforced**
+(skill/plan), not context-dependent, before autonomous runs are trustworthy. *(Positive: merge-gate
+worked well when scoped via `CONDUCTOR_MERGE_VERIFY` rather than bypassed — kept its mergeability/thread
+checks and verified the phase's assertions green on the merged ref.)*
 - *Root cause (verified 2026-07-01):* `start` step 4 is a bare `/superpowers:writing-plans` invocation
   — it passes **nothing** about the workflow. The recipe is defined only in **autodev step 6** and is
   never handed to the plan-writer, so the generated plan can't encode it.
