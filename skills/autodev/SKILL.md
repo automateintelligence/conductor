@@ -31,7 +31,10 @@ deletes existing ones.
    resets it. PROGRESS SELF-CHECK.
 3. **SPEC-DONE GATE.** `conductor assert run --level spec` (fail-closed; unrunnable = NOT done).
    **All green AND no plans left** → mark done, use **`CronList`** to find the driver cron, then
-   **`CronDelete`** it, final handoff, STOP.
+   **`CronDelete`** it, AND remove any Tier-B OS fallback — the crontab lines tagged
+   `# conductor-autodev <project>` plus their resume script
+   (`crontab -l | grep -v '# conductor-autodev <project>' | crontab -`) — else the OS heartbeat
+   resurrects a finished run forever. Final handoff, STOP.
 4. **PICK the next eligible phase** (unassigned & not blocked/done; climb the ladder):
    - phase available → SPLIT-CHECK (§6.1); else run the recipe.
    - plan done → `/superpowers:writing-plans` next plan → `ledger.generate` (or `ledger.convert`).

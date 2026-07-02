@@ -119,3 +119,15 @@ def test_lint_is_a_presence_floor_not_a_position_check():
         "notes: /code-review, codex, merge-gate, Closes #",
     )
     assert plan_lint.lint(reordered) == []
+
+
+def test_completed_phase_with_all_ticked_tasks_is_not_flagged():
+    # Live-run finding (2026-07-02): phases 1-3 of the ai-platform plan are done, all
+    # boxes [x] -> the lint fired phase-no-tasks forever on a legitimately in-progress
+    # plan. A phase whose tasks are all checked HAS tasks.
+    text = GOOD_PLAN.replace(
+        "- [ ] Write failing tests", "- [x] Write failing tests"
+    ).replace("- [ ] Implement scoring", "- [x] Implement scoring")
+    reasons = plan_lint.lint(text)
+    assert not any(r.startswith("phase-no-tasks:") for r in reasons)
+    assert reasons == []

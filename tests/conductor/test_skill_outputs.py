@@ -24,6 +24,7 @@ def test_autodev_skill_contract():
         "wip: reclaimed partial work",
         "never sufficient",
         "normative spec",
+        "# conductor-autodev",
     ]:
         assert needle in body, needle
 
@@ -47,6 +48,9 @@ def test_start_skill_contract():
         "the plan builds to the spec",
         "done-floor",
         "codex-review the plan",
+        "verify durability",
+        "flock",
+        "# conductor-autodev",
     ]:
         assert needle in body, needle
 

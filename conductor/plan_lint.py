@@ -20,6 +20,11 @@ _NORMATIVE = re.compile(r"(?im)^\s*(?:[>*-]\s*)*\*{0,2}normative spec\*{0,2}\s*:
 # Accepts both the minimal pointer ("**Spec:** §6; §7") and the annotated form real plans
 # grew organically ("**Spec intent — REQUIRED READING (build to these, not just A6):**").
 _SPEC_POINTER = re.compile(r"(?im)^\s*(?:[>*-]\s*)*\*{0,2}spec\b[^:\n]*:")
+# For phase-no-tasks the CHECKED state must count too — a completed phase's boxes are all
+# [x] and it still has tasks (live-run finding: the unchecked-only regex red-flagged done
+# phases forever). issue-sync's parser stays unchecked-only by design (done work must not
+# respawn sub-issues); only the lint uses this broader form.
+_TASK_ANY = re.compile(r"^- \[[ xX]\] ", re.MULTILINE)
 # The per-phase recipe's load-bearing markers: self-review per task, codex review of the PR,
 # the merge gate, and the PR<->phase-issue link. Substring, case-insensitive.
 _RECIPE_NEEDLES = ("/code-review", "codex", "merge-gate", "closes #")
@@ -44,7 +49,7 @@ def lint(text: str, spec_path: str | None = None) -> list[str]:
         title = parsed[0]
         end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
         section = text[m.end() : end]
-        if not sync._TASK.search(section):
+        if not _TASK_ANY.search(section):
             reasons.append(f"phase-no-tasks:{title}")
         if not _SPEC_POINTER.search(section):
             reasons.append(f"phase-no-spec-pointer:{title}")
