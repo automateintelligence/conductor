@@ -80,11 +80,16 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    `scheduled_tasks.json` appears (verified live 2026-07-02). If the response does NOT confirm
    persistence, the loop dies with the terminal — for an unattended run, **install the Tier-B OS
    fallback NOW; do not merely warn the user**:
-   - write a resume script that runs `claude -p "/conductor:start <spec>"` from the project root
-     under `flock -n <project>/.conductor/resume.lock` (reconcile-first makes repeated fires
-     idempotent; the lock prevents overlapping sessions if a phase outlives the interval);
-   - add crontab entries tagged with the marker comment `# conductor-autodev <project>`:
-     one `@reboot` line and one periodic line (e.g. `*/30 * * * *`) as the liveness heartbeat.
+   - write a resume script that runs `claude -p "/conductor:autodev"` from the project root
+     (autodev, not start — a headless one-shot session must do a phase, not register a cron that
+     dies with it) and, in order: (a) **exits if any claude process is already running with cwd
+     inside the project** — the live terminal's in-session cron is then the sole driver, so the
+     two drivers can never double-fire; (b) **exits once `conductor assert run --level spec` is
+     green** — a finished run gets no-op fires; (c) holds `flock -n
+     <project>/.conductor/resume.lock` for the whole fire — no overlapping headless sessions;
+   - add crontab entries carrying the LITERAL marker `# conductor-autodev <project-root>`, where
+     `<project-root>` is the canonical `git rev-parse --show-toplevel` path (removal greps for
+     this exact fixed string): one `@reboot` line and one periodic heartbeat (e.g. `*/20 * * * *`).
    The marker tag is load-bearing: the autodev STOP branch removes exactly those lines when the
    gate goes green (see `experiments/E5-end-to-end/recovery.md`).
    **Tell the user one limit:** recurring in-session crons **auto-expire after 7 days** —

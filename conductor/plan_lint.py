@@ -24,7 +24,7 @@ _SPEC_POINTER = re.compile(r"(?im)^\s*(?:[>*-]\s*)*\*{0,2}spec\b[^:\n]*:")
 # [x] and it still has tasks (live-run finding: the unchecked-only regex red-flagged done
 # phases forever). issue-sync's parser stays unchecked-only by design (done work must not
 # respawn sub-issues); only the lint uses this broader form.
-_TASK_ANY = re.compile(r"^- \[[ xX]\] ", re.MULTILINE)
+_TASK_ANY = re.compile(r"^- \[[ xX]\] .+$", re.MULTILINE)
 # The per-phase recipe's load-bearing markers: self-review per task, codex review of the PR,
 # the merge gate, and the PR<->phase-issue link. Substring, case-insensitive.
 _RECIPE_NEEDLES = ("/code-review", "codex", "merge-gate", "closes #")

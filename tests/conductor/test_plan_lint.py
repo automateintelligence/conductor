@@ -131,3 +131,10 @@ def test_completed_phase_with_all_ticked_tasks_is_not_flagged():
     reasons = plan_lint.lint(text)
     assert not any(r.startswith("phase-no-tasks:") for r in reasons)
     assert reasons == []
+
+
+def test_blank_checkbox_line_is_not_a_task():
+    # codex PR-30 #1: `- [x] ` with no text must not satisfy phase-no-tasks.
+    text = GOOD_PLAN.replace("- [ ] Implement report", "- [x] ")
+    reasons = plan_lint.lint(text)
+    assert "phase-no-tasks:Phase 2 — Reporting (A8)" in reasons

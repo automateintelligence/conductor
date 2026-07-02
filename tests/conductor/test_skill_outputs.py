@@ -25,6 +25,8 @@ def test_autodev_skill_contract():
         "never sufficient",
         "normative spec",
         "# conductor-autodev",
+        "grep -f -v",
+        "owner-owned",
     ]:
         assert needle in body, needle
 
