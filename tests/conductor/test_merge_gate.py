@@ -26,9 +26,10 @@ def test_remote_for_falls_back_to_origin():
     assert merge_gate._remote_for("o/r", run=_fake_run(remote_v)) == "origin"
 
 
-def _rc(created, body="Codex review: pass"):
-    """A PR comment as returned by `gh pr view --json comments`."""
-    return {"body": body, "createdAt": created}
+def _rc(created, body="Codex review: pass", author="reviewer"):
+    """A PR comment as returned by `gh pr view --json comments` (author.login shape
+    verified on gh 2.4.0)."""
+    return {"body": body, "createdAt": created, "author": {"login": author}}
 
 
 def _clean():
@@ -53,8 +54,10 @@ def _call(
     *,
     threads=(),
     merge_ref_ok=True,
-    newest_commit: Any = "2026-01-01T00:00:00Z",  # str or (repo, pr) -> str
+    newest_commit: Any = "2026-01-01T00:00:00Z",  # str, dates dict, or (repo, pr) -> dict
 ):
+    if not callable(newest_commit) and not isinstance(newest_commit, dict):
+        newest_commit = {"committedDate": newest_commit, "pushedDate": None}
     nc = newest_commit if callable(newest_commit) else (lambda r, p: newest_commit)
     return merge_gate.check(
         "o/r",
@@ -206,6 +209,7 @@ def _default_process_env(monkeypatch):
     """Pin the process-leg env to defaults so tests never depend on the ambient shell."""
     monkeypatch.delenv("CONDUCTOR_MIN_REVIEWS", raising=False)
     monkeypatch.delenv("CONDUCTOR_REVIEW_MARKER", raising=False)
+    monkeypatch.delenv("CONDUCTOR_REVIEW_AUTHOR", raising=False)
 
 
 def test_check_fetches_process_fields_in_one_call():
@@ -221,7 +225,10 @@ def test_check_fetches_process_fields_in_one_call():
         local_verify="true",
         gh_json=gj,
         threads=lambda r, p: [],
-        newest_commit=lambda r, p: "2026-01-01T00:00:00Z",
+        newest_commit=lambda r, p: {
+            "committedDate": "2026-01-01T00:00:00Z",
+            "pushedDate": None,
+        },
         merge_ref_verify=lambda r, p, lv: True,
     )
     assert len(calls) == 1  # one gh call, not three
@@ -325,7 +332,7 @@ def test_newest_commit_not_called_when_review_legs_disabled(monkeypatch):
 
     def nc(r, p):
         called.append(1)
-        return "2026-01-01T00:00:00Z"
+        return {"committedDate": "2026-01-01T00:00:00Z", "pushedDate": None}
 
     assert _call(_clean(), newest_commit=nc)["ok"] is True
     assert not called  # disabled legs must not spend a gh call
@@ -376,3 +383,57 @@ def test_missing_process_fields_fail_closed_without_crash():
     assert "closes-missing" in out["blockers"]
     assert "reviews:0/2" in out["blockers"]
     assert not any(b.startswith("process-check-error") for b in out["blockers"])
+
+
+def test_review_author_filter_counts_only_that_login(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_REVIEW_AUTHOR", "codex-bot")
+    posers = [
+        _rc("2026-01-02T00:00:00Z", author="worker"),
+        _rc("2026-01-03T00:00:00Z", author="worker"),
+        {"body": "Codex review", "createdAt": "2026-01-03T01:00:00Z"},  # no author
+    ]
+    assert "reviews:0/2" in _call({**_clean(), "comments": posers})["blockers"]
+    good = [
+        _rc("2026-01-02T00:00:00Z", author="codex-bot"),
+        _rc("2026-01-03T00:00:00Z", author="CODEX-BOT"),  # GH logins case-insensitive
+    ]
+    assert _call({**_clean(), "comments": good}) == {"ok": True, "blockers": []}
+
+
+def test_review_author_unset_counts_any_author():
+    comments = [
+        _rc("2026-01-02T00:00:00Z", author="alice"),
+        _rc("2026-01-03T00:00:00Z", author="bob"),
+    ]
+    assert _call({**_clean(), "comments": comments}) == {"ok": True, "blockers": []}
+
+
+def test_review_author_filter_applies_to_staleness(monkeypatch):
+    # a post-commit marker comment from the WRONG author must not mask staleness
+    monkeypatch.setenv("CONDUCTOR_REVIEW_AUTHOR", "codex-bot")
+    comments = [
+        _rc("2025-12-30T00:00:00Z", author="codex-bot"),
+        _rc("2025-12-31T00:00:00Z", author="codex-bot"),
+        _rc("2026-01-05T00:00:00Z", author="worker"),  # after the 01-01 commit
+    ]
+    assert "review-stale" in _call({**_clean(), "comments": comments})["blockers"]
+
+
+def test_pushed_date_newer_than_committed_wins():
+    # committedDate is author-controlled (backdatable); server-set pushedDate wins
+    nc = {"committedDate": "2026-01-01T00:00:00Z", "pushedDate": "2026-01-05T00:00:00Z"}
+    assert "review-stale" in _call(_clean(), newest_commit=nc)["blockers"]
+
+
+def test_null_pushed_date_falls_back_to_committed():
+    # GitHub deprecated pushedDate (null on current github.com pushes)
+    ok = {"committedDate": "2026-01-01T00:00:00Z", "pushedDate": None}
+    assert _call(_clean(), newest_commit=ok) == {"ok": True, "blockers": []}
+    stale = {"committedDate": "2026-01-04T00:00:00Z", "pushedDate": None}
+    assert "review-stale" in _call(_clean(), newest_commit=stale)["blockers"]
+
+
+def test_both_commit_dates_null_fail_closed():
+    out = _call(_clean(), newest_commit={"committedDate": None, "pushedDate": None})
+    assert out["ok"] is False
+    assert any(b.startswith("process-check-error") for b in out["blockers"])
