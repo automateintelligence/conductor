@@ -128,9 +128,12 @@ auto-compact mid-build (≈33%→20%).
   not reloaded per phase, so a compact summary can drop "always codex" and leave the agent following
   the plan (stops at commit) → skips codex, now unsupervised + merging to `main`. Auto-compact is the
   most likely trigger of the recipe-authoritative risk above.
-- *Confirmed root (2026-07-01):* **no ledger was ever created.** Setup deferred it ("outward-facing /
-  visible tracking") and the run went "autonomous" without it (verified: no milestone, no phase/task
-  issues on the repo). But `/conductor:autodev` reconciles + **claims from the ledger** — so no ledger
+- *Confirmed root (2026-07-01):* **no ledger was ever created.** The **conductor agent deferred it
+  unilaterally** at setup (framed as "outward-facing / visible tracking") — *not* an informed operator
+  choice — and when the operator later chose "autonomous," **neither the agent nor the advisor flagged
+  that autonomy requires that ledger** (verified: no milestone, no phase/task issues on the repo). So a
+  decision that forgoes conductor's resilient mode was made *for* the operator and mislabeled as minor
+  tracking. `/conductor:autodev` reconciles + **claims from the ledger** — so no ledger
   means the compaction-proof autodev-fired mode was **never available**, and the run was forced into the
   fragile interactive-continuous mode. "Autonomous" thus silently meant *interactive-continuous* (no
   ledger, one accumulating session, recipe-in-memory), not the designed *autodev-fired* loop (ledger,
