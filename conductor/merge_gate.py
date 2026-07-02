@@ -1,13 +1,20 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from typing import Any
 
 _GH_TIMEOUT = float(os.environ.get("CONDUCTOR_GH_TIMEOUT", "60"))
 _VERIFY_TIMEOUT = float(os.environ.get("CONDUCTOR_MERGE_VERIFY_TIMEOUT", "900"))
+_CLOSES_RE = re.compile(r"(?i)\b(close[sd]?|fix(es|ed)?|resolve[sd]?)\s+#\d+")
+
+
+def _ts(s: str) -> datetime:
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))  # gh emits trailing Z
 
 
 def _gh_json(repo: str, pr: int, fields: str) -> Any:
@@ -110,7 +117,11 @@ def check(
     merge_ref_verify: Any = _merge_ref_verify,
 ) -> dict[str, Any]:
     try:
-        d: Any = gh_json(repo, pr, "mergeStateStatus,mergeable,reviewDecision,isDraft")
+        d: Any = gh_json(
+            repo,
+            pr,
+            "mergeStateStatus,mergeable,reviewDecision,isDraft,body,comments,commits",
+        )
     except Exception as exc:  # gh failure/timeout -> fail closed, never crash the fire
         return {"ok": False, "blockers": [f"gh-error: {exc}"]}
     blockers: list[str] = []
@@ -124,6 +135,29 @@ def check(
         blockers.append(f"mergeable:{d.get('mergeable')}")
     if d.get("reviewDecision") == "CHANGES_REQUESTED":
         blockers.append("changes-requested")
+    try:  # process legs: models drop clerical steps unless the gate enforces them
+        if not _CLOSES_RE.search(d.get("body") or ""):
+            blockers.append("closes-missing")  # recipe: one PR per phase, Closes #issue
+        # env read per call (tests monkeypatch); empty marker would match everything
+        marker = (os.environ.get("CONDUCTOR_REVIEW_MARKER") or "Codex review").lower()
+        min_reviews = int(os.environ.get("CONDUCTOR_MIN_REVIEWS", "2"))
+        if min_reviews > 0:  # 0 disables both review legs
+            marked = [
+                c
+                for c in (d.get("comments") or [])
+                if marker in (c.get("body") or "").lower()
+            ]
+            if len(marked) < min_reviews:
+                blockers.append(f"reviews:{len(marked)}/{min_reviews}")
+            if marked:  # zero markers already blocked above; skip double-reporting
+                last_review = max(_ts(c["createdAt"]) for c in marked)
+                last_commit = max(
+                    _ts(c["committedDate"]) for c in d.get("commits") or []
+                )
+                if last_review < last_commit:  # the FINAL branch state was not reviewed
+                    blockers.append("review-stale")
+    except Exception as exc:  # malformed data/env -> fail closed, never crash the gate
+        blockers.append(f"process-check-error: {exc}")
     try:
         blockers += threads(repo, pr)  # 'unresolved' and/or 'threads-unpaginated'
     except Exception as exc:

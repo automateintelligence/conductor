@@ -25,12 +25,25 @@ def test_remote_for_falls_back_to_origin():
     assert merge_gate._remote_for("o/r", run=_fake_run(remote_v)) == "origin"
 
 
+def _rc(created, body="Codex review: pass"):
+    """A PR comment as returned by `gh pr view --json comments`."""
+    return {"body": body, "createdAt": created}
+
+
 def _clean():
+    # Process legs need benign passing values: a Closes-ref body, and two marker
+    # reviews newer than the newest commit (final state reviewed).
     return {
         "mergeStateStatus": "CLEAN",
         "mergeable": "MERGEABLE",
         "reviewDecision": "APPROVED",
         "isDraft": False,
+        "body": "Closes #7",
+        "commits": [{"committedDate": "2026-01-01T00:00:00Z"}],
+        "comments": [
+            _rc("2026-01-02T00:00:00Z"),
+            _rc("2026-01-03T00:00:00Z"),
+        ],
     }
 
 
@@ -174,3 +187,140 @@ def test_resolve_repo_nonzero_raises(monkeypatch):
 
     with pytest.raises(RuntimeError):
         merge_gate._resolve_repo(run=run)
+
+
+# ---- process-compliance legs: Closes #, min reviews, review-of-final-state ----
+
+
+@pytest.fixture(autouse=True)
+def _default_process_env(monkeypatch):
+    """Pin the process-leg env to defaults so tests never depend on the ambient shell."""
+    monkeypatch.delenv("CONDUCTOR_MIN_REVIEWS", raising=False)
+    monkeypatch.delenv("CONDUCTOR_REVIEW_MARKER", raising=False)
+
+
+def test_check_fetches_process_fields_in_one_call():
+    calls = []
+
+    def gj(r, p, f):
+        calls.append(f)
+        return _clean()
+
+    merge_gate.check(
+        "o/r",
+        1,
+        local_verify="true",
+        gh_json=gj,
+        threads=lambda r, p: [],
+        merge_ref_verify=lambda r, p, lv: True,
+    )
+    assert len(calls) == 1  # one gh call, not three
+    assert {"body", "comments", "commits"} <= set(calls[0].split(","))
+
+
+def test_closes_missing_blocks():
+    assert "closes-missing" in _call({**_clean(), "body": "adds the gate"})["blockers"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Closes #7",
+        "close #1",
+        "closed #12",
+        "Fixes #3",
+        "fix #4",
+        "FIXED #5",
+        "resolves #6",
+        "Resolve #7",
+        "resolved #8",
+        "This PR fixes #42 and more",
+    ],
+)
+def test_closes_verb_forms_pass(body):
+    assert "closes-missing" not in _call({**_clean(), "body": body})["blockers"]
+
+
+def test_zero_marker_comments_blocks_without_stale():
+    out = _call({**_clean(), "comments": []})
+    assert "reviews:0/2" in out["blockers"]
+    assert "review-stale" not in out["blockers"]  # leg skipped at zero markers
+
+
+def test_one_marker_comment_blocks():
+    comments = [
+        _rc("2026-01-02T00:00:00Z"),
+        _rc("2026-01-02T01:00:00Z", body="unrelated chatter"),
+    ]
+    assert "reviews:1/2" in _call({**_clean(), "comments": comments})["blockers"]
+
+
+def test_marker_match_is_case_insensitive():
+    comments = [
+        _rc("2026-01-02T00:00:00Z", body="CODEX REVIEW: ok"),
+        _rc("2026-01-03T00:00:00Z", body="second codex review round"),
+    ]
+    assert _call({**_clean(), "comments": comments}) == {"ok": True, "blockers": []}
+
+
+def test_min_reviews_zero_disables_both_review_legs(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_MIN_REVIEWS", "0")
+    # one marker comment (< 2) that is also older than the newest commit: with the
+    # legs enabled this would fire both blockers; MIN_REVIEWS=0 disables both.
+    stale = {**_clean(), "comments": [_rc("2025-12-31T00:00:00Z")]}
+    assert _call(stale) == {"ok": True, "blockers": []}
+
+
+def test_custom_review_marker(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_REVIEW_MARKER", "LGTM-bot")
+    assert (
+        "reviews:0/2" in _call(_clean())["blockers"]
+    )  # 'Codex review' no longer counts
+    lgtm = [
+        _rc("2026-01-02T00:00:00Z", body="lgtm-bot approved"),
+        _rc("2026-01-03T00:00:00Z", body="LGTM-BOT approved again"),
+    ]
+    assert _call({**_clean(), "comments": lgtm}) == {"ok": True, "blockers": []}
+
+
+def test_review_stale_when_commit_postdates_last_review():
+    stale = {
+        **_clean(),
+        "commits": [
+            {"committedDate": "2026-01-01T00:00:00Z"},
+            {"committedDate": "2026-01-04T00:00:00Z"},  # after both reviews
+        ],
+    }
+    assert "review-stale" in _call(stale)["blockers"]
+
+
+def test_review_at_commit_time_is_not_stale():
+    tie = {
+        **_clean(),
+        "comments": [_rc("2026-01-01T00:00:00Z"), _rc("2026-01-01T00:00:00Z")],
+    }
+    assert _call(tie) == {"ok": True, "blockers": []}
+
+
+def test_fresh_review_passes():
+    assert _call(_clean()) == {"ok": True, "blockers": []}
+
+
+def test_malformed_timestamp_is_fail_closed():
+    bad = {**_clean(), "comments": [_rc("not-a-date"), _rc("2026-01-03T00:00:00Z")]}
+    out = _call(bad)
+    assert out["ok"] is False
+    assert any(b.startswith("process-check-error") for b in out["blockers"])
+
+
+def test_missing_process_fields_fail_closed_without_crash():
+    # Old-style gh_json payload without body/comments/commits: legs treat missing
+    # keys as empty and block, rather than raising.
+    bare = {
+        k: _clean()[k]
+        for k in ("mergeStateStatus", "mergeable", "reviewDecision", "isDraft")
+    }
+    out = _call(bare)
+    assert "closes-missing" in out["blockers"]
+    assert "reviews:0/2" in out["blockers"]
+    assert not any(b.startswith("process-check-error") for b in out["blockers"])
