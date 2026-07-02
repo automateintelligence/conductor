@@ -256,7 +256,8 @@ location" finding — the proper long-term answer is the committed config.
   `test_start_skill_contract` needle slipped through PR #23 (validate-only) and only surfaced when the
   full suite ran during the 0.3.0 work.
 - **`plugin update` no-ops without a `plugin.json` version bump.** To ship: merge → bump version →
-  `marketplace update` → `plugin update <plugin>@<marketplace>` → **restart the session**.
+  `marketplace update` → `plugin update <plugin>@<marketplace>` → **`/reload-plugins` in running
+  sessions** (no restart needed — operator correction 2026-07-02; a restart also works).
 
 ---
 
