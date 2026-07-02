@@ -17,6 +17,13 @@ def test_autodev_skill_contract():
         "crondelete",
         "ask no questions",
         "environment-provided",
+        "--from-gate",
+        "phase-done",
+        "codex review",
+        "reconcile-within-phase",
+        "wip: reclaimed partial work",
+        "never sufficient",
+        "normative spec",
     ]:
         assert needle in body, needle
 
@@ -35,5 +42,24 @@ def test_start_skill_contract():
         "start_probe.assertions_ready",
         "already done",
         "resume",
+        "plan-lint",
+        "normative spec:",
+        "the plan builds to the spec",
+        "done-floor",
+        "codex-review the plan",
+    ]:
+        assert needle in body, needle
+
+
+def test_assertions_to_tests_skill_contract():
+    body = (
+        open(os.path.join(ROOT, "skills/assertions-to-tests/SKILL.md")).read().lower()
+    )
+    for needle in [
+        "pytest_disable_plugin_autoload=1",
+        "--noconftest",
+        "no:cacheprovider",
+        "self-contained",
+        "<spec>.assertions.md",
     ]:
         assert needle in body, needle

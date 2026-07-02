@@ -20,17 +20,23 @@ For each assertion spec:
    **must not contain**. Realize the *setup* as fixtures. Match the test to the spec's **kind**: `example`
    → one concrete case; `property` → assert across generated inputs; `contract` → assert
    pre/postconditions. RED until the system implements the behavior — expected here.
-3. **Wire it into `assertions/manifest.yaml`:**
+3. **Wire it into `assertions/manifest.yaml` with a PINNED, STANDALONE command:**
    ```yaml
      - id: <id>
        claim: "<one-sentence Boolean claim>"
-       command: "python3 -m pytest -q <path/to/test>"
+       command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider <path/to/test>"
        setup: ""
        teardown: ""
        timeout: 30
        level: spec        # GATE TIER: spec (default) | phase | task
        kind: <example|property|contract>   # FORM, carried from the assertion spec
    ```
+   **Why pinned (determinism + freeze integrity):** autoload off + `--noconftest` means nothing
+   OUTSIDE the frozen test file can influence the check — an autoloaded plugin (e.g. `typeguard`)
+   can flip pass/fail across machines, and an *unfrozen* ancestor `conftest.py` is a gate bypass
+   (edit it to flip a frozen test without tripping tamper). It's also much faster (no repo-wide
+   conftest/plugin loading). Consequence: each test must be self-contained — bootstrap `sys.path`
+   itself and define its own fixtures; it cannot rely on any `conftest.py`.
 4. **Verify the gate sees it RED:** `conductor assert run --level spec` lists the new id as
    `[FAIL]`. The spec is "done" exactly when every spec-level assertion goes green (§5.1, §7).
 

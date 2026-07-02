@@ -40,8 +40,35 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    **Then FREEZE the gate (§5):** `conductor gate freeze` records `assertions/.frozen` (commit it)
    so the worker cannot later weaken a check; the runner fail-closes (exit 6) if a frozen
    assertion or its test file changes. SKIP if `.frozen` exists and `conductor gate verify` is clean.
-4. **Plan exists?** No → `/superpowers:writing-plans` (or spec-kit), fresh subagent. SKIP if a plan/milestone exists.
-5. **issue-sync** — `ledger.generate` (or `convert`). SKIP if the hierarchy exists; else reconcile.
+4. **Plan exists?** No → `/superpowers:writing-plans` (or spec-kit) in a fresh subagent — and
+   PASS IT the spec, its `## Expectations`, and `<spec>.assertions.md` paths as required inputs.
+   **The plan builds to the SPEC.** The executable assertions are only the mechanical done-floor
+   that gates objective expectations; the spec's spirit and intent — architecture, behaviors,
+   qualities — is the actual work, and there is far more of it than the assertions capture.
+   The plan MUST carry every item below. `conductor plan-lint` mechanically enforces their
+   **presence** (the floor); the step-4b codex review judges their **substance** — coverage
+   and intent (the same division of labor as the done-gate itself):
+   - a `**Normative spec:** <path>` header line (plus the assertions path) directly after the H1,
+     stating the spec is normative over the plan on any conflict and that workers read the phase's
+     `Spec:` sections **before** implementing;
+   - phases as `## Phase N — Title (A-ids)`: scope each phase by SPEC sections/capabilities, then
+     attach the assertion ids it must turn green in the trailing parens (issue-sync turns those
+     into the ledger's machine-readable gate mapping). A deliberately gateless phase (rare —
+     `phase-done` cannot gate-verify it) must declare `gate: none` in its section;
+   - per phase: a `**Spec:** §N <section name>; …` pointer line and `- [ ]` task lines;
+   - the per-phase recipe verbatim: subagent implement → `/code-review` per task (against the
+     phase's Spec sections, not just the diff) → commit per task → one PR per phase
+     (`Closes #<phase-issue>`) → codex review ×2 posted as "Codex review" PR comments →
+     `conductor merge-gate` → merge → `/document-release` → `conductor ledger phase-done`.
+   SKIP if a plan/milestone exists.
+4b. **LINT + CODEX-REVIEW THE PLAN** — it dictates every phase and must not stay the
+   least-reviewed setup artifact. `conductor plan-lint <plan.md> --spec <spec.md>` must exit 0:
+   fix the plan, never bypass the lint. Then codex-review the plan **against the spec** (does
+   every spec section land in a phase? is intent preserved, not just assertion coverage?) and
+   apply the fixes. SKIP only if both were already done for this plan.
+5. **issue-sync** — `ledger.generate` (or `convert <plan.md>`; the parser reads the real
+   `## Phase N — Title (ids)` dialect directly and writes each phase's `conductor-assertions`
+   marker). SKIP if the hierarchy exists; else reconcile.
 6. **Record `/goal`** (`conductor goal set`) and **start the driver:** register a harness cron via
    **`CronCreate`** — `prompt: "/conductor:autodev"`, `cron: "*/7 * * * *"` (≈ every 7 min),
    `durable: true`. Record its id. SKIP if already registered. The interval is only a
