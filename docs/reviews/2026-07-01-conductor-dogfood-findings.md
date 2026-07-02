@@ -116,7 +116,7 @@ intentionally incremental. *(Dogfood Phase 1→2 boundary, 2026-07-01, confirmed
   a **phase-level** criterion (this phase's assertions), not blanket `pytest`; (c) document the gate ↔
   CI/merge-gate relationship. Same "per-phase merge vs all-green-when-done" theme as the recipe finding.
 
-### HIGH — Interactive single-session runs forfeit conductor's fresh-context (compaction) immunity
+### MED — Interactive/supervised runs operate *outside* conductor's resilient loop (compaction + ledger) — a usage consequence, not a core design flaw
 Conductor is *designed* to be compaction-proof: the cron fires `/conductor:autodev`, and **each fire is
 fresh context that reconciles from durable state and reloads the recipe from the skill.** But the
 dogfood ran all phases in **one long interactive session** (agent dispatches a subagent per phase and
@@ -128,17 +128,19 @@ auto-compact mid-build (≈33%→20%).
   not reloaded per phase, so a compact summary can drop "always codex" and leave the agent following
   the plan (stops at commit) → skips codex, now unsupervised + merging to `main`. Auto-compact is the
   most likely trigger of the recipe-authoritative risk above.
-- *Confirmed root (2026-07-01):* **no ledger was ever created.** The **conductor agent deferred it
-  unilaterally** at setup (framed as "outward-facing / visible tracking") — *not* an informed operator
-  choice — and when the operator later chose "autonomous," **neither the agent nor the advisor flagged
-  that autonomy requires that ledger** (verified: no milestone, no phase/task issues on the repo). So a
-  decision that forgoes conductor's resilient mode was made *for* the operator and mislabeled as minor
-  tracking. `/conductor:autodev` reconciles + **claims from the ledger** — so no ledger
-  means the compaction-proof autodev-fired mode was **never available**, and the run was forced into the
-  fragile interactive-continuous mode. "Autonomous" thus silently meant *interactive-continuous* (no
-  ledger, one accumulating session, recipe-in-memory), not the designed *autodev-fired* loop (ledger,
-  fresh context per fire, recipe-from-skill). **The ledger is the linchpin separating fragile from
-  resilient autonomy** — framing it as mere "tracking visibility" at setup is what led here.
+- *Cause (2026-07-01) — NOT a conductor design flaw (operator corrected an earlier over-escalation):*
+  the ledger is `/conductor:start` **step 5** (issue-sync *creates* it; autodev only *reconciles* an
+  existing one). In the operator's **supervised** choice, the agent **reasonably deferred step 5** —
+  holding outward-facing GH issues until the plan is reviewed is what supervised mode *should* do, and
+  an autonomous-at-setup run would have created the ledger there. So the missing ledger is a
+  *consequence of the supervised path + a defensible deferral*, not a hole in the design (verified: no
+  milestone/issues on the repo).
+- *The real (soft) gap — UX/robustness, shared by the advisor:* at the **autonomy transition** (operator
+  later chose "autonomous 3–6"), neither the agent nor the advisor flagged that autodev / resilient mode
+  *requires* the ledger that supervised deferred. `/conductor:autodev` reconciles + **claims from the
+  ledger**, so with none present "autonomous" silently meant *interactive-continuous* (accumulating
+  session, recipe-in-memory, compaction-fragile), not the designed *autodev-fired* loop (ledger, fresh
+  context per fire, recipe-from-skill). The ledger is the linchpin between the two.
 - *Fix (operator):* to get resilient autonomy, create the ledger (`/conductor:issue-sync` → milestone +
   phase issues; reconcile marks 1–2 done, 3–6 ready), then drive phases via `/conductor:autodev` fires
   (fresh context + recipe-from-skill each fire). Or, staying interactive, restart into a fresh session
