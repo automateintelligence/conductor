@@ -406,3 +406,33 @@ Suite: 101 → 199 passed. **Phases 4–6 of the dogfood are the validation run 
 
 Owner decision still open: backfill A1's concrete secret-pattern list (assertions-doc-only)
 into spec §12 MN1.
+
+---
+
+## 2026-07-02 (operator feature request) — `/conductor:prepare`: brownfield alignment
+
+*"It would be nice for any user to be able to come into a project with an existing spec and plan,
+and be able to use conductor to align the repo with the requirements for conductor automagically
+(maybe /conductor:prepare) and then /conductor:start."* The ai/ repo mid-dogfood is the concrete
+case: plan half-aligned (fixed by hand in 856ca61 + 8b86e30), ledger phase issues with paraphrased
+titles, no task sub-issues, markers backfilled manually.
+
+**Design sketch** (all primitives exist post-0.4.0):
+1. **Plan re-evaluation:** `conductor plan-lint --spec` → FIX the plan to compliance (header,
+   per-phase Spec pointers, assertion ids or `gate: none`, recipe section) with owner-visible
+   diff → codex-review the plan against the spec.
+2. **Ledger alignment — the key new piece:** match existing phase issues to plan phases by
+   **assertion-id set** (the natural join key; immune to title paraphrase), then rename issues +
+   milestone to the canonical plan headings so `generate`'s exact-title idempotency holds forever
+   after; backfill `conductor-assertions` markers; re-run `convert` to create + link the missing
+   task sub-issues; set statuses from gate ground truth (`--from-gate` per phase); run
+   `phase-done` on already-done phases so their sub-issues/boxes close consistently.
+3. **Gate verification:** manifest ids ↔ `<spec>.assertions.md` ids, `.frozen` present +
+   `gate verify` clean; report anything only the owner can decide.
+Idempotent; ends with a "ready for /conductor:start" report. First dogfood = the manual alignment
+of ai/ (whichever sequencing the owner picks), which becomes prepare's verified recipe.
+
+Also resolved (operator question): Phases 4–6 need **no additional spec detail** — they carry the
+richest binding in the plan (856ca61's "Spec intent — REQUIRED READING" blocks with 4/3/2
+distilled requirement bullets); 8b86e30 deliberately added only archival pointers to the done
+phases 1–3 + optional 7.
