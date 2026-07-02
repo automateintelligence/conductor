@@ -450,3 +450,27 @@ phases 1–3 + optional 7.
 blocked/done/dep-blocked/assigned/closed — a `status:draft` phase can be claimed and executed.
 Draft should mean "not scheduled". Workaround this run: `dep-blocked` on #145. Fix (0.5.0 /
 prepare pass): add `status:draft` to the blocking set.
+
+---
+
+## 2026-07-02 — First 0.4.0 live-run feedback (worker resumed, then went full-auto)
+
+**Worker behaviors that validate the design:** reconcile-first skipped all completed setup;
+plan-lint caught two genuine plan defects (missing `Closes #<phase-issue>` in recipe step 4;
+Phase 7 prose steps not checkboxed) and the worker fixed the PLAN rather than bypassing;
+it **refused to uncheck completed work** to appease a lint false positive; when `durable:true`
+failed it self-installed the documented Tier-B crontab fallback. Owner then switched the run to
+full-automatic (goal + plan header updated; merge-gate + frozen gate are the guardrails).
+
+**Defect 1 — plan-lint red forever on in-progress plans (fixed in 0.4.1, PR #30):**
+`phase-no-tasks` used the unchecked-only task regex, so completed phases (all `[x]`) were
+flagged permanently. Lint now counts both states; issue-sync's parser stays unchecked-only.
+
+**Defect 2 — `CronCreate durable:true` silently ignored (skill truth-fix in 0.4.1):** confirmed
+by clean probe — response says "Session-only", no `scheduled_tasks.json` written, despite the
+parameter schema promising persistence (the tool's own description contradicts its parameter).
+Start step 6 now verifies the response and installs the Tier-B fallback (flock-guarded resume
+script + `# conductor-autodev <project>`-tagged crontab lines) for unattended runs; the autodev
+STOP branch removes the tagged lines so a finished run isn't resurrected. *Upstream note: this
+looks like a Claude Code CLI gap worth reporting — the durable param is schema-documented but
+inert.*
