@@ -1,5 +1,6 @@
 import subprocess
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -31,15 +32,15 @@ def _rc(created, body="Codex review: pass"):
 
 
 def _clean():
-    # Process legs need benign passing values: a Closes-ref body, and two marker
-    # reviews newer than the newest commit (final state reviewed).
+    # Process legs need benign passing values: a Closes-ref body and two marker
+    # reviews newer than the newest commit (final state reviewed; commit date is
+    # injected via _call's newest_commit, default 2026-01-01).
     return {
         "mergeStateStatus": "CLEAN",
         "mergeable": "MERGEABLE",
         "reviewDecision": "APPROVED",
         "isDraft": False,
         "body": "Closes #7",
-        "commits": [{"committedDate": "2026-01-01T00:00:00Z"}],
         "comments": [
             _rc("2026-01-02T00:00:00Z"),
             _rc("2026-01-03T00:00:00Z"),
@@ -47,13 +48,21 @@ def _clean():
     }
 
 
-def _call(pr_json, *, threads=(), merge_ref_ok=True):
+def _call(
+    pr_json,
+    *,
+    threads=(),
+    merge_ref_ok=True,
+    newest_commit: Any = "2026-01-01T00:00:00Z",  # str or (repo, pr) -> str
+):
+    nc = newest_commit if callable(newest_commit) else (lambda r, p: newest_commit)
     return merge_gate.check(
         "o/r",
         1,
         local_verify="true",
         gh_json=lambda r, p, f: pr_json,
         threads=lambda r, p: list(threads),
+        newest_commit=nc,
         merge_ref_verify=lambda r, p, lv: merge_ref_ok,
     )
 
@@ -212,10 +221,15 @@ def test_check_fetches_process_fields_in_one_call():
         local_verify="true",
         gh_json=gj,
         threads=lambda r, p: [],
+        newest_commit=lambda r, p: "2026-01-01T00:00:00Z",
         merge_ref_verify=lambda r, p, lv: True,
     )
     assert len(calls) == 1  # one gh call, not three
-    assert {"body", "comments", "commits"} <= set(calls[0].split(","))
+    fields = set(calls[0].split(","))
+    assert {"body", "comments"} <= fields
+    assert (
+        "commits" not in fields
+    )  # newest commit comes from the pagination-safe helper
 
 
 def test_closes_missing_blocks():
@@ -284,14 +298,37 @@ def test_custom_review_marker(monkeypatch):
 
 
 def test_review_stale_when_commit_postdates_last_review():
-    stale = {
-        **_clean(),
-        "commits": [
-            {"committedDate": "2026-01-01T00:00:00Z"},
-            {"committedDate": "2026-01-04T00:00:00Z"},  # after both reviews
-        ],
-    }
-    assert "review-stale" in _call(stale)["blockers"]
+    out = _call(_clean(), newest_commit="2026-01-04T00:00:00Z")  # after both reviews
+    assert "review-stale" in out["blockers"]
+
+
+def test_stale_detection_ignores_gh_json_commits_field():
+    # `gh pr view --json commits` caps at the FIRST 100 commits (unpaginated), so a
+    # stale/truncated commits field must not mask staleness — the last:1 helper wins.
+    truncated = {**_clean(), "commits": [{"committedDate": "2025-01-01T00:00:00Z"}]}
+    out = _call(truncated, newest_commit="2026-01-09T00:00:00Z")
+    assert "review-stale" in out["blockers"]
+
+
+def test_newest_commit_error_is_fail_closed():
+    def boom(r, p):
+        raise RuntimeError("gh boom")
+
+    out = _call(_clean(), newest_commit=boom)
+    assert out["ok"] is False
+    assert any(b.startswith("process-check-error") for b in out["blockers"])
+
+
+def test_newest_commit_not_called_when_review_legs_disabled(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_MIN_REVIEWS", "0")
+    called = []
+
+    def nc(r, p):
+        called.append(1)
+        return "2026-01-01T00:00:00Z"
+
+    assert _call(_clean(), newest_commit=nc)["ok"] is True
+    assert not called  # disabled legs must not spend a gh call
 
 
 def test_review_at_commit_time_is_not_stale():
@@ -304,6 +341,21 @@ def test_review_at_commit_time_is_not_stale():
 
 def test_fresh_review_passes():
     assert _call(_clean()) == {"ok": True, "blockers": []}
+
+
+def test_negative_min_reviews_is_fail_closed(monkeypatch):
+    # contract: 0 disables the review legs; negative is INVALID, not "more disabled"
+    monkeypatch.setenv("CONDUCTOR_MIN_REVIEWS", "-1")
+    out = _call(_clean())
+    assert out["ok"] is False
+    assert any(b.startswith("process-check-error") for b in out["blockers"])
+
+
+def test_non_integer_min_reviews_is_fail_closed(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_MIN_REVIEWS", "two")
+    out = _call(_clean())
+    assert out["ok"] is False
+    assert any(b.startswith("process-check-error") for b in out["blockers"])
 
 
 def test_malformed_timestamp_is_fail_closed():

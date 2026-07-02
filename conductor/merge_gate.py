@@ -66,6 +66,43 @@ def _unresolved_threads(repo: str, pr: int) -> list[str]:
     return [ln for ln in out.stdout.splitlines() if ln.strip()]
 
 
+def _newest_commit_date(repo: str, pr: int) -> str:
+    """`gh pr view --json commits` returns only the FIRST 100 commits (unpaginated), so on a
+    big PR max(committedDate) can miss the newest commit and review-stale would fail open.
+    GraphQL commits(last:1) fetches the true newest commit directly."""
+    owner, name = repo.split("/")
+    q = (
+        "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){"
+        "pullRequest(number:$n){commits(last:1){nodes{commit{committedDate}}}}}}"
+    )
+    out = subprocess.run(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={q}",
+            "-F",
+            f"o={owner}",
+            "-F",
+            f"r={name}",
+            "-F",
+            f"n={pr}",
+            "--jq",
+            ".data.repository.pullRequest.commits.nodes[0].commit.committedDate",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=_GH_TIMEOUT,
+    )
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip())
+    date = out.stdout.strip()
+    if not date:
+        raise RuntimeError("newest-commit-empty")
+    return date
+
+
 def _remote_for(repo: str, run: Any = subprocess.run) -> str:
     """Pick the git remote whose URL points at <owner/repo>; fall back to 'origin'."""
     out = run(
@@ -114,13 +151,12 @@ def check(
     local_verify: str,
     gh_json: Any = _gh_json,
     threads: Any = _unresolved_threads,
+    newest_commit: Any = _newest_commit_date,
     merge_ref_verify: Any = _merge_ref_verify,
 ) -> dict[str, Any]:
     try:
         d: Any = gh_json(
-            repo,
-            pr,
-            "mergeStateStatus,mergeable,reviewDecision,isDraft,body,comments,commits",
+            repo, pr, "mergeStateStatus,mergeable,reviewDecision,isDraft,body,comments"
         )
     except Exception as exc:  # gh failure/timeout -> fail closed, never crash the fire
         return {"ok": False, "blockers": [f"gh-error: {exc}"]}
@@ -141,6 +177,8 @@ def check(
         # env read per call (tests monkeypatch); empty marker would match everything
         marker = (os.environ.get("CONDUCTOR_REVIEW_MARKER") or "Codex review").lower()
         min_reviews = int(os.environ.get("CONDUCTOR_MIN_REVIEWS", "2"))
+        if min_reviews < 0:  # 0 disables the review legs; negative is invalid
+            raise ValueError(f"CONDUCTOR_MIN_REVIEWS must be >= 0, got {min_reviews}")
         if min_reviews > 0:  # 0 disables both review legs
             marked = [
                 c
@@ -151,9 +189,7 @@ def check(
                 blockers.append(f"reviews:{len(marked)}/{min_reviews}")
             if marked:  # zero markers already blocked above; skip double-reporting
                 last_review = max(_ts(c["createdAt"]) for c in marked)
-                last_commit = max(
-                    _ts(c["committedDate"]) for c in d.get("commits") or []
-                )
+                last_commit = _ts(newest_commit(repo, pr))  # pagination-safe last:1
                 if last_review < last_commit:  # the FINAL branch state was not reviewed
                     blockers.append("review-stale")
     except Exception as exc:  # malformed data/env -> fail closed, never crash the gate
