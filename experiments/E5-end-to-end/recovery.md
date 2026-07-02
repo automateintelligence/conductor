@@ -15,13 +15,28 @@ Both restart paths re-invoke the **reconcile-first `/conductor`** over the durab
 
 ## Tier B — same machine, just restart the driver (reboot / crash / closed terminal)
 
-OS autostart → `claude -p "/conductor:start <spec>" </dev/null` (reconcile-first, so it resumes):
+OS watchdog → a resume **script** (not a bare `claude -p` line) plus two crontab entries
+carrying the LITERAL marker `# conductor-autodev <project-root>` (`<project-root>` =
+`git rev-parse --show-toplevel`, the exact fixed string autodev's STOP branch later removes
+with `grep -F -v --`). The script fires `claude -p "/conductor:autodev"` — autodev, not
+start: a headless one-shot session must do a phase, not register an in-session cron that
+dies with it — and MUST, in order:
+
+1. **exit if any claude process already runs with cwd inside the project** (the live
+   terminal's in-session cron is then the sole driver — never double-drive);
+2. **exit once `conductor assert run --level spec` is green** (finished runs get no-op fires);
+3. hold `flock -n <project>/.conductor/resume.lock` for the whole fire (no overlap).
+
 ```cron
-@reboot sleep 30 && cd /path/to/checkout && \
-  claude -p "/conductor:start <spec>" --permission-mode bypassPermissions \
-  --no-session-persistence </dev/null >> ~/conductor-resume.log 2>&1
+@reboot sleep 30 && /path/to/conductor-resume.sh   # conductor-autodev <project-root>
+*/20 * * * * /path/to/conductor-resume.sh          # conductor-autodev <project-root>
 ```
-(or a systemd user service / login agent running the same line.)
+
+Inside the script, run `claude -p "/conductor:autodev" --permission-mode bypassPermissions
+--no-session-persistence </dev/null >> ~/conductor-resume.log 2>&1` — or tighten
+`bypassPermissions` to a scoped settings.json allowlist (git/gh/pytest/ruff/pyright/conductor)
+if unattended full write authority is unwanted. Note `$USER` is unset under cron — use
+`$(id -un)`. The script itself is OWNER-owned run infrastructure: workers never modify it.
 
 **Tested:** a fresh `claude -p` re-ran reconcile-first `/conductor` and skipped every
 already-done step — clean resume, no double-work. The OS trigger is a snippet, not

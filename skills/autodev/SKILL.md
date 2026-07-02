@@ -14,6 +14,14 @@ Make a red assertion green by implementing the **product**, never by weakening t
 a real coverage gap ADDS new assertions via `/conductor:assertions-to-tests`; it never edits or
 deletes existing ones.
 
+**Run infrastructure is OWNER-owned (same class as the frozen gate).** The Tier-B resume script,
+its crontab lines, merge-gate env (`CONDUCTOR_MERGE_VERIFY`, `CONDUCTOR_MIN_REVIEWS`, …), the
+driver-cron cadence, and anything under `~/.claude/scripts/` are guardrails around you — a worker
+must NEVER modify them mid-run, however good the improvement looks (live finding 2026-07-02: a
+worker rewrote its own watchdog unreviewed). Found a real defect in them? Escalate it —
+`escalate.file_followup(debt)` with the proposed patch — and keep working. The only exception is
+step 3's terminal crontab removal.
+
 > **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
 > below); installed plugins are not on `PATH`.
 
@@ -31,7 +39,12 @@ deletes existing ones.
    resets it. PROGRESS SELF-CHECK.
 3. **SPEC-DONE GATE.** `conductor assert run --level spec` (fail-closed; unrunnable = NOT done).
    **All green AND no plans left** → mark done, use **`CronList`** to find the driver cron, then
-   **`CronDelete`** it, final handoff, STOP.
+   **CronDelete** it, AND remove any Tier-B OS fallback — the crontab lines carrying the
+   literal marker plus their resume script:
+   `crontab -l | grep -F -v -- "# conductor-autodev $(git rev-parse --show-toplevel)" | crontab -`
+   (`grep -F` = fixed string, so regex metacharacters in the path can't over- or under-match; the
+   same canonical path was used at install) — else the heartbeat keeps firing no-ops forever.
+   This removal is the ONLY sanctioned mutation of run infrastructure. Final handoff, STOP.
 4. **PICK the next eligible phase** (unassigned & not blocked/done; climb the ladder):
    - phase available → SPLIT-CHECK (§6.1); else run the recipe.
    - plan done → `/superpowers:writing-plans` next plan → `ledger.generate` (or `ledger.convert`).
