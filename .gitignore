@@ -21,3 +21,4 @@ htmlcov/
 
 # Conductor runtime scratch (goal.md, etc.)
 .conductor/
+.claude/worktrees/
