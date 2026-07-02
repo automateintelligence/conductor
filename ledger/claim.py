@@ -32,6 +32,12 @@ def renew_lease(repo: str, n: int, worker: str, now_ts: int, gh: Any) -> None:
     )
 
 
+def strip_markers(body: str | None) -> str:
+    """Body with the lease + attempts markers removed (phase-done's terminal cleanup);
+    other markers — e.g. conductor-assertions — are deliberately preserved."""
+    return _ATTEMPTS.sub("", _LEASE.sub("", body or "")).rstrip()
+
+
 def read_attempts(repo: str, n: int, gh: Any) -> int:
     """The DURABLE per-phase failed-attempt count (issue body), so the retry cap survives
     across fires and fresh worker contexts — not an in-memory counter that resets to 0."""
