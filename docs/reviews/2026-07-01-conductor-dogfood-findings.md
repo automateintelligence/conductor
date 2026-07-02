@@ -319,3 +319,54 @@ plans already contain.
 loop": it's not just that cron/reconcile don't fire — a supervised run accrues **no durable run
 state at all beyond git**. Restart resilience today = git history + the frozen gate + the model
 re-deriving everything else.
+
+---
+
+## 2026-07-02 (later) — Operator findings + Fix pass 1 scope
+
+### HIGH — Plans carry no spec binding: the implementer cooks from the ingredients list
+Operator finding (his analogy: *"like following a recipe with the ingredients list only and no
+instructions on how to cook the meal"*). Verified: the dogfood plan **never names
+`2026-06-29-model-extraction-evaluation-spec.md` and never instructs reading it** (0 grep hits for
+the filename). It cites `spec §5/§7/§9/§10` shorthand in scattered implementation notes — references
+a fresh-context worker cannot resolve to a file. The assertions are the ingredients; the spec
+(architecture §4, metric definitions §6, decision rule §7…) is the cooking instructions, and no
+worker ever reads them. Root cause = the recipe-drop root cause: start step 4 invokes
+conductor-unaware `/superpowers:writing-plans` with no required inputs and nothing lints the
+artifact. Fix: step 4 passes spec+expectations+assertions paths and requires a `Normative spec:`
+header + a per-phase `Spec:` section pointer; `conductor plan-lint` enforces both mechanically;
+autodev's phase subagent prompt includes the spec path ("read the phase's spec sections first").
+
+### HIGH — Independent process-compliance checks (operator directive)
+*"If conductor is going to truly be robust, there needs to be independent checks of all the little
+things that we expect the model to do."* Corroborated cross-model: checkbox decay is universal
+("pretty much every model forgets until told explicitly") — so no prompt line is a mechanism. Each
+expectation gets a mechanical enforcer:
+
+| Expectation | Enforcer |
+|---|---|
+| ledger statuses truthful | `reconcile --from-gate` derives `tests_red` from `results.json` via assertion-ID markers in phase bodies |
+| plan contains spec binding + recipe + tasks | `conductor plan-lint` at setup + convert time |
+| every PR codex-reviewed **≥2×**, final review postdates last commit | merge-gate process legs — the one command a worker can't skip (it blocks the merge it wants) |
+| checkboxes ticked, label flipped, lease released, task issues closed | `conductor ledger phase-done` (atomic) |
+
+Operator also corrected the resilience picture: the git layer (per-phase branches, pinned task
+commits) IS a restart backstop he'd initially discounted — the fix pass builds enforcement around
+that working layer instead of adding prompt steps.
+
+### Fix pass 1 (2026-07-02) — agreed scope
+Dogfood paused before Phases 4–6; **they become the validation run for these fixes.**
+- **PR-1 ledger core:** tolerant `convert` dialect (`## Phase N — Title` w/ optional `[status]`,
+  H2-of-any-kind section bounds), assertion-ID extraction from phase-title parens →
+  `<!-- conductor-assertions: … -->` body marker, `reconcile --from-gate`, `ledger phase-done`.
+- **PR-2 merge-gate process legs:** `Closes #` required; ≥`CONDUCTOR_MIN_REVIEWS` (default 2)
+  "Codex review" marker comments; last review must postdate last commit (review-of-final-state).
+- **PR-3 spec-bound plans:** `conductor plan-lint`; start step 4 passes spec paths + plan codex
+  review; autodev spec-read subagent prompt + intra-phase resume procedure (plan-vs-git-log diff,
+  dirty-tree policy) + phase-done wiring + post-codex-reviews-as-PR-comments; assertions-to-tests
+  pinned standalone pytest commands.
+- **Live-plan amendment (ai repo, docs):** normative-spec header + per-phase Spec pointers for
+  Phases 4–6; tick Phase 1–3 boxes (verifiably done: merged PRs + green gate).
+- Ship: merge → bump 0.4.0 → marketplace update → plugin update → restart worker session → resume.
+- **Deferred unchanged:** freeze conftest-chain walk (pinned commands close most of it), gate
+  runtime, configurable gate location, dispatcher/parallelism.
