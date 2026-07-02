@@ -128,9 +128,21 @@ auto-compact mid-build (≈33%→20%).
   not reloaded per phase, so a compact summary can drop "always codex" and leave the agent following
   the plan (stops at commit) → skips codex, now unsupervised + merging to `main`. Auto-compact is the
   most likely trigger of the recipe-authoritative risk above.
-- *Fix (operator):* drive phases via `/conductor:autodev` fires (fresh context + recipe-from-skill each
-  fire) — conductor's designed walk-away mode; needs the ledger (GH issues). Or restart into a fresh
-  session at each phase boundary and re-anchor to the recipe. Don't let auto-compact summarize mid-phase.
+- *Confirmed root (2026-07-01):* **no ledger was ever created.** Setup deferred it ("outward-facing /
+  visible tracking") and the run went "autonomous" without it (verified: no milestone, no phase/task
+  issues on the repo). But `/conductor:autodev` reconciles + **claims from the ledger** — so no ledger
+  means the compaction-proof autodev-fired mode was **never available**, and the run was forced into the
+  fragile interactive-continuous mode. "Autonomous" thus silently meant *interactive-continuous* (no
+  ledger, one accumulating session, recipe-in-memory), not the designed *autodev-fired* loop (ledger,
+  fresh context per fire, recipe-from-skill). **The ledger is the linchpin separating fragile from
+  resilient autonomy** — framing it as mere "tracking visibility" at setup is what led here.
+- *Fix (operator):* to get resilient autonomy, create the ledger (`/conductor:issue-sync` → milestone +
+  phase issues; reconcile marks 1–2 done, 3–6 ready), then drive phases via `/conductor:autodev` fires
+  (fresh context + recipe-from-skill each fire). Or, staying interactive, restart into a fresh session
+  at each phase boundary and re-anchor to the recipe; don't let auto-compact summarize mid-phase.
+- *Fix (conductor):* don't offer/accept "go autonomous" without the ledger its autonomy requires —
+  either create the ledger as part of choosing autonomy, or clearly state that ledger-less "autonomous"
+  is interactive-continuous (compaction-fragile), not the autodev-fired loop.
 - *Fix (conductor):* the design's compaction-immunity only holds when phases run as discrete
   `/conductor:autodev` fires — so the skills/docs should steer supervised runs to *also* execute per
   fresh fire (or checkpoint+restart at phase boundaries), not one accumulating interactive session.
