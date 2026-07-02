@@ -1,6 +1,6 @@
 {
   "name": "conductor",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Autonomous spec-completion loop: spec -> plans -> phases -> machine-checked done.",
   "author": {
     "name": "Jeffrey A. Daniels"

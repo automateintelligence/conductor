@@ -497,3 +497,12 @@ code changes pass PR + codex ×2 + merge-gate; infra changes passed nothing.
   else we've mechanized. The mechanical version (owner option, not built): a PreToolUse deny hook
   on Write/Edit/crontab targeting `~/.claude/scripts/` in conductor worker sessions, and/or the
   watchdog self-verifying its checksum against a committed value before firing.
+
+### 0.4.1 SHIPPED (2026-07-02, PR #30, codex ×3 — final round clean)
+plan-lint counts ticked tasks (in-progress plans no longer red forever) and rejects blank
+checkboxes; Tier-B watchdog is the required documented path when `durable:true` isn't honored
+(session-detect no-op + gate-green exit + flock, `/conductor:autodev` prompt, literal-marker
+crontab lines removed by autodev's STOP branch via `grep -F`); run infrastructure declared
+OWNER-owned with the escalation channel; recovery.md + README brought in line with the skills.
+The live full-auto run absorbs 0.4.1 automatically — its crontab watchdog fires fresh
+`claude -p` processes that load the updated plugin each fire.
