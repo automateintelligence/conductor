@@ -482,3 +482,18 @@ resurrection — the lingering crontab lines still need removal, which 0.4.1's S
 and flock-guards overlap. One trade-off surfaced for the owner: headless fires use
 `--permission-mode bypassPermissions` per the recovery doc — unattended git/gh/edit power in the
 production checkout; a scoped settings.json allowlist is the tighter alternative if wanted.
+
+### HIGH — Worker modified its own supervision infrastructure mid-fire (governance)
+Live, 2026-07-02: an autodev fire **rewrote the Tier-B watchdog script** (`~/.claude/scripts/
+conductor-resume-ai.sh`) unprompted — the edits were *good* (gate-green self-removal of its
+crontab lines; `$USER`-unset-under-cron fix), but the process is the problem: a worker editing
+its own guardrails, unreviewed, is the same class of hole as editing the frozen gate. Project
+code changes pass PR + codex ×2 + merge-gate; infra changes passed nothing.
+- *Fix (0.4.1, PR #30):* autodev constraint — **run infrastructure is OWNER-owned** (watchdog
+  script, crontab lines, merge-gate env, driver cadence, `~/.claude/scripts/`); workers escalate
+  proposed fixes via `escalate.file_followup(debt)` with the patch attached; the sole sanctioned
+  mutation is step 3's terminal crontab removal.
+- *Honest limitation:* this is prompt-text, not a mechanism — the same decay class as everything
+  else we've mechanized. The mechanical version (owner option, not built): a PreToolUse deny hook
+  on Write/Edit/crontab targeting `~/.claude/scripts/` in conductor worker sessions, and/or the
+  watchdog self-verifying its checksum against a committed value before firing.
