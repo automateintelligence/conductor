@@ -338,3 +338,175 @@ def test_unlinked_orphan_reused_when_linked_sibling_exists():  # review (PR#20 r
         13
     ]  # B reuses the orphan, not a new #14
     gh.add_sub_issue.assert_any_call("o/r", 2, 113)  # B linked to the reused orphan
+
+
+# --- Real writing-plans dialect (fix-pass-1): `## Phase N — Title (ids)`, no [status] ---
+
+REAL_PLAN_MD = """\
+# Model-Extraction Eval — Implementation Plan
+
+**Normative spec:** docs/specs/spec.md
+
+## Global Constraints
+
+- [ ] not a phase task; must be ignored
+
+## Phase 1 — Relationship-quality scoring (A3, A4, A5)
+
+Some prose.
+
+- [ ] Confirm RED
+- [ ] Implement scoring
+
+## Phase 2 — Analysis contract (A8/A16/A19)
+
+- [ ] Implement axis_verdict
+
+## CI / gate coexistence — Phase-6 re-include (DO NOT FORGET)
+
+- [ ] CI task that must NOT leak into Phase 2
+
+## Phase 7 — Harness entrypoint (build-only, NOT executed) — OPTIONAL
+
+- [ ] build cli
+"""
+
+
+def test_parse_real_dialect_phase_headings_default_ready():
+    phases = sync.parse_plan_md(REAL_PLAN_MD)["phases"]
+    assert [p["title"] for p in phases] == [
+        "Phase 1 — Relationship-quality scoring (A3, A4, A5)",
+        "Phase 2 — Analysis contract (A8/A16/A19)",
+        "Phase 7 — Harness entrypoint (build-only, NOT executed) — OPTIONAL",
+    ]
+    assert all(p["status"] == "ready" for p in phases)
+
+
+def test_parse_real_dialect_non_phase_h2_tasks_do_not_leak():
+    phases = sync.parse_plan_md(REAL_PLAN_MD)["phases"]
+    assert phases[0]["tasks"] == ["Confirm RED", "Implement scoring"]
+    # Phase 2's section ends at the NEXT H2 of ANY kind — the CI section's task must not leak in.
+    assert phases[1]["tasks"] == ["Implement axis_verdict"]
+    all_tasks = [t for p in phases for t in p["tasks"]]
+    assert "not a phase task; must be ignored" not in all_tasks
+    assert "CI task that must NOT leak into Phase 2" not in all_tasks
+
+
+def test_parse_real_dialect_assertion_tokens():
+    phases = sync.parse_plan_md(REAL_PLAN_MD)["phases"]
+    assert phases[0]["assertions"] == ["A3", "A4", "A5"]  # comma-separated
+    assert phases[1]["assertions"] == ["A8", "A16", "A19"]  # slash-separated
+    assert phases[2]["assertions"] == []  # parens not trailing -> not an id list
+
+
+def test_parse_old_dialect_gets_empty_assertions():
+    phases = sync.parse_plan_md(PLAN_MD)["phases"]
+    assert all(p["assertions"] == [] for p in phases)
+
+
+def test_parse_status_bracket_combined_with_assertions():
+    md = "# T\n\n## Phase 9 — Foo (A1) [draft]\n\n- [ ] task\n"
+    (phase,) = sync.parse_plan_md(md)["phases"]
+    assert phase["title"] == "Phase 9 — Foo (A1)"
+    assert phase["status"] == "draft"
+    assert phase["assertions"] == ["A1"]
+
+
+def test_parse_prose_parens_rejected_as_assertions():
+    md = "# T\n\n## Phase 3 — Cleanup (best effort, optional)\n\n- [ ] task\n"
+    (phase,) = sync.parse_plan_md(md)["phases"]
+    assert phase["assertions"] == []  # tokens contain whitespace -> prose, not ids
+
+
+def test_generate_writes_assertion_marker_on_create():
+    plan = {
+        "title": "P",
+        "phases": [
+            {
+                "title": "Phase 1 — X (A3, A4)",
+                "status": "ready",
+                "tasks": [],
+                "assertions": ["A3", "A4"],
+            },
+        ],
+    }
+    gh = MagicMock()
+    gh.find_milestone.return_value = None
+    gh.find_issue.return_value = None
+    gh.find_issues.return_value = []
+    gh.create_milestone.return_value = 1
+    gh.create_issue.return_value = {"number": 10, "id": 1001}
+    sync.generate("o/r", plan, gh)
+    _, kwargs = gh.create_issue.call_args
+    assert "<!-- conductor-assertions: A3,A4 -->" in kwargs["body"]
+
+
+def test_generate_backfills_marker_on_reused_phase():
+    plan = {
+        "title": "P",
+        "phases": [
+            {
+                "title": "Phase 1 — X (A3)",
+                "status": "ready",
+                "tasks": [],
+                "assertions": ["A3"],
+            },
+        ],
+    }
+    gh = MagicMock()
+    gh.find_milestone.return_value = 1
+    gh.find_issue.return_value = {"number": 10, "id": 1001}
+    gh.find_issues.return_value = []
+    gh.list_sub_issues.return_value = []
+    gh.get_body.return_value = "existing body"
+    sync.generate("o/r", plan, gh)
+    gh.set_body.assert_called_once()
+    new_body = gh.set_body.call_args[0][2]
+    assert "existing body" in new_body
+    assert "<!-- conductor-assertions: A3 -->" in new_body
+
+
+def test_generate_replaces_stale_marker_not_duplicates():
+    plan = {
+        "title": "P",
+        "phases": [
+            {
+                "title": "Phase 1 — X (A3, A4)",
+                "status": "ready",
+                "tasks": [],
+                "assertions": ["A3", "A4"],
+            },
+        ],
+    }
+    gh = MagicMock()
+    gh.find_milestone.return_value = 1
+    gh.find_issue.return_value = {"number": 10, "id": 1001}
+    gh.find_issues.return_value = []
+    gh.list_sub_issues.return_value = []
+    gh.get_body.return_value = "body\n\n<!-- conductor-assertions: A3 -->"
+    sync.generate("o/r", plan, gh)
+    new_body = gh.set_body.call_args[0][2]
+    assert new_body.count("conductor-assertions") == 1
+    assert "<!-- conductor-assertions: A3,A4 -->" in new_body
+
+
+def test_generate_marker_unchanged_is_not_rewritten():
+    plan = {
+        "title": "P",
+        "phases": [
+            {
+                "title": "Phase 1 — X (A3)",
+                "status": "ready",
+                "tasks": [],
+                "assertions": ["A3"],
+            },
+        ],
+    }
+    gh = MagicMock()
+    gh.find_milestone.return_value = 1
+    gh.find_issue.return_value = {"number": 10, "id": 1001}
+    gh.find_issues.return_value = []
+    gh.list_sub_issues.return_value = []
+    gh.get_body.return_value = "body\n\n<!-- conductor-assertions: A3 -->"
+    sync.generate("o/r", plan, gh)
+    gh.set_body.assert_not_called()

@@ -1,10 +1,44 @@
 import re
 from typing import Any
 
+from ledger import gate_link
+
 _H1 = re.compile(r"^#\s+(.+)$", re.MULTILINE)
-_H2 = re.compile(r"^##\s+(.+?)\s+\[([^\]]+)\]\s*$", re.MULTILINE)
+_H2_ANY = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+_STATUS_SUFFIX = re.compile(r"\s+\[([^\]]+)\]\s*$")
+_PHASE_PREFIX = re.compile(r"^phase\b", re.IGNORECASE)
+_TRAILING_PARENS = re.compile(r"\(([^()]*)\)\s*$")
 _TASK = re.compile(r"^- \[ \] (.+)$", re.MULTILINE)
 _CHECKLIST = re.compile(r"- \[[ xX]\] #(\d+)")
+
+
+def _assertion_tokens(title: str) -> list[str]:
+    """Assertion ids named by a phase heading's TRAILING parens — ``(A3, A4, A5)`` or
+    ``(A8/A16/A19)``. A token containing whitespace means the parens are prose
+    (``(build-only, NOT executed)``), so the whole group is rejected, never half-parsed."""
+    m = _TRAILING_PARENS.search(title)
+    if not m:
+        return []
+    tokens = [t.strip() for t in re.split(r"[,/]", m.group(1)) if t.strip()]
+    if not tokens or any(re.search(r"\s", t) for t in tokens):
+        return []
+    return tokens
+
+
+def _phase_heading(raw: str) -> tuple[str, str, list[str]] | None:
+    """(title, status, assertion-tokens) if this H2 is a phase heading, else None.
+    A phase is an H2 with a trailing ``[status]`` (conductor dialect) OR one starting
+    ``Phase`` (the dialect real plan-writing skills emit — dogfood finding: demanding
+    ``[status]`` made ``convert`` unusable on real plans, so the task layer got dropped).
+    Status defaults to ``ready`` when the bracket is absent."""
+    m = _STATUS_SUFFIX.search(raw)
+    if m:
+        title, status = raw[: m.start()].rstrip(), m.group(1).strip()
+    elif _PHASE_PREFIX.match(raw):
+        title, status = raw, "ready"
+    else:
+        return None
+    return title, status, _assertion_tokens(title)
 
 
 def parse_plan_md(text: str) -> dict[str, Any]:
@@ -12,20 +46,24 @@ def parse_plan_md(text: str) -> dict[str, Any]:
     title = title_match.group(1).strip() if title_match else ""
 
     phases: list[dict[str, Any]] = []
-    phase_positions: list[int] = []
-
-    for m in _H2.finditer(text):
+    headings = list(_H2_ANY.finditer(text))
+    for i, m in enumerate(headings):
+        parsed = _phase_heading(m.group(1))
+        if parsed is None:
+            continue
+        # Section ends at the next H2 of ANY kind (phase or not), so a non-phase
+        # section's `- [ ]` lines can never leak into the preceding phase's tasks.
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
+        section = text[m.end() : end]
+        phase_title, status, assertions = parsed
         phases.append(
-            {"title": m.group(1).strip(), "status": m.group(2).strip(), "tasks": []}
+            {
+                "title": phase_title,
+                "status": status,
+                "tasks": [t.group(1).strip() for t in _TASK.finditer(section)],
+                "assertions": assertions,
+            }
         )
-        phase_positions.append(m.end())
-
-    for phase, pos in zip(phases, phase_positions):
-        # Determine the end of this phase's section (start of next H2 or EOF)
-        next_h2 = _H2.search(text, pos)
-        section_end = next_h2.start() if next_h2 else len(text)
-        section = text[pos:section_end]
-        phase["tasks"] = [m.group(1).strip() for m in _TASK.finditer(section)]
 
     return {"title": title, "phases": phases}
 
@@ -80,14 +118,23 @@ def generate(repo: str, plan: dict[str, Any], gh: Any) -> dict[str, Any]:
 
     result_phases: list[dict[str, Any]] = []
     for phase, (phase_number, children) in zip(plan["phases"], phase_state):
+        # The gate-link marker makes the phase->assertion mapping MACHINE-readable, so
+        # reconcile --from-gate / phase-done derive test state instead of trusting flags.
+        tokens = [str(t) for t in (phase.get("assertions") or [])]
         if phase_number is None:
             phase_number = gh.create_issue(
                 repo,
                 phase["title"],
-                body="",
+                body=gate_link.assertions_marker(tokens) if tokens else "",
                 milestone=milestone,
                 labels=[f"status:{phase['status']}"],
             )["number"]
+        elif tokens:
+            new_body = gate_link.upsert_marker(gh.get_body(repo, phase_number), tokens)
+            if (
+                new_body is not None
+            ):  # backfill or replace-stale; never rewrite unchanged
+                gh.set_body(repo, phase_number, new_body)
         sub_issues: list[int] = []
         fallback = False
 

@@ -37,12 +37,41 @@ after a `gh` call fails partway — never duplicates the hierarchy or doubles th
 
 `conductor ledger convert <plan.md>`
 
-Parses a Markdown plan (`# Title` / `## Phase [status]` / `- [ ] task` syntax), builds the
-plan dict, and delegates to `generate`. Returns the same shape.
+Parses a Markdown plan and delegates to `generate`. Returns the same shape. Two heading
+dialects are accepted — an H2 is a **phase** when it has a trailing `[status]` (conductor
+dialect) OR starts with `Phase` (the dialect real plan-writing skills emit; status defaults
+to `ready`):
+
+```
+## Phase 1 — Relationship-quality scoring (A3, A4, A5)
+## Backend [draft]
+```
+
+A phase's `- [ ] task` lines run to the next H2 of ANY kind, so a non-phase section
+(`## Global Constraints`, `## CI notes`) can never leak tasks into the preceding phase.
+**Assertion binding:** ids in the heading's trailing parens (`(A3, A4, A5)` or
+`(A8/A16/A19)`) are extracted and written into the phase-issue body as a machine-readable
+marker:
+
+```
+<!-- conductor-assertions: A3,A4,A5 -->
+```
+
+`generate` also backfills/updates this marker on reused phase issues (idempotent — an
+unchanged marker is never rewritten). The marker is what lets `reconcile --from-gate` and
+`phase-done` DERIVE test state from the done-gate instead of trusting caller flags.
 
 ### reconcile
 
-`conductor ledger reconcile <issue#> [--tests-red] [--pr-merged] [--commits N] [-R N] [--now-ts N] [-L N]`
+`conductor ledger reconcile <issue#> [--tests-red | --from-gate [--results PATH]] [--pr-merged] [--commits N] [-R N] [--now-ts N] [-L N]`
+
+**Prefer `--from-gate`** (mutually exclusive with `--tests-red`): it derives the phase's
+test state from the runner's `results.json` (default `<project>/assertions/run/results.json`;
+run `conductor assert run --level spec` first) via the issue's `conductor-assertions` marker —
+ground truth instead of a worker-reported flag. Marker tokens resolve to manifest ids
+exactly, case-insensitively, or by letters+number prefix (`A3` → `a03-…`, never `a30-…`).
+Fail-closed: a missing marker, missing results file, or unresolved token exits with a
+distinct error — it can never silently read as green.
 
 Applies §7 reconcile rules to a single issue. Returns `{action, new_status}`.
 
@@ -61,6 +90,27 @@ overrides the current status label. Rule evaluation order:
 4. **Abandoned** (`status:in-progress`, no assignee): reset to `status:ready`.
 5. **Closed, PR not merged**: reopen and set `status:in-progress`.
 6. Otherwise: `action: none`.
+
+### phase-done
+
+`conductor ledger phase-done <issue#> [--plan <plan.md>] [--results PATH] [--no-gate-check]`
+
+**Atomic end-of-phase bookkeeping** — one command replacing the clerical steps workers
+reliably drop (dogfood evidence: 0/27 plan checkboxes, labels never maintained). Fail-closed:
+it first verifies every id in the issue's `conductor-assertions` marker is GREEN in
+`results.json` (same resolution rules as `--from-gate`); a red/unresolved/missing anything
+returns an error and touches **nothing**. Only `--no-gate-check` (explicit) skips that.
+On success, in order:
+
+1. Label `status:done` (other `status:*` removed).
+2. Close every task sub-issue (checklist-fallback bodies get `- [ ] #N` → `- [x] #N`).
+3. Unassign all workers; strip the `conductor-lease` + `conductor-attempts` markers
+   (the `conductor-assertions` marker is preserved).
+4. Close the phase issue.
+5. With `--plan`: tick every `- [ ]` in the plan section whose phase heading equals the
+   issue title (best-effort: a missing section is reported in the result, never fatal).
+
+Returns `{ok, issue, sub_issues_closed, checklist_ticked, plan?}`; exits 1 when not ok.
 
 ## Sub-Issue Hierarchy
 
