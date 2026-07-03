@@ -506,3 +506,45 @@ crontab lines removed by autodev's STOP branch via `grep -F`); run infrastructur
 OWNER-owned with the escalation channel; recovery.md + README brought in line with the skills.
 The live full-auto run absorbs 0.4.1 automatically — its crontab watchdog fires fresh
 `claude -p` processes that load the updated plugin each fire.
+
+---
+
+## 2026-07-02 — DOGFOOD RUN COMPLETE (verified) + merge-topology decision
+
+**The full-auto run finished Phases 4–6 unattended and every 0.4.x mechanism held.** Independently
+verified: gate 19/19 GREEN (`assert run` exit 0, re-run by the owner session); PRs #146/#147/#148
+merged with **3/4/2 "Codex review" comments** (the merge-gate ≥2-review + final-state legs held on
+every phase — Phase 5 took 4 rounds); ledger flawless (phases #127–132 closed `status:done`, all
+12 task sub-issues closed, #145 still parked draft/dep-blocked); plan 27/31 ticked (4 unchecked =
+optional Phase 7); `tests/model_eval/` (186 tests) re-included in blocking CI; the watchdog
+**self-removed its crontab entries on green** (0 left). Zero human bookkeeping. The eval harness
+(the secondary goal) is built; the primary goal — conductor working optimally — is demonstrated
+end-to-end.
+
+### Decision (owner, prompted by Josh's "where do PRs merge?"): run-branch topology — 0.5.0
+Full-auto merging phase PRs to prod `main` was a consciously-accepted dogfood risk, now rejected
+as a default. Design (owner-refined, 8 points): phase PRs → `conductor/run-<slug>` integration
+branch in a **worktree** (worker never touches the owner's checkout); gate-green → conductor opens
+ONE final owner-reviewed PR run→main with a generated **review packet** (phase PR links,
+changed-files summary, gate evidence, deferrals, verification output) and NEVER merges it;
+merge-gate gains a fail-closed **expected-base leg** (phase PR base ≠ run branch → blocker); the
+run branch gets light protection (no force-push/delete; code via PRs, bookkeeping pushes direct);
+direct-to-main becomes a LOUD opt-in (`CONDUCTOR_ALLOW_DIRECT_MAIN_MERGE=1` + preflight warning),
+never a quiet default; issue closure stays phase-done's job (run-branch merges don't auto-close).
+The live run completed before retrofit was needed — this ships in 0.5.0 for future runs.
+
+### Constraint discovered: server-side main protection unavailable on this repo
+`ai-platform` is **private on a free-plan org** — branch protection AND rulesets both 403
+("Upgrade to GitHub Pro or make this repository public"). Two real options:
+1. **Upgrade the org to GitHub Team** → protection (require PR + approvals, block force-push) and,
+   combined with a **separate worker identity** (machine account / fine-grained PAT — required
+   anyway, since worker-as-owner's-login can neither be distinguished nor blocked from approving),
+   the hard server-side guarantee.
+2. **Free tier**: conductor-side mechanical enforcement only — the 0.5.0 merge-gate base leg +
+   optional deny-hooks. Stops a negligent worker (the stated trust model), not a maximally
+   misbehaving one. Honest limit, documented.
+
+### 0.5.0 backlog (consolidated)
+`/conductor:prepare` (recipe verified by hand); run-branch topology + final-PR review packet
+(`conductor run-packet` CLI); merge-gate expected-base leg; `status:draft` added to claim's
+blocking set; loud direct-to-main opt-in; branch-protection verify in start preflight.
