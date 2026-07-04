@@ -15,21 +15,26 @@ Both restart paths re-invoke the **reconcile-first `/conductor`** over the durab
 
 ## Tier B — same machine, just restart the driver (reboot / crash / closed terminal)
 
-OS watchdog → a resume **script** (not a bare `claude -p` line) plus two crontab entries
-carrying the LITERAL marker `# conductor-autodev <project-root>` (`<project-root>` =
-`git rev-parse --show-toplevel`, the exact fixed string autodev's STOP branch later removes
-with `grep -F -v --`). The script fires `claude -p "/conductor:autodev"` — autodev, not
+OS watchdog → a resume **script** (not a bare `claude -p` line) that `cd`s into the RUN
+WORKTREE and exports `CONDUCTOR_HOME=<worktree>` (0.5.0 topology: the worker never resumes in
+the owner's checkout), plus two crontab entries
+carrying the LITERAL marker `# conductor-autodev <main-root>` (`<main-root>` =
+`dirname "$(git rev-parse --path-format=absolute --git-common-dir)"` — the MAIN checkout
+root, identical whether computed from the run worktree or the owner checkout; NOT
+`--show-toplevel`, which returns the worktree path there and would make install and
+removal disagree — the exact fixed string autodev's STOP branch later removes with
+`grep -F -v --`). The script fires `claude -p "/conductor:autodev"` — autodev, not
 start: a headless one-shot session must do a phase, not register an in-session cron that
 dies with it — and MUST, in order:
 
-1. **exit if any claude process already runs with cwd inside the project** (the live
+1. **exit if any claude process already runs with cwd inside the run worktree OR the project** (the live
    terminal's in-session cron is then the sole driver — never double-drive);
 2. **exit once `conductor assert run --level spec` is green** (finished runs get no-op fires);
 3. hold `flock -n <project>/.conductor/resume.lock` for the whole fire (no overlap).
 
 ```cron
-@reboot sleep 30 && /path/to/conductor-resume.sh   # conductor-autodev <project-root>
-*/20 * * * * /path/to/conductor-resume.sh          # conductor-autodev <project-root>
+@reboot sleep 30 && /path/to/conductor-resume.sh   # conductor-autodev <main-root>
+*/20 * * * * /path/to/conductor-resume.sh          # conductor-autodev <main-root>
 ```
 
 Inside the script, run `claude -p "/conductor:autodev" --permission-mode bypassPermissions

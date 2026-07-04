@@ -470,7 +470,7 @@ flagged permanently. Lint now counts both states; issue-sync's parser stays unch
 by clean probe — response says "Session-only", no `scheduled_tasks.json` written, despite the
 parameter schema promising persistence (the tool's own description contradicts its parameter).
 Start step 6 now verifies the response and installs the Tier-B fallback (flock-guarded resume
-script + `# conductor-autodev <project>`-tagged crontab lines) for unattended runs; the autodev
+script + `# conductor-autodev <project>` *(0.4.1 convention — superseded in 0.5.0 by `<main-root>` = dirname of git-common-dir, identical from worktree and checkout)*-tagged crontab lines) for unattended runs; the autodev
 STOP branch removes the tagged lines so a finished run isn't resurrected. *Upstream note: this
 looks like a Claude Code CLI gap worth reporting — the durable param is schema-documented but
 inert (confirmed on build 2.1.198, twice, plus a clean probe here).*

@@ -56,10 +56,11 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      into the ledger's machine-readable gate mapping). A deliberately gateless phase (rare —
      `phase-done` cannot gate-verify it) must declare `gate: none` in its section;
    - per phase: a `**Spec:** §N <section name>; …` pointer line and `- [ ]` task lines;
-   - the per-phase recipe verbatim: subagent implement → `/code-review` per task (against the
-     phase's Spec sections, not just the diff) → commit per task → one PR per phase
-     (`Closes #<phase-issue>`) → codex review ×2 posted as "Codex review" PR comments →
-     `conductor merge-gate` → merge → `/document-release` → `conductor ledger phase-done`.
+   - the per-phase recipe verbatim: subagent implement on a phase branch forked FROM THE RUN
+     BRANCH → `/code-review` per task (against the phase's Spec sections, not just the diff) →
+     commit per task → one PR per phase with **base = the run branch** (`Closes #<phase-issue>`)
+     → codex review ×2 posted as "Codex review" PR comments → `conductor merge-gate` → merge
+     into the run branch → `/document-release` → `conductor ledger phase-done`.
    SKIP if a plan/milestone exists.
 4b. **LINT + CODEX-REVIEW THE PLAN** — it dictates every phase and must not stay the
    least-reviewed setup artifact. `conductor plan-lint <plan.md> --spec <spec.md>` must exit 0:
@@ -68,7 +69,36 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    apply the fixes. SKIP only if both were already done for this plan.
 5. **issue-sync** — `ledger.generate` (or `convert <plan.md>`; the parser reads the real
    `## Phase N — Title (ids)` dialect directly and writes each phase's `conductor-assertions`
-   marker). SKIP if the hierarchy exists; else reconcile.
+   marker). SKIP if the hierarchy exists; else reconcile. Phases authored `[draft]` are created
+   PARKED — `status:draft` blocks claiming; the owner promotes them to `status:ready` to schedule.
+5b. **RUN TOPOLOGY (0.5.0 default): phase PRs merge into a run branch, NEVER directly to the
+   default branch.** The default branch belongs to the owner; the run gets an integration branch
+   reviewed ONCE, by the owner, at the end.
+   - **Reconcile-first, EXACT name:** compute `conductor/run-<spec-slug>` from THIS spec's
+     filename, then `git ls-remote origin refs/heads/conductor/run-<spec-slug>` — exists → reuse;
+     absent → create off the default branch and push. NEVER bind by wildcard scan
+     (`conductor/run-*`): with two active runs a scan grabs the wrong spec's branch.
+   - **Stale-run cleanup first:** if `.conductor/run_branch` names a branch that no longer exists
+     on the remote (the owner merged the final PR and deleted it — the run is over), remove the
+     old run worktree (`git worktree remove <path>`) and the `run_branch` file BEFORE setting up
+     this run; otherwise "SKIP if it exists" would resume against a finished run's leftovers.
+   - **Write `<project>/.conductor/run_branch`** (single line, the branch name). This is what the
+     merge-gate's expected-base leg reads — a phase PR targeting anything else blocks with
+     `base-mismatch`. On a fresh clone the file is missing: re-derive it from the ls-remote above
+     (this step IS the re-derivation — reconcile-first).
+   - **Work in a WORKTREE:** `git worktree add ../<repo>-run-<spec-slug> conductor/run-<spec-slug>`
+     — the worker and the Tier-B watchdog operate in the worktree (`CONDUCTOR_HOME` = worktree
+     root), so the owner's own checkout is never branch-switched or dirtied by fires. SKIP if it
+     exists.
+   - **Probe default-branch protection** (`gh api repos/{owner}/{repo}/branches/<default>/protection`):
+     404/absent → WARN the owner that nothing server-side stops a merge to the default branch;
+     403 ("Upgrade to GitHub Pro…") → tell the owner protection needs a paid plan or a public
+     repo, and that until then enforcement is conductor-side only (the base leg + skill rules).
+     Best-effort light protection on the run branch (no force-push/delete) if the API allows.
+   - **LOUD opt-out:** only `CONDUCTOR_ALLOW_DIRECT_MAIN_MERGE=1` skips this step (no run branch,
+     no run_branch file → the base leg stays disabled and phases merge straight to the default
+     branch, 0.4.x-style). Print an unmissable warning when set: every phase merge lands on the
+     owner's default branch with no final review point. Never default to it; never infer it.
 6. **Record `/goal`** (`conductor goal set`) and **start the driver:** register a harness cron via
    **`CronCreate`** — `prompt: "/conductor:autodev"`, `cron: "*/7 * * * *"` (≈ every 7 min),
    `durable: true`. Record its id. SKIP if already registered. The interval is only a
@@ -80,16 +110,20 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    `scheduled_tasks.json` appears (verified live 2026-07-02). If the response does NOT confirm
    persistence, the loop dies with the terminal — for an unattended run, **install the Tier-B OS
    fallback NOW; do not merely warn the user**:
-   - write a resume script that runs `claude -p "/conductor:autodev"` from the project root
-     (autodev, not start — a headless one-shot session must do a phase, not register a cron that
-     dies with it) and, in order: (a) **exits if any claude process is already running with cwd
-     inside the project** — the live terminal's in-session cron is then the sole driver, so the
-     two drivers can never double-fire; (b) **exits once `conductor assert run --level spec` is
-     green** — a finished run gets no-op fires; (c) holds `flock -n
-     <project>/.conductor/resume.lock` for the whole fire — no overlapping headless sessions;
-   - add crontab entries carrying the LITERAL marker `# conductor-autodev <project-root>`, where
-     `<project-root>` is the canonical `git rev-parse --show-toplevel` path (removal greps for
-     this exact fixed string): one `@reboot` line and one periodic heartbeat (e.g. `*/20 * * * *`).
+   - write a resume script that runs `claude -p "/conductor:autodev"` from the RUN WORKTREE
+     (step 5b — never the owner's checkout; autodev, not start — a headless one-shot session
+     must do a phase, not register a cron that dies with it) and, in order: (a) **exits if any
+     claude process is already running with cwd inside the worktree or project** — the live
+     terminal's in-session cron is then the sole driver, so the two drivers can never
+     double-fire; (b) **exits once `conductor assert run --level spec` is green** — a finished
+     run gets no-op fires; (c) holds `flock -n <project>/.conductor/resume.lock` for the whole
+     fire — no overlapping headless sessions;
+   - add crontab entries carrying the LITERAL marker `# conductor-autodev <main-root>`, where
+     `<main-root>` is `$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")` —
+     the MAIN checkout root, which is IDENTICAL whether computed from the owner checkout or the
+     run worktree (`--show-toplevel` is NOT: it returns the worktree path there, so install and
+     removal would disagree). Removal greps for this exact fixed string. One `@reboot` line and
+     one periodic heartbeat (e.g. `*/20 * * * *`).
    The marker tag is load-bearing: the autodev STOP branch removes exactly those lines when the
    gate goes green (see `experiments/E5-end-to-end/recovery.md`).
    **Tell the user one limit:** recurring in-session crons **auto-expire after 7 days** —
