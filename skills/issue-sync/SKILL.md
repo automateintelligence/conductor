@@ -93,8 +93,21 @@ overrides the current status label. Rule evaluation order:
    so a genuinely failing phase stops looping forever instead of retrying every fire).
 3. **Done + tests red**: reopen and set `status:in-progress` (invalid combination repair).
 4. **Abandoned** (`status:in-progress`, no assignee): reset to `status:ready`.
-5. **Closed, PR not merged**: reopen and set `status:in-progress`.
+5. **Closed, PR not merged, tests RED**: reopen and set `status:in-progress` (a closed phase with a GREEN gate is terminal — git/tests > PR).
 6. Otherwise: `action: none`.
+
+### align
+
+`conductor ledger align <plan.md> [--apply]`
+
+**Brownfield alignment** (the core of `/conductor:prepare`): matches EXISTING phase issues to
+plan phases by **assertion-id set** — the body marker first, heading-style title tokens as
+fallback, case-insensitive — because paraphrased titles broke exact-title idempotency in the
+first live run. Builds a rename plan (issues + milestone → canonical plan headings); dry-run
+by default, `--apply` executes. Fail-closed: an ambiguous match (two issues, one token set)
+renames nothing for that phase and exits 1; matched issues spanning two milestones skip the
+milestone rename. After an applied align, `convert` reuses everything and creates whatever is
+missing (markers, task sub-issues).
 
 ### phase-done
 

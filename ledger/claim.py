@@ -1,7 +1,9 @@
 import re
 from typing import Any
 
-BLOCKING = {"status:blocked", "status:done"}
+# draft = "not scheduled" (parked/optional phases) — claimable only after the owner
+# promotes it to status:ready (0.5.0; live finding: a draft phase was claim-eligible).
+BLOCKING = {"status:blocked", "status:done", "status:draft"}
 _LEASE = re.compile(r"<!--\s*conductor-lease worker=(\S+) ts=(\d+)\s*-->")
 _ATTEMPTS = re.compile(r"<!--\s*conductor-attempts n=(\d+)\s*-->")
 

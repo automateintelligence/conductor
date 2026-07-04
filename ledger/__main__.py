@@ -10,6 +10,7 @@ import sys
 from typing import Any
 
 from conductor.paths import project_root
+from ledger import align as _align
 from ledger import gate_link
 from ledger import gh as _gh
 from ledger import phase_done as _phase_done
@@ -125,6 +126,16 @@ def cmd_phase_done(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_align(args: argparse.Namespace) -> None:
+    repo = _derive_repo(args.repo)
+    with open(args.plan_md) as f:
+        plan = _sync.parse_plan_md(f.read())
+    result = _align.align(repo, plan, _gh, apply=args.apply)
+    print(json.dumps(result))
+    if result["ambiguous_phases"] or result["milestone"] == "ambiguous":
+        sys.exit(1)  # ambiguity needs the owner; renames for those were withheld
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python3 -m ledger",
@@ -179,6 +190,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "-L", type=int, default=900, metavar="N", help="Lease TTL seconds (default 900)"
     )
     r.set_defaults(func=cmd_reconcile)
+
+    # align
+    al = sub.add_parser(
+        "align",
+        help="Match existing (paraphrased-title) phase issues to plan phases by "
+        "assertion-id SET and rename issues + milestone to the canonical plan "
+        "headings; dry-run by default, --apply executes",
+    )
+    al.add_argument("plan_md", metavar="plan.md", help="Path to Markdown plan file")
+    al.add_argument("--apply", action="store_true", default=False)
+    al.set_defaults(func=cmd_align)
 
     # phase-done
     pd = sub.add_parser(
