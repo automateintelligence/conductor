@@ -81,3 +81,24 @@ def test_assertions_to_tests_skill_contract():
         "<spec>.assertions.md",
     ]:
         assert needle in body, needle
+
+
+def test_prepare_skill_contract():
+    body = open(os.path.join(ROOT, "skills/prepare/SKILL.md")).read().lower()
+    for needle in [
+        "brownfield",
+        "owner-supervised",
+        "dry-run first",
+        "assertion-id set",
+        "conductor ledger align <plan.md> --apply",
+        "conductor ledger convert <plan.md>",
+        "plan-lint",
+        "--from-gate",
+        "phase-done",
+        "status:draft",
+        "run topology",
+        "ready for `/conductor:start`",
+        "never guess",
+        "gate verify",
+    ]:
+        assert needle in body, needle
