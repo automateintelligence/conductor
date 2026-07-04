@@ -355,3 +355,18 @@ def test_main_gate_failure_still_renders_packet():
     assert rc == 0  # the packet is evidence, not enforcement: always renders
     assert "unavailable: gate crashed" in out
     assert "## Verification" in out
+
+
+def test_direct_deferrals_param_is_sanitized_at_the_bullet_boundary():
+    # codex r2 LOW: the CLI path sanitizes issue titles, but build_packet() must hold
+    # the display contract for DIRECT callers too — a newline in a deferral string
+    # would otherwise break out of its bullet into a standalone markdown heading.
+    out = run_packet.build_packet(
+        "conductor/run-x",
+        deferrals=["#5 ok\n# injected heading"],
+        gate_output="all green",
+        gate_exit=0,
+        runner=_fake_runner(),
+    )
+    assert "\n# injected heading" not in out
+    assert "- #5 ok # injected heading" in out

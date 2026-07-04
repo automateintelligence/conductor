@@ -114,7 +114,9 @@ def build_packet(
     else:
         gate_body = gate_output.rstrip("\n")
     exit_line = f"exit status: {gate_exit if gate_exit is not None else 'not run'}"
-    deferral_lines = [f"- {d}" for d in (deferrals or [])] or ["None"]
+    # sanitize at the BULLET boundary so direct callers get the same display contract
+    # as the CLI path (codex r2: a newline breaks out into a standalone heading)
+    deferral_lines = [f"- {_one_line(d)}" for d in (deferrals or [])] or ["None"]
     parts = [
         f"# Conductor run review packet — {run_branch} → {base}",
         "",
