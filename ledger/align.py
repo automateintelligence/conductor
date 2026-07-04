@@ -51,6 +51,7 @@ def align(
     matches: list[dict[str, Any]] = []
     ambiguous_phases: dict[str, list[int]] = {}
     matched_issue_numbers: set[int] = set()
+    ambiguous_issue_numbers: set[int] = set()
     matched_milestones: dict[int, str] = {}
     unmatched_phases: list[str] = []
 
@@ -61,12 +62,14 @@ def align(
         found = [i for i in issues if _tokens(i) == wanted]
         if wanted in duplicated_sets:  # plan-side ambiguity: never guess an assignment
             ambiguous_phases[phase_title] = sorted(i["number"] for i in found)
+            ambiguous_issue_numbers.update(i["number"] for i in found)
             continue
         if not found:
             unmatched_phases.append(phase_title)
             continue
         if len(found) > 1:  # broken mapping must surface, never guess (fail-closed)
             ambiguous_phases[phase_title] = sorted(i["number"] for i in found)
+            ambiguous_issue_numbers.update(i["number"] for i in found)
             continue
         issue = found[0]
         matched_issue_numbers.add(issue["number"])
@@ -83,7 +86,11 @@ def align(
     unmatched_issues = sorted(
         i["number"]
         for i in issues
-        if i["number"] not in matched_issue_numbers and _tokens(i)
+        # ambiguity participants are neither matched nor stray (codex r2): listing them
+        # as unmatched would mislead follow-on automation
+        if i["number"] not in matched_issue_numbers
+        and i["number"] not in ambiguous_issue_numbers
+        and _tokens(i)
     )
 
     milestone_report: Any = None

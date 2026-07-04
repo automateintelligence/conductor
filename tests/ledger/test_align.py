@@ -191,4 +191,7 @@ def test_duplicate_plan_assertion_sets_fail_closed():
         "Phase 2 — B (A4, A3)",
     }
     assert report["matches"] == []
+    # codex r2 LOW: an ambiguity-participating issue is neither matched NOR unmatched —
+    # listing it in unmatched_issues would mislead follow-on automation.
+    assert report["unmatched_issues"] == []
     g.update_issue_title.assert_not_called()
