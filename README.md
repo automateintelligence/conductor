@@ -250,7 +250,8 @@ days** (re-run `/conductor:start` to continue), and an in-session cron **dies wh
 closes**. For a run that survives reboots and closed terminals, install the **Tier-B OS
 watchdog**: a flock-guarded resume script firing `claude -p "/conductor:autodev"` (session-detect
 no-op while a terminal is live; exits once the gate is green) plus `@reboot` + heartbeat crontab
-lines tagged `# conductor-autodev <project-root>` — spec in
+lines tagged `# conductor-autodev <main-root>` (the main-checkout root, identical from the
+run worktree and the owner checkout) — spec in
 [`experiments/E5-end-to-end/recovery.md`](experiments/E5-end-to-end/recovery.md).
 
 ### 4. Check in, resume, or stop
