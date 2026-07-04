@@ -45,11 +45,16 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
    which now reuses every aligned issue and creates whatever is missing: `conductor-assertions`
    markers and task sub-issues (completed `[x]` tasks never respawn as new sub-issues).
 4. **STATUS TRUTH.** `conductor assert run --level spec` (fresh results.json), then for each
-   phase issue `conductor ledger reconcile <n> --from-gate` — statuses derive from the gate,
-   not from anyone's memory. A phase whose assertions are all green but whose issue is still
-   open → `conductor ledger phase-done <n> --plan <plan.md>` (closes sub-issues, ticks the
-   plan's boxes). Parked/optional phases → `status:draft` (blocks claiming until the owner
-   promotes to `status:ready`).
+   **gated** phase issue `conductor ledger reconcile <n> --from-gate` — statuses derive from
+   the gate, not from anyone's memory. A gated phase whose assertions are all green but whose
+   issue is still open → `conductor ledger phase-done <n> --plan <plan.md>` (closes sub-issues,
+   ticks the plan's boxes).
+   **Gateless phases (`gate: none`) are EXCLUDED from `--from-gate`** — they carry no
+   `conductor-assertions` marker by design, and the CLI fail-closes on markerless issues
+   (correctly: that error is for accidents, not for deliberate gatelessness). Park them as
+   `status:draft` (blocks claiming until the owner promotes to `status:ready`); completing one
+   later uses `phase-done --no-gate-check`, which prepare never runs itself — it is an explicit
+   owner decision, flagged in the step-6 report.
 5. **RUN TOPOLOGY.** Perform `/conductor:start` step 5b's setup now so start sails through:
    run branch `conductor/run-<spec-slug>` (reconcile-first), `<project>/.conductor/run_branch`,
    the run worktree, the default-branch protection probe (honest free-plan messaging). Only
