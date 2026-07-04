@@ -153,3 +153,44 @@ def test_ensure_label_reraises_other_errors(monkeypatch):
         assert False, "expected RuntimeError"
     except RuntimeError:
         pass
+
+
+# --- codex PR-31 round 1: the align-feeding lists must paginate, not cap ---
+
+
+def test_list_milestone_issues_paginates(monkeypatch):
+    from ledger import gh as gh_mod
+
+    pages = {
+        1: [{"number": i, "title": f"t{i}", "body": ""} for i in range(100)],
+        2: [{"number": 100, "title": "t100", "body": ""}],
+    }
+    calls = []
+
+    def fake_api(method, path, body=None, jq=None):
+        calls.append(path)
+        page = int(path.split("page=")[-1].split("&")[0])
+        return pages.get(page, [])
+
+    monkeypatch.setattr(gh_mod, "_gh_api", fake_api)
+    out = gh_mod.list_milestone_issues("o/r", 1)
+    assert len(out) == 101
+    assert len(calls) == 2  # stopped after the short page
+
+
+def test_list_milestones_paginates(monkeypatch):
+    from ledger import gh as gh_mod
+
+    pages = {
+        1: [{"number": i, "title": f"m{i}"} for i in range(100)],
+        2: [],
+    }
+    monkeypatch.setattr(
+        gh_mod,
+        "_gh_api",
+        lambda m, p, body=None, jq=None: pages.get(
+            int(p.split("page=")[-1].split("&")[0]), []
+        ),
+    )
+    out = gh_mod.list_milestones("o/r")
+    assert len(out) == 100

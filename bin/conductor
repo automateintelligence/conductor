@@ -32,5 +32,5 @@ case "${1:-}" in
   plan-lint) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.plan_lint "$@" ;;
   merge-gate) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.merge_gate "$@" ;;
   gate) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.freeze "$@" ;;
-  *) printf "usage:\n  conductor assert run [--level spec|phase|task]\n  conductor ledger {generate <plan.json>|convert <plan.md>|reconcile <issue#> [--from-gate|flags]|phase-done <issue#> [--plan plan.md] [--no-gate-check]}\n  conductor plan-lint <plan.md> [--spec <spec.md>]\n  conductor goal {set <text...>|get}\n  conductor preflight\n  conductor merge-gate <pr>\n  conductor gate {freeze|verify}\n" >&2; exit 64 ;;
+  *) printf "usage:\n  conductor assert run [--level spec|phase|task]\n  conductor ledger {generate <plan.json>|convert <plan.md>|align <plan.md> [--apply]|reconcile <issue#> [--from-gate|flags]|phase-done <issue#> [--plan plan.md] [--no-gate-check]}\n  conductor plan-lint <plan.md> [--spec <spec.md>]\n  conductor goal {set <text...>|get}\n  conductor preflight\n  conductor merge-gate <pr>\n  conductor gate {freeze|verify}\n" >&2; exit 64 ;;
 esac

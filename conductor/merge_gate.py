@@ -25,6 +25,26 @@ _VERIFY_TIMEOUT = float(os.environ.get("CONDUCTOR_MERGE_VERIFY_TIMEOUT", "900"))
 _CLOSES_RE = re.compile(r"(?i)\b(close[sd]?|fix(es|ed)?|resolve[sd]?)\s+#\d+")
 
 
+def _expected_base() -> str | None:
+    """The run's integration branch, when one is configured: env CONDUCTOR_RUN_BRANCH,
+    else the `<project>/.conductor/run_branch` file `/conductor:start` writes (re-derived
+    from `git ls-remote 'conductor/run-*'` on a fresh clone). None = no run topology
+    configured → the base leg is disabled (0.4.x direct-merge runs keep working)."""
+    env = (os.environ.get("CONDUCTOR_RUN_BRANCH") or "").strip()
+    if env:
+        return env
+    from conductor.paths import project_root  # deferred: not needed on the env path
+
+    path = os.path.join(project_root(), ".conductor", "run_branch")
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            value = f.read().strip()
+        if not value:  # present-but-empty = corrupt topology, not "no topology"
+            raise ValueError(f"run-branch-empty: {path}")  # codex PR-31 #3
+        return value
+    return None
+
+
 def _ts(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00"))  # gh emits trailing Z
 
@@ -169,7 +189,9 @@ def check(
 ) -> dict[str, Any]:
     try:
         d: Any = gh_json(
-            repo, pr, "mergeStateStatus,mergeable,reviewDecision,isDraft,body,comments"
+            repo,
+            pr,
+            "mergeStateStatus,mergeable,reviewDecision,isDraft,body,comments,baseRefName",
         )
     except Exception as exc:  # gh failure/timeout -> fail closed, never crash the fire
         return {"ok": False, "blockers": [f"gh-error: {exc}"]}
@@ -185,6 +207,10 @@ def check(
     if d.get("reviewDecision") == "CHANGES_REQUESTED":
         blockers.append("changes-requested")
     try:  # process legs: models drop clerical steps unless the gate enforces them
+        # 0.5.0 run topology: phase PRs must target the run branch, never main directly.
+        expected_base = _expected_base()
+        if expected_base and (d.get("baseRefName") or "") != expected_base:
+            blockers.append(f"base-mismatch:{d.get('baseRefName')}")
         if not _CLOSES_RE.search(d.get("body") or ""):
             blockers.append("closes-missing")  # recipe: one PR per phase, Closes #issue
         # env read per call (tests monkeypatch); empty marker would match everything
