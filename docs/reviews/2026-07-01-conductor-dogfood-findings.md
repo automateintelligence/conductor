@@ -548,3 +548,32 @@ The live run completed before retrofit was needed — this ships in 0.5.0 for fu
 `/conductor:prepare` (recipe verified by hand); run-branch topology + final-PR review packet
 (`conductor run-packet` CLI); merge-gate expected-base leg; `status:draft` added to claim's
 blocking set; loud direct-to-main opt-in; branch-protection verify in start preflight.
+
+---
+
+## 0.5.0 SHIPPED (2026-07-04) — run-branch topology + /conductor:prepare
+
+Four PRs, all codex ×2–5 with final-state-clean before merge (14 review rounds total; every
+round through #33's five caught something real):
+- **#31 ledger core:** `status:draft` blocks claiming (semantic reversal, documented);
+  merge-gate **expected-base leg** (`CONDUCTOR_RUN_BRANCH` / `.conductor/run_branch`,
+  present-but-empty fails closed); `ledger align` — brownfield matcher by assertion-id set,
+  dry-run default, fail-closed on every ambiguity class, fully paginated gh lists.
+- **#32 run-packet:** the final owner PR's review packet (merged phase PRs, capped diff stat,
+  gate evidence, deferrals, verification), fail-open-for-display with per-section
+  "unavailable" lines, title sanitization at the library boundary.
+- **#33 topology skills:** start 5b (exact-name `conductor/run-<slug>`, worktree as
+  CONDUCTOR_HOME, stale-run cleanup, protection probe, loud
+  `CONDUCTOR_ALLOW_DIRECT_MAIN_MERGE=1` opt-out); autodev 1b keep-current (merge-never-rebase,
+  Bubo #1) + 3a final owner PR conductor never merges; Tier-B marker unified on `<main-root>`
+  via dirname(git-common-dir) — identical from worktree and checkout, where `--show-toplevel`
+  diverges.
+- **#34 /conductor:prepare:** the hand-verified brownfield recipe as the one owner-supervised
+  skill; gateless phases excluded from `--from-gate` and parked draft; `--no-gate-check` is an
+  owner decision prepare surfaces but never makes.
+
+Suite 220 → 252. **Not yet live-validated** (unlike 0.4.x, which the dogfood forged): the
+recommended shakedown is running parked Phase 7 (#145) under the new topology — small,
+gateless, build-only — before a marketplace user exercises it first (Bubo #2-style note logged).
+Owner steps unchanged: Team-plan upgrade + worker machine account remain the server-side
+hardening path when customers arrive.
