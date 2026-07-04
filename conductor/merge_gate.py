@@ -39,7 +39,9 @@ def _expected_base() -> str | None:
     if os.path.isfile(path):
         with open(path, encoding="utf-8") as f:
             value = f.read().strip()
-        return value or None
+        if not value:  # present-but-empty = corrupt topology, not "no topology"
+            raise ValueError(f"run-branch-empty: {path}")  # codex PR-31 #3
+        return value
     return None
 
 

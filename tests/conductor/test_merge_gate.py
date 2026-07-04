@@ -516,3 +516,16 @@ def test_base_leg_fetches_baseRefName():
         merge_ref_verify=lambda r, p, lv: True,
     )
     assert "baseRefName" in set(calls[0].split(","))
+
+
+def test_empty_run_branch_file_fails_closed(monkeypatch, tmp_path):
+    # codex PR-31 #3: a PRESENT-but-empty run_branch file is corrupt topology, not
+    # "no topology" — it must surface as process-check-error, never silently disable.
+    (tmp_path / ".conductor").mkdir()
+    (tmp_path / ".conductor" / "run_branch").write_text("   \n")
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+    out = _base_call(base="main")
+    assert any(
+        b.startswith("process-check-error") and "run-branch-empty" in b
+        for b in out["blockers"]
+    )

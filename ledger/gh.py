@@ -32,11 +32,23 @@ def create_milestone(repo: str, title: str) -> int:
     return _gh_api("POST", f"repos/{repo}/milestones", body={"title": title})["number"]
 
 
+def _paged(path_base: str) -> list[Any]:
+    """Exhaustively paginate a list endpoint (codex PR-31 #2: align consumes these —
+    a silent 100-item cap could miss an existing phase issue and let convert duplicate it)."""
+    results: list[Any] = []
+    page = 1
+    while True:
+        data = _gh_api("GET", f"{path_base}&per_page=100&page={page}") or []
+        results.extend(data)
+        if len(data) < 100:
+            return results
+        page += 1
+
+
 def list_milestones(repo: str) -> list[dict[str, Any]]:
-    """All milestones as [{number, title}] (state=all; first 100 — a repo's plan
-    milestones are a small set, same cap rationale as find_milestone)."""
-    data = _gh_api("GET", f"repos/{repo}/milestones?state=all&per_page=100")
-    return [{"number": m["number"], "title": m["title"]} for m in data or []]
+    """All milestones as [{number, title}] (state=all, fully paginated)."""
+    data = _paged(f"repos/{repo}/milestones?state=all")
+    return [{"number": m["number"], "title": m["title"]} for m in data]
 
 
 def update_milestone_title(repo: str, number: int, title: str) -> None:
@@ -48,14 +60,12 @@ def update_issue_title(repo: str, n: int, title: str) -> None:
 
 
 def list_milestone_issues(repo: str, milestone: int) -> list[dict[str, Any]]:
-    """All ISSUES (state=all, PRs excluded) in a milestone as [{number, title, body}].
-    First 100 — documented cap; a plan's phase issues are far below it."""
-    data = _gh_api(
-        "GET", f"repos/{repo}/issues?state=all&per_page=100&milestone={int(milestone)}"
-    )
+    """All ISSUES (state=all, PRs excluded) in a milestone as [{number, title, body}],
+    fully paginated."""
+    data = _paged(f"repos/{repo}/issues?state=all&milestone={int(milestone)}")
     return [
         {"number": it["number"], "title": it["title"], "body": it.get("body") or ""}
-        for it in data or []
+        for it in data
         if not it.get("pull_request")
     ]
 

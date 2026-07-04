@@ -169,3 +169,26 @@ def test_milestone_ambiguous_when_matches_span_two():
     report = align.align("o/r", _plan(), g, apply=True)
     assert report["milestone"] == "ambiguous"
     g.update_milestone_title.assert_not_called()
+
+
+# --- codex PR-31 round 1 ---
+
+
+def test_duplicate_plan_assertion_sets_fail_closed():
+    # Two plan phases with the SAME token set: one issue would match both and get
+    # double-renamed (last writer wins, silently). Both phases must land in
+    # ambiguous_phases and nothing renames.
+    dup_plan = sync.parse_plan_md(
+        "# P\n\n## Phase 1 — A (A3, A4)\n\n- [ ] t\n\n## Phase 2 — B (A4, A3)\n\n- [ ] t\n"
+    )
+    g = _gh(
+        [{"number": 1, "title": "W"}],
+        {1: [{"number": 10, "title": "x (A3/A4)", "body": ""}]},
+    )
+    report = align.align("o/r", dup_plan, g, apply=True)
+    assert set(report["ambiguous_phases"]) == {
+        "Phase 1 — A (A3, A4)",
+        "Phase 2 — B (A4, A3)",
+    }
+    assert report["matches"] == []
+    g.update_issue_title.assert_not_called()

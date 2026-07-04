@@ -34,6 +34,13 @@ def align(
         p["title"]: frozenset(t.upper() for t in p["assertions"])
         for p in plan["phases"]
     }
+    # Two plan phases with the SAME token set would both match one issue and silently
+    # double-rename it (codex PR-31 #1) — pre-filter them into ambiguity instead.
+    set_counts: dict[frozenset[str], int] = {}
+    for token_set in phase_sets.values():
+        if token_set:
+            set_counts[token_set] = set_counts.get(token_set, 0) + 1
+    duplicated_sets = {s for s, n in set_counts.items() if n > 1}
 
     issues: list[dict[str, Any]] = []
     for milestone in gh.list_milestones(repo):
@@ -52,6 +59,9 @@ def align(
             unmatched_phases.append(phase_title)
             continue
         found = [i for i in issues if _tokens(i) == wanted]
+        if wanted in duplicated_sets:  # plan-side ambiguity: never guess an assignment
+            ambiguous_phases[phase_title] = sorted(i["number"] for i in found)
+            continue
         if not found:
             unmatched_phases.append(phase_title)
             continue
