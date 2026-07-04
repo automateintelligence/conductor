@@ -118,9 +118,12 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      double-fire; (b) **exits once `conductor assert run --level spec` is green** — a finished
      run gets no-op fires; (c) holds `flock -n <project>/.conductor/resume.lock` for the whole
      fire — no overlapping headless sessions;
-   - add crontab entries carrying the LITERAL marker `# conductor-autodev <project-root>`, where
-     `<project-root>` is the canonical `git rev-parse --show-toplevel` path (removal greps for
-     this exact fixed string): one `@reboot` line and one periodic heartbeat (e.g. `*/20 * * * *`).
+   - add crontab entries carrying the LITERAL marker `# conductor-autodev <main-root>`, where
+     `<main-root>` is `$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")` —
+     the MAIN checkout root, which is IDENTICAL whether computed from the owner checkout or the
+     run worktree (`--show-toplevel` is NOT: it returns the worktree path there, so install and
+     removal would disagree). Removal greps for this exact fixed string. One `@reboot` line and
+     one periodic heartbeat (e.g. `*/20 * * * *`).
    The marker tag is load-bearing: the autodev STOP branch removes exactly those lines when the
    gate goes green (see `experiments/E5-end-to-end/recovery.md`).
    **Tell the user one limit:** recurring in-session crons **auto-expire after 7 days** —

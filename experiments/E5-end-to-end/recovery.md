@@ -24,7 +24,7 @@ with `grep -F -v --`). The script fires `claude -p "/conductor:autodev"` — aut
 start: a headless one-shot session must do a phase, not register an in-session cron that
 dies with it — and MUST, in order:
 
-1. **exit if any claude process already runs with cwd inside the project** (the live
+1. **exit if any claude process already runs with cwd inside the run worktree OR the project** (the live
    terminal's in-session cron is then the sole driver — never double-drive);
 2. **exit once `conductor assert run --level spec` is green** (finished runs get no-op fires);
 3. hold `flock -n <project>/.conductor/resume.lock` for the whole fire (no overlap).
