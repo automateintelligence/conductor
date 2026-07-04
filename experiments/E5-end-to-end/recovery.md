@@ -15,7 +15,9 @@ Both restart paths re-invoke the **reconcile-first `/conductor`** over the durab
 
 ## Tier B — same machine, just restart the driver (reboot / crash / closed terminal)
 
-OS watchdog → a resume **script** (not a bare `claude -p` line) plus two crontab entries
+OS watchdog → a resume **script** (not a bare `claude -p` line) that `cd`s into the RUN
+WORKTREE and exports `CONDUCTOR_HOME=<worktree>` (0.5.0 topology: the worker never resumes in
+the owner's checkout), plus two crontab entries
 carrying the LITERAL marker `# conductor-autodev <project-root>` (`<project-root>` =
 `git rev-parse --show-toplevel`, the exact fixed string autodev's STOP branch later removes
 with `grep -F -v --`). The script fires `claude -p "/conductor:autodev"` — autodev, not

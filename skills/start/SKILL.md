@@ -56,10 +56,11 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      into the ledger's machine-readable gate mapping). A deliberately gateless phase (rare —
      `phase-done` cannot gate-verify it) must declare `gate: none` in its section;
    - per phase: a `**Spec:** §N <section name>; …` pointer line and `- [ ]` task lines;
-   - the per-phase recipe verbatim: subagent implement → `/code-review` per task (against the
-     phase's Spec sections, not just the diff) → commit per task → one PR per phase
-     (`Closes #<phase-issue>`) → codex review ×2 posted as "Codex review" PR comments →
-     `conductor merge-gate` → merge → `/document-release` → `conductor ledger phase-done`.
+   - the per-phase recipe verbatim: subagent implement on a phase branch forked FROM THE RUN
+     BRANCH → `/code-review` per task (against the phase's Spec sections, not just the diff) →
+     commit per task → one PR per phase with **base = the run branch** (`Closes #<phase-issue>`)
+     → codex review ×2 posted as "Codex review" PR comments → `conductor merge-gate` → merge
+     into the run branch → `/document-release` → `conductor ledger phase-done`.
    SKIP if a plan/milestone exists.
 4b. **LINT + CODEX-REVIEW THE PLAN** — it dictates every phase and must not stay the
    least-reviewed setup artifact. `conductor plan-lint <plan.md> --spec <spec.md>` must exit 0:
@@ -73,9 +74,14 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 5b. **RUN TOPOLOGY (0.5.0 default): phase PRs merge into a run branch, NEVER directly to the
    default branch.** The default branch belongs to the owner; the run gets an integration branch
    reviewed ONCE, by the owner, at the end.
-   - **Reconcile-first:** `git ls-remote origin 'refs/heads/conductor/run-*'` — a run branch for
-     this spec already exists → reuse it; else create `conductor/run-<spec-slug>` off the default
-     branch and push it.
+   - **Reconcile-first, EXACT name:** compute `conductor/run-<spec-slug>` from THIS spec's
+     filename, then `git ls-remote origin refs/heads/conductor/run-<spec-slug>` — exists → reuse;
+     absent → create off the default branch and push. NEVER bind by wildcard scan
+     (`conductor/run-*`): with two active runs a scan grabs the wrong spec's branch.
+   - **Stale-run cleanup first:** if `.conductor/run_branch` names a branch that no longer exists
+     on the remote (the owner merged the final PR and deleted it — the run is over), remove the
+     old run worktree (`git worktree remove <path>`) and the `run_branch` file BEFORE setting up
+     this run; otherwise "SKIP if it exists" would resume against a finished run's leftovers.
    - **Write `<project>/.conductor/run_branch`** (single line, the branch name). This is what the
      merge-gate's expected-base leg reads — a phase PR targeting anything else blocks with
      `base-mismatch`. On a fresh clone the file is missing: re-derive it from the ls-remote above

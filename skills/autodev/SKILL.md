@@ -20,15 +20,18 @@ driver-cron cadence, and anything under `~/.claude/scripts/` are guardrails arou
 must NEVER modify them mid-run, however good the improvement looks (live finding 2026-07-02: a
 worker rewrote its own watchdog unreviewed). Found a real defect in them? Escalate it —
 `escalate.file_followup(debt)` with the proposed patch — and keep working. The only exception is
-step 3's terminal crontab removal.
+step 3b's terminal crontab removal.
 
 > **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
 > below); installed plugins are not on `PATH`.
 
 1. **RE-LOAD GOAL (fresh context).** Done only when `conductor assert run --level spec` exits 0.
    Re-read goal + paths from the durable handoff/ledger; trust git/issues, not memory. Read the
-   run branch from `<project>/.conductor/run_branch`; file missing but the remote has a
-   `conductor/run-*` branch for this spec → rewrite the file (fresh-clone reconcile).
+   run branch from `<project>/.conductor/run_branch`; file missing → recompute the EXACT name
+   `conductor/run-<spec-slug>` from the goal's spec path and check `git ls-remote origin
+   refs/heads/<that name>` — present → rewrite the file (fresh-clone reconcile); absent while
+   the goal says topology is configured → HALT and escalate (never fall back to a wildcard
+   scan or to direct default-branch merges).
 1b. **KEEP THE RUN BRANCH CURRENT (every fire, before anything else builds).** On the run
    branch: `git fetch origin <default> && git merge origin/<default>` (MERGE, never rebase — a
    shared integration branch's history is load-bearing; phase branches may rebase, the run
@@ -63,7 +66,9 @@ step 3's terminal crontab removal.
    `crontab -l | grep -F -v -- "# conductor-autodev $(git rev-parse --show-toplevel)" | crontab -`
    (`grep -F` = fixed string, so regex metacharacters in the path can't over- or under-match; the
    same canonical path was used at install) — else the heartbeat keeps firing no-ops forever.
-   This removal is the ONLY sanctioned mutation of run infrastructure. Final handoff, STOP.
+   This removal is the ONLY sanctioned mutation of run infrastructure. The final handoff names the leftover run worktree and `.conductor/run_branch` — they stay
+   until the owner resolves the final PR; the next `/conductor:start` reconcile removes them
+   once the run branch is gone from the remote. Final handoff, STOP.
 4. **PICK the next eligible phase** (unassigned & not blocked/done; climb the ladder):
    - phase available → SPLIT-CHECK (§6.1); else run the recipe.
    - plan done → `/superpowers:writing-plans` next plan → `ledger.generate` (or `ledger.convert`).
