@@ -71,13 +71,16 @@ def test_claim_lost_race_backs_off_with_no_residue():  # Codex #2
     gh.set_body.assert_not_called()  # NO status/lease residue
 
 
-def test_claim_draft_phase_clears_draft_label():  # Fix 1: all status:* removed, not just status:ready
+def test_claim_sweeps_any_status_label():  # Fix 1: all status:* removed, not just status:ready
+    # 0.5.0 SEMANTIC REVERSAL: this test formerly used status:draft as its eligible
+    # example — draft now BLOCKS claiming (parked / owner-opt-in, live finding), so the
+    # label-sweep behavior is pinned with an arbitrary non-blocking status instead.
     gh = MagicMock()
     gh.issue_state.side_effect = [
-        {"assignees": [], "labels": ["status:draft"], "state": "open"},  # eligible
+        {"assignees": [], "labels": ["status:stale"], "state": "open"},  # eligible
         {
             "assignees": ["me"],
-            "labels": ["status:draft"],
+            "labels": ["status:stale"],
             "state": "open",
         },  # sole owner confirm
     ]
@@ -85,7 +88,7 @@ def test_claim_draft_phase_clears_draft_label():  # Fix 1: all status:* removed,
     assert claim.claim("o/r", 2, "me", now_ts=10, ttl=900, gh=gh) is True
     call_kwargs = gh.set_labels.call_args
     assert call_kwargs.kwargs["add"] == ["status:in-progress"]
-    assert "status:draft" in call_kwargs.kwargs["remove"]
+    assert "status:stale" in call_kwargs.kwargs["remove"]
 
 
 def test_attempts_marker_round_trip():  # durable retry count (review)
@@ -113,3 +116,11 @@ def test_release_unassigns_and_clears_lease():
     claim.release("o/r", 1, "alice", gh)
     gh.unassign.assert_called_once_with("o/r", 1, "alice")
     assert "conductor-lease" not in body["v"]
+
+
+def test_draft_is_not_eligible():
+    # 0.5.0 (live finding): status:draft means "not scheduled" — a parked/optional phase
+    # must never be claimable; previously only dep-blocked kept it out.
+    assert not claim.eligible(
+        {"assignees": [], "labels": ["status:draft"], "state": "open"}
+    )

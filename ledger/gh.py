@@ -32,6 +32,34 @@ def create_milestone(repo: str, title: str) -> int:
     return _gh_api("POST", f"repos/{repo}/milestones", body={"title": title})["number"]
 
 
+def list_milestones(repo: str) -> list[dict[str, Any]]:
+    """All milestones as [{number, title}] (state=all; first 100 — a repo's plan
+    milestones are a small set, same cap rationale as find_milestone)."""
+    data = _gh_api("GET", f"repos/{repo}/milestones?state=all&per_page=100")
+    return [{"number": m["number"], "title": m["title"]} for m in data or []]
+
+
+def update_milestone_title(repo: str, number: int, title: str) -> None:
+    _gh_api("PATCH", f"repos/{repo}/milestones/{int(number)}", body={"title": title})
+
+
+def update_issue_title(repo: str, n: int, title: str) -> None:
+    _gh_api("PATCH", f"repos/{repo}/issues/{n}", body={"title": title})
+
+
+def list_milestone_issues(repo: str, milestone: int) -> list[dict[str, Any]]:
+    """All ISSUES (state=all, PRs excluded) in a milestone as [{number, title, body}].
+    First 100 — documented cap; a plan's phase issues are far below it."""
+    data = _gh_api(
+        "GET", f"repos/{repo}/issues?state=all&per_page=100&milestone={int(milestone)}"
+    )
+    return [
+        {"number": it["number"], "title": it["title"], "body": it.get("body") or ""}
+        for it in data or []
+        if not it.get("pull_request")
+    ]
+
+
 def find_milestone(repo: str, title: str) -> int | None:
     """Number of an existing milestone with this exact title, or None. Makes generate()
     idempotent: a re-run reuses the milestone instead of creating a duplicate. (First 100;

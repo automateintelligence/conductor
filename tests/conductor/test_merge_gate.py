@@ -210,6 +210,8 @@ def _default_process_env(monkeypatch):
     monkeypatch.delenv("CONDUCTOR_MIN_REVIEWS", raising=False)
     monkeypatch.delenv("CONDUCTOR_REVIEW_MARKER", raising=False)
     monkeypatch.delenv("CONDUCTOR_REVIEW_AUTHOR", raising=False)
+    monkeypatch.delenv("CONDUCTOR_RUN_BRANCH", raising=False)
+    monkeypatch.setenv("CONDUCTOR_HOME", "/nonexistent-conductor-test-home")
 
 
 def test_check_fetches_process_fields_in_one_call():
@@ -437,3 +439,80 @@ def test_both_commit_dates_null_fail_closed():
     out = _call(_clean(), newest_commit={"committedDate": None, "pushedDate": None})
     assert out["ok"] is False
     assert any(b.startswith("process-check-error") for b in out["blockers"])
+
+
+# ---- 0.5.0 expected-base leg: phase PRs must target the run branch ----
+
+
+def _base_call(base="conductor/run-eval", **env_kw):
+    d = _clean()
+    d["baseRefName"] = base
+    return merge_gate.check(
+        "o/r",
+        1,
+        local_verify="true",
+        gh_json=lambda r, p, f: d,
+        threads=lambda r, p: [],
+        newest_commit=lambda r, p: {
+            "committedDate": "2026-01-01T00:00:00Z",
+            "pushedDate": None,
+        },
+        merge_ref_verify=lambda r, p, lv: True,
+    )
+
+
+def test_base_leg_disabled_when_no_run_branch_configured():
+    out = _base_call(base="main")
+    assert not any(b.startswith("base-mismatch") for b in out["blockers"])
+
+
+def test_base_mismatch_blocks_when_env_set(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_RUN_BRANCH", "conductor/run-eval")
+    out = _base_call(base="main")
+    assert "base-mismatch:main" in out["blockers"]
+
+
+def test_base_match_passes_when_env_set(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_RUN_BRANCH", "conductor/run-eval")
+    out = _base_call(base="conductor/run-eval")
+    assert not any(b.startswith("base-mismatch") for b in out["blockers"])
+
+
+def test_base_leg_reads_run_branch_file_fallback(monkeypatch, tmp_path):
+    # start writes <project>/.conductor/run_branch; the gate honors it when env is unset
+    (tmp_path / ".conductor").mkdir()
+    (tmp_path / ".conductor" / "run_branch").write_text("conductor/run-eval\n")
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+    out = _base_call(base="main")
+    assert "base-mismatch:main" in out["blockers"]
+
+
+def test_env_overrides_run_branch_file(monkeypatch, tmp_path):
+    (tmp_path / ".conductor").mkdir()
+    (tmp_path / ".conductor" / "run_branch").write_text("conductor/run-other\n")
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+    monkeypatch.setenv("CONDUCTOR_RUN_BRANCH", "conductor/run-eval")
+    out = _base_call(base="conductor/run-eval")
+    assert not any(b.startswith("base-mismatch") for b in out["blockers"])
+
+
+def test_base_leg_fetches_baseRefName():
+    calls = []
+
+    def gj(r, p, f):
+        calls.append(f)
+        return _clean()
+
+    merge_gate.check(
+        "o/r",
+        1,
+        local_verify="true",
+        gh_json=gj,
+        threads=lambda r, p: [],
+        newest_commit=lambda r, p: {
+            "committedDate": "2026-01-01T00:00:00Z",
+            "pushedDate": None,
+        },
+        merge_ref_verify=lambda r, p, lv: True,
+    )
+    assert "baseRefName" in set(calls[0].split(","))
