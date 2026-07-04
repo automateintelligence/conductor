@@ -29,6 +29,13 @@ _GATE_TAIL = 30
 _GATE_CMD = "conductor assert run --level spec"
 
 
+def _one_line(text: Any) -> str:
+    """Collapse whitespace/control characters so a hostile or accidental
+    multi-line PR/issue title cannot break out of its bullet line (e.g. inject
+    a '# heading' into the packet). Inline markdown passes through — display."""
+    return " ".join(str(text).split())
+
+
 def _reason(exc_or_proc: Any) -> str:
     """One-line failure reason from an exception or a failed CompletedProcess."""
     if isinstance(exc_or_proc, BaseException):
@@ -62,7 +69,8 @@ def _phase_pr_lines(run_branch: str, runner: Any) -> list[str]:
     if not prs:
         return ["None recorded"]
     return [
-        f"- #{p['number']} {p['title']} (merged {(p.get('mergedAt') or '')[:10]})"
+        f"- #{p['number']} {_one_line(p['title'])}"
+        f" (merged {(p.get('mergedAt') or '')[:10]})"
         f" — {p['url']}"
         for p in prs
     ]
@@ -99,11 +107,12 @@ def build_packet(
 ) -> str:
     """Render the full review packet as markdown. Pure over its subprocess seam:
     the CLI runs the gate and collects deferrals; this function only formats."""
-    gate_body = (
-        gate_output.rstrip("\n")
-        if gate_output
-        else f"Gate output not supplied — run `{_GATE_CMD}` and attach."
-    )
+    if gate_output is None:  # never ran/collected vs ran-but-silent are distinct
+        gate_body = f"Gate output not supplied — run `{_GATE_CMD}` and attach."
+    elif not gate_output.strip():  # gate ran but printed nothing: say so
+        gate_body = "(no gate output)"
+    else:
+        gate_body = gate_output.rstrip("\n")
     exit_line = f"exit status: {gate_exit if gate_exit is not None else 'not run'}"
     deferral_lines = [f"- {d}" for d in (deferrals or [])] or ["None"]
     parts = [
@@ -162,7 +171,7 @@ def _collect_deferrals(milestone: str | None, *, runner: Any) -> list[str]:
             for issue in json.loads(out.stdout):
                 if issue["number"] not in seen:
                     seen.add(issue["number"])
-                    lines.append(f"#{issue['number']} {issue['title']}")
+                    lines.append(f"#{issue['number']} {_one_line(issue['title'])}")
         except Exception as exc:  # fail open: render the reason, keep going
             lines.append(f"unavailable: {_reason(exc)}")
     return lines

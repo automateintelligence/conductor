@@ -122,6 +122,23 @@ def test_gate_output_none_renders_attach_instruction():
     )
 
 
+def test_gate_output_empty_string_renders_no_output_marker():
+    # Codex round-1 LOW: gate exiting 0 with empty output must NOT read as
+    # "not supplied" next to a Verification section saying exit status 0.
+    out = run_packet.build_packet(
+        RUN, runner=_fake_runner(), gate_output="", gate_exit=0
+    )
+    assert "(no gate output)" in out
+    assert "Gate output not supplied" not in out
+    assert "exit status: 0" in out
+
+
+def test_gate_output_whitespace_only_renders_no_output_marker():
+    out = run_packet.build_packet(RUN, runner=_fake_runner(), gate_output="\n\n")
+    assert "(no gate output)" in out
+    assert "Gate output not supplied" not in out
+
+
 def test_deferrals_none_and_empty_render_none():
     for deferrals in (None, []):
         out = run_packet.build_packet(RUN, runner=_fake_runner(), deferrals=deferrals)
@@ -136,6 +153,28 @@ def test_deferrals_present_render_as_bullets():
     )
     assert "- #5 flaky test" in out
     assert "- #9 docs debt" in out
+
+
+# ---- hostile/markdown titles stay inside their bullet line (Codex round-1) ----
+
+
+def test_pr_title_with_markdown_and_newlines_stays_on_one_bullet_line():
+    evil = "] breakout **bold** \n# heading\r\ninjected"
+    prs = [_pr(21, evil, "2026-07-03T00:00:00Z", "https://github.com/o/r/pull/21")]
+    out = run_packet.build_packet(RUN, runner=_fake_runner(prs=prs))
+    bullets = [ln for ln in out.splitlines() if ln.startswith("- #21 ")]
+    assert bullets == [
+        "- #21 ] breakout **bold** # heading injected (merged 2026-07-03)"
+        " — https://github.com/o/r/pull/21"
+    ]
+    # the embedded newline must not mint a new markdown heading line
+    assert not any(ln.startswith("# heading") for ln in out.splitlines())
+
+
+def test_deferral_issue_title_control_chars_collapsed_to_one_line():
+    issues = [{"number": 5, "title": "bad\r\n# breakout\t**bold** title"}]
+    got = run_packet._collect_deferrals(None, runner=_fake_runner(issues=issues))
+    assert got == ["#5 bad # breakout **bold** title"]
 
 
 # ---- subprocess failure -> explicit unavailable line, packet still renders ----
