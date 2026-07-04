@@ -26,7 +26,16 @@ step 3's terminal crontab removal.
 > below); installed plugins are not on `PATH`.
 
 1. **RE-LOAD GOAL (fresh context).** Done only when `conductor assert run --level spec` exits 0.
-   Re-read goal + paths from the durable handoff/ledger; trust git/issues, not memory.
+   Re-read goal + paths from the durable handoff/ledger; trust git/issues, not memory. Read the
+   run branch from `<project>/.conductor/run_branch`; file missing but the remote has a
+   `conductor/run-*` branch for this spec → rewrite the file (fresh-clone reconcile).
+1b. **KEEP THE RUN BRANCH CURRENT (every fire, before anything else builds).** On the run
+   branch: `git fetch origin <default> && git merge origin/<default>` (MERGE, never rebase — a
+   shared integration branch's history is load-bearing; phase branches may rebase, the run
+   branch never does). Conflicts get resolved NOW, by you, in this small increment — or
+   escalated — never left to accumulate for the owner's final review. If the merge brought
+   changes, re-run `conductor assert run --level spec` before proceeding: gate-green must mean
+   green against CURRENT reality, not day-1 reality.
 2. **RECONCILE (precedence git/tests > PR > label).** `conductor ledger reconcile <n> --from-gate`
    — test state is **derived** from `assertions/run/results.json` via the issue's
    `conductor-assertions` marker; never hand-report `--tests-red` (worker-reported truth decays).
@@ -38,7 +47,17 @@ step 3's terminal crontab removal.
    (escalates — a genuinely failing phase stops instead of looping every fire); `stale-lease-reclaim`
    resets it. PROGRESS SELF-CHECK.
 3. **SPEC-DONE GATE.** `conductor assert run --level spec` (fail-closed; unrunnable = NOT done).
-   **All green AND no plans left** → mark done, use **`CronList`** to find the driver cron, then
+   **All green AND no plans left** → the run is complete:
+   **3a. OPEN THE FINAL OWNER PR (run topology only — skip when no run branch is configured).**
+   Verify the run branch is not behind the default branch (step 1b just merged; re-check).
+   Generate the review packet — `conductor run-packet <run-branch> > /tmp/packet.md` — then
+   `gh pr create --base <default> --head <run-branch> --body-file /tmp/packet.md`, title
+   "Conductor run complete: <spec-slug> — owner review", and assign the owner. **NEVER merge
+   this PR — not with merge-gate ok, not with --admin, not at all.** It is the owner's single
+   review point for the whole run; conductor's authority ends at opening it. (Where the repo
+   has branch protection, the server enforces this; where it doesn't — free-plan private
+   repos — this rule and the base leg are the enforcement.)
+   **3b.** Mark done, use **`CronList`** to find the driver cron, then
    **CronDelete** it, AND remove any Tier-B OS fallback — the crontab lines carrying the
    literal marker plus their resume script:
    `crontab -l | grep -F -v -- "# conductor-autodev $(git rev-parse --show-toplevel)" | crontab -`
@@ -62,10 +81,14 @@ step 3's terminal crontab removal.
       per-assertion state; skip tasks already done. A dirty tree left by a dead worker: commit it
       to the phase branch as `wip: reclaimed partial work` — never discard it, never build over
       it blind.
-   1. `/superpowers:subagent-driven-development` to implement the phase's tasks.
+   1. `/superpowers:subagent-driven-development` to implement the phase's tasks — on a phase
+      branch forked from the RUN branch (never from the default branch when a run branch is
+      configured).
    2. `/code-review` (self-review) per task — review against the phase's Spec sections, not just
       the diff. 3. **commit after every task.**
-   4. **one PR per phase** (`Closes #<phase-issue>` — merge-gate blocks without it).
+   4. **one PR per phase, base = the RUN branch** (`Closes #<phase-issue>` for traceability —
+      merge-gate blocks without it, and its base leg blocks any other base with
+      `base-mismatch`; run-branch merges don't auto-close issues — `phase-done` does that).
    5. `/codex $superpowers:requesting-code-review Provide read-only, pre-merge review of PR#<n>
       against the phase's Spec sections` — post the result as a PR comment starting
       **"Codex review"**.
@@ -73,9 +96,10 @@ step 3's terminal crontab removal.
       FINAL state** (posted as another "Codex review" comment); repeat until the last review
       postdates the last commit and raises nothing blocking. merge-gate enforces both: ≥2 marker
       comments (`CONDUCTOR_MIN_REVIEWS`) and review-of-final-state.
-   7. **merge ONLY if `conductor merge-gate <pr>` returns ok** (§6.2). Then `gh pr merge --merge`
-      (no squash), or `--merge --auto` if a merge queue is configured. Gate blocks → resolve
-      (e.g. rebase on `merge-state:BEHIND`) or escalate; **never force-merge**.
+   7. **merge INTO THE RUN BRANCH, ONLY if `conductor merge-gate <pr>` returns ok** (§6.2).
+      Then `gh pr merge --merge` (no squash), or `--merge --auto` if a merge queue is
+      configured. Gate blocks → resolve (e.g. rebase the PHASE branch on `merge-state:BEHIND`)
+      or escalate; **never force-merge**. Then `git checkout <run-branch> && git pull`.
    8. `/document-release`.
    Capture `baseline_revision..final_revision` (equal = did nothing). Respect the per-fire budget
    (checkpoint+handoff if exceeded).

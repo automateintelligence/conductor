@@ -27,6 +27,12 @@ def test_autodev_skill_contract():
         "# conductor-autodev",
         "grep -f -v",
         "owner-owned",
+        "keep the run branch current",
+        "merge, never rebase",
+        "run-packet",
+        "not with --admin, not at all",
+        "base = the run branch",
+        "run_branch",
     ]:
         assert needle in body, needle
 
@@ -53,6 +59,12 @@ def test_start_skill_contract():
         "verify durability",
         "flock",
         "# conductor-autodev",
+        "run topology",
+        "conductor/run-",
+        "run_branch",
+        "worktree",
+        "conductor_allow_direct_main_merge=1",
+        "base-mismatch",
     ]:
         assert needle in body, needle
 
