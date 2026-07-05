@@ -87,6 +87,7 @@ THE LOOP  (the cron drives it; you walk away)                                   
     6. EXECUTE ........... in a FRESH SUBAGENT, via the recipe, one PR per phase:
           subagent-driven-development → /code-review each task → commit each task
             → open PR, base = the RUN branch (Closes #phase) → /codex review ×2
+              (Codex hit its 5h/weekly limit? → /code-review fallback + tell the owner, never stall)
             → receiving-code-review
             → conductor merge-gate <pr>  ──ok?──►  gh pr merge --merge   (never force;
               lands on conductor/run-<slug>, never the default branch)

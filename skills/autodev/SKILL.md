@@ -95,12 +95,40 @@ step 3b's terminal crontab removal.
       merge-gate blocks without it, and its base leg blocks any other base with
       `base-mismatch`; run-branch merges don't auto-close issues — `phase-done` does that).
    5. `/codex $superpowers:requesting-code-review Provide read-only, pre-merge review of PR#<n>
-      against the phase's Spec sections` — post the result as a PR comment starting
-      **"Codex review"**.
+      against the phase's Spec sections` — post the result as a PR comment starting with the gate's
+      review marker (**`CONDUCTOR_REVIEW_MARKER`, default "Codex review"**).
+      **Codex usage-limit fallback — continue uninterrupted, never stall.** If `/codex` reports its
+      5-hour OR weekly usage limit is exhausted (its stderr/stdout names a usage/rate/quota limit,
+      or `/status` shows the window spent — distinct from a transient timeout, which you retry ONCE
+      first), do NOT halt and do NOT park the phase until the window resets: a spent WEEKLY quota
+      would freeze the whole run for days, breaking the "walk away and it keeps making progress"
+      contract. Fall back to `/code-review` for the independent pre-merge review. The gate is
+      OWNER-CONFIGURED and you must NOT change its env, so honor two constraints as they are set:
+        - **Marker (`CONDUCTOR_REVIEW_MARKER`, default `Codex review`):** post `/code-review`'s
+          findings as the PR comment with that exact marker at the START of the body, labeled
+          honestly — e.g. **"Codex review — UNAVAILABLE (usage limit); Claude /code-review
+          fallback"** — so `conductor merge-gate` still counts it AND the degradation stays visible.
+          Read the configured marker; do not assume it is the default.
+        - **Provenance (`CONDUCTOR_REVIEW_AUTHOR`):** if it is pinned to a non-worker account, a
+          worker-posted fallback can NEVER be counted — do NOT post unusable reviews in a loop;
+          escalate needs-human instead (that config is incompatible with conductor's local-posting
+          Codex flow anyway). Check this BEFORE falling back.
+      Keep posting eligible final-state fallback reviews until `conductor merge-gate <pr>` passes —
+      it needs `CONDUCTOR_MIN_REVIEWS` marker comments with the newest postdating the newest commit;
+      do NOT assume that count is 2. Then **let the owner know** (the §9 *patch-later* branch, not a
+      halt):
+      `escalate.file_followup(repo, "debt", "Codex-fallback review: phase #<n>", body, link_issue=<phase#>)`
+      with `body` naming the phase, the PR, which limit tripped (5-hour vs weekly), and that this
+      phase traded Codex's independence for Claude's — flag it for optional independent re-review.
+      The open `debt` issue rides the handoff's `Open:` line to the final owner PR, where YOU decide;
+      it SURFACES the degradation, it does not silently repair it. Keep working.
    6. `/superpowers:receiving-code-review` — apply fixes, commit, then **codex re-reviews the
-      FINAL state** (posted as another "Codex review" comment); repeat until the last review
-      postdates the last commit and raises nothing blocking. merge-gate enforces both: ≥2 marker
-      comments (`CONDUCTOR_MIN_REVIEWS`) and review-of-final-state.
+      FINAL state** (posted as another "Codex review" comment; if Codex is still usage-limited the
+      step-5 fallback applies again — `/code-review` the final state under the same configured
+      marker); repeat until the last review postdates the last commit and raises nothing blocking.
+      merge-gate enforces both: `CONDUCTOR_MIN_REVIEWS` marker comments and review-of-final-state —
+      the fallback satisfies them by running the SAME independent review rounds on the final diff,
+      on `/code-review` instead of Codex.
    7. **merge INTO THE RUN BRANCH, ONLY if `conductor merge-gate <pr>` returns ok** (§6.2).
       Then `gh pr merge --merge` (no squash), or `--merge --auto` if a merge queue is
       configured. Gate blocks → resolve (e.g. rebase the PHASE branch on `merge-state:BEHIND`)
