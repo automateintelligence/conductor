@@ -13,6 +13,12 @@ safety gate, and stops the moment the done-gate goes green. An external cron `/l
 is the clock, so the agent never decides on its own that the work is "done enough" —
 only green executable assertions stop the run.
 
+Conductor works best on specs authored with
+[SuperPowers](https://github.com/obra/superpowers) or
+[GitHub's spec-kit](https://github.com/github/spec-kit): both produce specs with explicit
+requirements and phased tasks, which is exactly the shape the loop plans and executes
+against.
+
 ---
 
 ## Why
@@ -145,9 +151,11 @@ marketplace install pulls in spec-craft automatically.
 
 ### Prerequisites
 
-- **Claude Code** with the conducted skill stack available — superpowers, spec-kit,
-  `/codex`, `/code-review`, `/document-release`. `conductor preflight` checks for every
-  one and fail-closes if any is missing.
+- **Claude Code** with the conducted skill stack available —
+  [superpowers](https://github.com/obra/superpowers),
+  [spec-kit](https://github.com/github/spec-kit), `/codex`, `/code-review`,
+  `/document-release`. `conductor preflight` checks for every one and fail-closes if any
+  is missing.
 - **`gh` CLI**, authenticated (`gh auth status`). GitHub issues are the ledger.
 - **Python 3.12** on PATH (the runner, ledger, and gate modules are Python).
 
@@ -204,9 +212,17 @@ After install the skills are available as `/conductor:start`, `/conductor:autode
 
 ## Use
 
-### 1. Make "done" explicit (with spec-craft)
+### 1. Write the spec, then make "done" explicit
 
-Start from a spec file. Give it a checkable definition of done:
+Conductor works best when the spec itself comes out of a structured workflow:
+[SuperPowers](https://github.com/obra/superpowers) (`/superpowers:brainstorming` →
+`/superpowers:writing-plans`) or [GitHub's spec-kit](https://github.com/github/spec-kit)
+(`/speckit:specify` → `/speckit:plan` → `/speckit:tasks`). Both produce specs with
+explicit requirements and phased tasks — the exact shape the loop plans and executes
+against. A loose prose spec still runs, but the worker has to infer structure those
+workflows make explicit.
+
+Then give the spec a checkable definition of done (with spec-craft):
 
 ```
 /spec-craft:expectations path/to/spec.md            # adds an ## Expectations section
