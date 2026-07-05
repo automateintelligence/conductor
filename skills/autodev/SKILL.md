@@ -95,8 +95,8 @@ step 3b's terminal crontab removal.
       merge-gate blocks without it, and its base leg blocks any other base with
       `base-mismatch`; run-branch merges don't auto-close issues — `phase-done` does that).
    5. `/codex $superpowers:requesting-code-review Provide read-only, pre-merge review of PR#<n>
-      against the phase's Spec sections` — post the result as a PR comment starting
-      **"Codex review"**.
+      against the phase's Spec sections` — post the result as a PR comment starting with the gate's
+      review marker (**`CONDUCTOR_REVIEW_MARKER`, default "Codex review"**).
       **Codex usage-limit fallback — continue uninterrupted, never stall.** If `/codex` reports its
       5-hour OR weekly usage limit is exhausted (its stderr/stdout names a usage/rate/quota limit,
       or `/status` shows the window spent — distinct from a transient timeout, which you retry ONCE
