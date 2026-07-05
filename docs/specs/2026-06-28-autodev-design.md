@@ -179,9 +179,18 @@ Cron checking in does no harm — if a unit is progressing it observes and re-fi
 > completed."*
 
 ### Resuming after usage/rate limits
-Codex and Claude Code can hit **5-hour token-usage windows** (info in the error or
-`/status`). The loop must detect this and **auto-schedule a resume** when the window
-resets — a first-class requirement, not an edge case. (Phase 2.)
+Two different limits, two different responses — keep them distinct:
+
+- **The worker itself (Claude Code) hits its 5-hour window** → nothing can proceed without
+  the agent, so **auto-schedule a resume** when the window resets (info in the error or
+  `/status`). A first-class requirement, not an edge case. (Phase 2.)
+- **Codex (the independent reviewer) hits its 5-hour OR weekly limit** → do NOT stall the run;
+  a spent weekly quota would freeze it for days. **Continue uninterrupted with `/code-review`**
+  as the pre-merge review — posted under the merge-gate's review marker so the gate still
+  counts it (two independent rounds of the final diff, on Claude instead of Codex) — and **let
+  the owner know** via a `debt` follow-up issue naming the phase/PR and which limit tripped, so
+  independent Codex re-review lands at the final owner PR. A §9 *patch-later* degradation, not a
+  halt. (Recipe §6, steps 5–6.)
 
 ### Thin-session architecture
 > Keep the main session **thin**; do heavy work in a **fresh subagent** each iteration:
@@ -305,6 +314,9 @@ own rules if needed:
 4. **one PR per phase**
 5. **Codex review of the PR** —
    `/codex $superpowers:requesting-code-review Provide read-only, pre-merge review of PR#<pr-num>`
+   — **if Codex is usage-limited (5-hour or weekly), fall back to `/code-review` under the same
+   review marker and file a `debt` follow-up so the owner re-reviews; never stall (§4 "Resuming
+   after usage/rate limits").**
 6. Process it in Claude Code with —
    `/receiving-code-review Consider the Codex review, apply fixes, commit and leave comment in PR when completed.`
 7. **merge the PR with `--merge`** (no squash) — only through the safety gate (§6.2)

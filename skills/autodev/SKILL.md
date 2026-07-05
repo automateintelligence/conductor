@@ -97,10 +97,29 @@ step 3b's terminal crontab removal.
    5. `/codex $superpowers:requesting-code-review Provide read-only, pre-merge review of PR#<n>
       against the phase's Spec sections` — post the result as a PR comment starting
       **"Codex review"**.
+      **Codex usage-limit fallback — continue uninterrupted, never stall.** If `/codex` reports its
+      5-hour OR weekly usage limit is exhausted (a non-zero exit whose stderr names a usage/rate
+      limit — distinct from a transient timeout, which you retry ONCE first), do NOT halt and do NOT
+      park the phase until the window resets: a spent WEEKLY quota would freeze the whole run for
+      days, breaking the "walk away and it keeps making progress" contract. Instead run
+      `/code-review` as the independent pre-merge review and post ITS findings as the PR comment,
+      body starting **"Codex review — UNAVAILABLE (usage limit); Claude /code-review fallback"** —
+      the leading marker keeps `conductor merge-gate` counting it (the marker/author/min-review env
+      is OWNER-OWNED; you must not change it), and the honest label keeps the degradation visible.
+      Then **let the owner know** (this is the §9 *patch-later* branch, not a halt):
+      `escalate.file_followup(repo, "debt", "Codex-fallback review: phase #<n>", body, link_issue=<phase#>)`
+      where `body` names the phase, the PR, which limit tripped (5-hour vs weekly), and
+      "independent Codex re-review needed at the final owner PR." Keep working.
+      (Edge: if the owner has pinned `CONDUCTOR_REVIEW_AUTHOR` to a non-worker account, a
+      worker-posted fallback can't satisfy provenance — escalate build-now/needs-human rather than
+      loop; that config is incompatible with conductor's local-posting flow anyway.)
    6. `/superpowers:receiving-code-review` — apply fixes, commit, then **codex re-reviews the
-      FINAL state** (posted as another "Codex review" comment); repeat until the last review
-      postdates the last commit and raises nothing blocking. merge-gate enforces both: ≥2 marker
-      comments (`CONDUCTOR_MIN_REVIEWS`) and review-of-final-state.
+      FINAL state** (posted as another "Codex review" comment; if Codex is still usage-limited the
+      step-5 fallback applies again — `/code-review` the final state under the same honest marker);
+      repeat until the last review postdates the last commit and raises nothing blocking. merge-gate
+      enforces both: ≥2 marker comments (`CONDUCTOR_MIN_REVIEWS`) and review-of-final-state — the
+      fallback satisfies both because it still runs two independent review rounds of the final diff,
+      just on `/code-review` instead of Codex.
    7. **merge INTO THE RUN BRANCH, ONLY if `conductor merge-gate <pr>` returns ok** (§6.2).
       Then `gh pr merge --merge` (no squash), or `--merge --auto` if a merge queue is
       configured. Gate blocks → resolve (e.g. rebase the PHASE branch on `merge-state:BEHIND`)

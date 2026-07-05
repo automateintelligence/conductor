@@ -20,6 +20,8 @@ def test_autodev_skill_contract():
         "--from-gate",
         "phase-done",
         "codex review",
+        "usage-limit fallback",
+        "escalate.file_followup",
         "reconcile-within-phase",
         "wip: reclaimed partial work",
         "never sufficient",
