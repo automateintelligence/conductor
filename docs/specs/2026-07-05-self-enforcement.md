@@ -81,7 +81,7 @@ you. No conductor-specific permission command. Normalize the two bypass spelling
 canonical form. No doc may reference the removed `grant` command.
 
 - [ ] README §3 has an "Unattended authority" section describing the session-inherit model (warning + acknowledgment for bypass; dry-run for less-privileged)
-- [ ] no doc references `grant --scoped` / `grant --full`
+- [ ] no user-facing doc (README, recovery.md, skills/) references `grant --scoped` / `grant --full` (this spec + its assertions, which document the removal, are exempt)
 - [ ] a single canonical bypass spelling is used across README and recovery.md
 
 ## Phase 3 — Posture visibility in the generated driver (review A-4, A-6)

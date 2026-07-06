@@ -40,7 +40,7 @@ trap this spec exists to kill. Every assertion below is written to fail if the i
 ## A1 — authority-preview-covers-the-recipe's-op-set
 - **Claim:** `conductor authority preview` emits every privileged operation the autodev recipe performs, sourced from one declared set — not a literal list baked into the preview.
 - **Setup:** a representative plan; a single declared `RECIPE_PRIVILEGED_OPS` set that the preview is generated from.
-- **Observation:** (a) the preview output covers every entry in `RECIPE_PRIVILEGED_OPS` (drop one from the source → the preview drops it → the test that compares against the source still holds, so the preview cannot silently omit a declared op); AND (b) a companion needle asserts `RECIPE_PRIVILEGED_OPS` contains each privileged verb the autodev recipe actually names — `git push`, `gh pr`, `conductor merge`, docker (via `CONDUCTOR_MERGE_VERIFY`), subagent spawn, file writes — so adding a recipe op without adding it to the set fails. A hard-coded preview that ignores the set MUST fail (a).
+- **Observation:** (a) the preview output covers every entry in `RECIPE_PRIVILEGED_OPS` (drop one from the source → the preview drops it → the test that compares against the source still holds, so the preview cannot silently omit a declared op); AND (b) a companion needle asserts `RECIPE_PRIVILEGED_OPS` contains each privileged verb the autodev recipe actually names — create branch, `git push`, `gh pr`, `conductor merge`, docker (via `CONDUCTOR_MERGE_VERIFY`), subagent spawn, file writes — so adding a recipe op without adding it to the set fails. A hard-coded preview that ignores the set MUST fail (a).
 - **Kind:** property (the reported set equals the declared privileged surface, and the declared surface tracks the recipe).
 
 ## A2 — unknown-mode-resolves-least-privileged
@@ -123,6 +123,6 @@ trap this spec exists to kill. Every assertion below is written to fail if the i
 
 ## A15 — readme-authority-present-and-no-grant-leftover
 - **Claim:** the README documents the session-inherit authority model and no doc references the removed `grant` command.
-- **Setup:** `README.md` and the `docs/` tree after Phase 2.
-- **Observation:** README contains an "Unattended authority" section describing session-inherited posture (warning+acknowledgment / dry-run); the tree MUST NOT contain `grant --scoped` or `grant --full`.
+- **Setup:** the USER-FACING docs after Phase 2 — `README.md`, `experiments/E5-end-to-end/recovery.md`, `skills/*/SKILL.md`. (This spec and its `.assertions.md` legitimately name the removed command to document its removal and are EXCLUDED from the check — else it self-references.)
+- **Observation:** README contains an "Unattended authority" section describing session-inherited posture (warning+acknowledgment / dry-run); none of the user-facing docs above contains `grant --scoped` or `grant --full`.
 - **Kind:** example.
