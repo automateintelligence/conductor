@@ -254,3 +254,25 @@ def test_goal_without_spec_path_fails_closed_never_globs(tmp_path):
     (dot / "goal.md").write_text("Do the thing\n")  # no docs/specs path
     with pytest.raises(Exception, match="assertions-source"):
         freeze.record(manifest, baseline, str(tmp_path))
+
+
+def test_verify_fails_closed_when_goal_now_names_a_different_spec(tmp_path):
+    # codex round 3: a stale baseline for spec A must not stay green after the
+    # goal moves to spec B (whose assertions would be unfrozen)
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=True, specs=("spec-a", "spec-b"))
+    freeze.record(manifest, baseline, str(tmp_path))
+    (tmp_path / ".conductor" / "goal.md").write_text(
+        "Implement docs/specs/spec-b.md until done\n"
+    )
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("assertions-source" in t for t in res["tampered"])
+
+
+def test_verify_with_sources_and_unchanged_goal_stays_clean(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True and res["tampered"] == []

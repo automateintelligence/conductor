@@ -237,6 +237,20 @@ def verify(
             tampered.append(f"assertions-source-removed ({rel})")
         elif _sha256_file(path) != dig:
             tampered.append(f"assertions-source-changed ({rel})")
+    if base_sources:
+        # bind the baseline to the CURRENT goal selection: a stale spec-A baseline
+        # must not stay green after goal.md moves to spec B (whose assertions
+        # would be unfrozen). Old baselines without "sources" skip this entirely.
+        try:
+            current_sources = set(_assertions_source(repo_root))
+        except Exception as exc:  # ambiguous/missing now -> fail closed
+            current_sources = None
+            tampered.append(f"assertions-source-unresolvable: {exc}")
+        if current_sources is not None and current_sources != set(base_sources):
+            tampered.append(
+                "assertions-source-set-changed "
+                f"(recorded {sorted(base_sources)}, current {sorted(current_sources)})"
+            )
     return {"ok": not tampered, "tampered": tampered, "frozen": True}
 
 
