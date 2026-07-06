@@ -338,6 +338,8 @@ The `conductor` command (`bin/conductor`) fronts the Python modules.
 | `conductor preflight` | Static availability gate: every conducted skill resolves, else exit 1. |
 | `conductor authority preview <plan.md>` | Dry-run of unattended authority: prints, per phase of the plan, every privileged operation an unattended fire performs (branch, push, gh pr, merge, docker via `CONDUCTOR_MERGE_VERIFY`, subagents, file writes), each marked owner-required unless the session pre-authorizes it. |
 | `conductor merge-gate <pr>` | Autonomous merge safety gate (see below); exit 0 ok, 1 blocked. |
+| `conductor run-branch name <spec.md>` | Emit the canonical run branch for a spec — one line, `conductor/run-<slug>`, deterministic (same spec → byte-identical name; different spec stems → different names (same stem shares by design)). The single source `start` and `autodev` call instead of deriving the slug in prose. |
+| `conductor default-branch` | Emit the repo's default branch — one non-empty line, resolved via `gh repo view` then the `origin/HEAD` symbolic ref; any failure falls open to `main` (exit 0, never empty). |
 | `conductor gate {lint\|freeze\|verify}` | Lint the gate for mechanically-detectable weak-test patterns (unpinned commands, no negative clause, trivially-true asserts; fail-closed), then freeze it at setup / verify it is unchanged. Freeze also digests the `<spec>.assertions.md` source. The runner enforces this — see [Why the worker can't cheat the gate](#why-the-worker-cant-cheat-the-gate). |
 
 `conductor merge-gate` blocks a merge on any of: draft PR, merge state not `CLEAN`,

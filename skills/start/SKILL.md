@@ -79,9 +79,10 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 5b. **RUN TOPOLOGY (0.5.0 default): phase PRs merge into a run branch, NEVER directly to the
    default branch.** The default branch belongs to the owner; the run gets an integration branch
    reviewed ONCE, by the owner, at the end.
-   - **Reconcile-first, EXACT name:** compute `conductor/run-<spec-slug>` from THIS spec's
-     filename, then `git ls-remote origin refs/heads/conductor/run-<spec-slug>` — exists → reuse;
-     absent → create off the default branch and push. NEVER bind by wildcard scan
+   - **Reconcile-first, EXACT name:** `RB="$(conductor run-branch name <spec>)"` — the
+     single-sourced resolver; never derive the slug in prose — then
+     `git ls-remote "$(conductor remote)" "refs/heads/$RB"` — exists → reuse; absent → create off
+     `$(conductor default-branch)` and push. NEVER bind by wildcard scan
      (`conductor/run-*`): with two active runs a scan grabs the wrong spec's branch.
    - **Stale-run cleanup first:** if `.conductor/run_branch` names a branch that no longer exists
      on the remote (the owner merged the final PR and deleted it — the run is over), remove the
@@ -91,7 +92,8 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      merge-gate's expected-base leg reads — a phase PR targeting anything else blocks with
      `base-mismatch`. On a fresh clone the file is missing: re-derive it from the ls-remote above
      (this step IS the re-derivation — reconcile-first).
-   - **Work in a WORKTREE:** `git worktree add ../<repo>-run-<spec-slug> conductor/run-<spec-slug>`
+   - **Work in a WORKTREE:** `git worktree add ../<repo>-run-<spec-slug> "$RB"` (the resolver's
+     name from above — never re-derive the slug for the branch argument)
      — the worker and the Tier-B watchdog operate in the worktree (`CONDUCTOR_HOME` = worktree
      root), so the owner's own checkout is never branch-switched or dirtied by fires. SKIP if it
      exists.
