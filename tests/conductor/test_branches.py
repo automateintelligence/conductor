@@ -19,7 +19,7 @@ CONDUCTOR = str(ROOT / "bin" / "conductor")
 NAME_RE = re.compile(r"conductor/run-[a-z0-9][a-z0-9._-]*\Z")
 
 
-# --- run_branch_name: deterministic, canonical, collision-free ---
+# --- run_branch_name: deterministic, canonical, distinct per spec stem ---
 
 
 def test_same_path_is_byte_identical():
