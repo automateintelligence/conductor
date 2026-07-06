@@ -134,12 +134,40 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      -p` session can't answer permission prompts, so if the run worktree doesn't pre-authorize
      those, an unattended Tier-B fire **stalls on the first prompt** — a permission-flavored variant
      of the same silent-stall class. The driver fires with `${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}`
-     (default EMPTY = supervised only) — it never bakes a bypass. **Surface this to the owner and
-     let them choose** how the unattended run gets authority in `resume-env.sh`: (a) least-privilege
-     — point claude at a scoped `settings.json` allowlist (git/gh/pytest/ruff/pyright/conductor/docker);
-     or (b) full autonomy — `CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"`, and say
-     plainly that this is a **standing** posture (a full-access agent firing every heartbeat, not a
-     one-shot). Default (neither) = the run only progresses while a supervised session is open.
+     (default EMPTY = supervised only) — it never bakes a bypass. Conductor **inherits Claude
+     Code's permission model** — it invents NO permission flags or tokens of its own; the
+     unattended run never gets MORE authority than the session `/conductor:start` was launched in.
+     - **Detect the launching session's posture.** If the harness exposes the session's permission
+       mode, read it; if it cannot be read, ask the owner ONCE ("what posture should the
+       unattended run use?"). Either way resolve the answer with the
+       `conductor.authority.resolve_posture` semantics: only the exact mode `bypassPermissions` is
+       bypass; an unknown, unreadable, or ambiguous mode/answer is treated as **supervised**
+       (fail-closed — never assume bypass).
+     - **(A) Launched in bypass / skip-permissions mode:** print a BIG explicit warning — a
+       standing full-access agent will fire every heartbeat with the owner's credentials (gh
+       merge, push, docker, broad edits, subagents), surviving reboots, until the gate is green —
+       and require the owner to **acknowledge to continue**. The acknowledgment IS the gate; there
+       is no extra conductor flag. Never start unattended full-auto silently.
+     - **(B) Launched in a less-privileged mode (default ask-per-tool, plan, or a scoped
+       allowlist):** run `conductor authority preview <plan.md>` (the dry-run) and show the owner
+       the concrete per-phase privileged-operation list, annotated with **which ops the current
+       mode would prompt for**: if the session's allowlist can be introspected, mark each op
+       prompt/no-prompt; if promptability CANNOT be introspected, mark EVERY listed op as
+       owner-required/manual (fail-closed toward "will stall") — never show the list unannotated.
+       Then offer the real three-way choice: (i) **elevate to bypass** — the OWNER
+       relaunches/reconfigures the session itself in bypass mode (with the (A) warning); conductor
+       NEVER writes bypass flags into `resume-env.sh` from a less-privileged session; (ii) **widen
+       the session's own scoped allowlist** to cover the listed operations — least-privilege:
+       point claude at a scoped `settings.json` allowlist (git/gh/pytest/ruff/pyright/conductor/docker);
+       or (iii) **proceed** knowing exactly which steps will require them. Default (none chosen) =
+       the run only progresses while a supervised session is open.
+     - **Any `resume-env.sh` written on this path goes through
+       `conductor.authority.write_resume_env`** (0600 always, shell-safe quoting — the driver
+       refuses a group- or world-writable env file) — never a hand `printf > file`. For full
+       autonomy the owner-ACKNOWLEDGED value is
+       `CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"`, and say
+       plainly that this is a **standing** posture (a full-access agent firing every heartbeat, not a
+       one-shot).
    - **RECONCILE is verify-first: SKIP the driver only if it still verifies.** `conductor
      resume-script verify --project <main-root> --worktree <run-worktree> --script <path>` exits 0
      when current; non-zero means the template changed or the installed driver is an older
