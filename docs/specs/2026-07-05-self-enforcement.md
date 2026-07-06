@@ -54,11 +54,16 @@ Safety carried over regardless of posture: any `resume-env.sh` the tool writes (
 inherited flags / `CONDUCTOR_MERGE_VERIFY`) is `chmod 0600`, and the generated driver refuses to
 source a group- or world-writable `resume-env.sh` (fail loud, like `driver-unresolved`).
 
+**Fail-closed posture resolution (a frozen invariant, A2).** Whatever the detection mechanism, the
+function that maps a (possibly-unknown) detected mode to the run's posture MUST resolve an
+**unknown, unreadable, or ambiguous** mode to the **least-privileged** posture (supervised) — NEVER
+to bypass. A misread can only ever under-grant, never over-grant.
+
 > **Open implementation question (flagged, not resolved here):** can `/conductor:start` read its own
 > Claude Code session permission mode programmatically? If the harness exposes it, detection is
 > automatic; if not, `start` asks the owner once ("what posture should the unattended run use?") —
 > still on the documented path, still Claude-native. The dry-run (B) works either way, since it
-> enumerates from the recipe, not from the detected mode.
+> enumerates from the recipe, not from the detected mode. Either way the fail-closed rule above holds.
 
 - [ ] `authority preview` enumerates the recipe's privileged operations for a plan (branch, push, gh, merge, docker, subagents, writes)
 - [ ] a bypass-mode launching session triggers the warning + acknowledgment before the run proceeds unattended
@@ -68,11 +73,15 @@ source a group- or world-writable `resume-env.sh` (fail loud, like `driver-unres
 ## Phase 2 — README "Unattended authority" + canonical bypass spelling (review A-2, A-9)
 
 **Spec:** Put the permission decision on the documented path. Add an "Unattended authority"
-subsection to README §3 stating the decision plainly, showing both options (scoped default, full
-bypass) and pointing at `grant`. Normalize the two bypass spellings across docs to one canonical
-form.
+subsection to README §3 stating the model plainly: an unattended run **inherits the permission mode
+of the session you launch `/conductor:start` in** — launch in bypass mode and you are warned and
+asked to acknowledge; launch in a less-privileged mode and `start` shows you which steps would need
+you. No conductor-specific permission command. Normalize the two bypass spellings
+(`--dangerously-skip-permissions` vs `--permission-mode bypassPermissions`) across docs to one
+canonical form. No doc may reference the removed `grant` command.
 
-- [ ] README contains an "Unattended authority" section naming both `grant --scoped` and `grant --full`
+- [ ] README §3 has an "Unattended authority" section describing the session-inherit model (warning + acknowledgment for bypass; dry-run for less-privileged)
+- [ ] no doc references `grant --scoped` / `grant --full`
 - [ ] a single canonical bypass spelling is used across README and recovery.md
 
 ## Phase 3 — Posture visibility in the generated driver (review A-4, A-6)
