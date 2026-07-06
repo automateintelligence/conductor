@@ -249,6 +249,9 @@ def _write(project: str, worktree: str, out: str | None, force: bool = False) ->
 
 
 _FLAGS_VAR = "CONDUCTOR_RESUME_CLAUDE_FLAGS"
+# A shell variable-assignment word (`NAME=...`) — used to tell a line of persistent
+# assignments apart from a command with a temporary env prefix.
+_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def _posture_of(args: list[str]) -> str:
@@ -286,18 +289,31 @@ def _posture_decided(env_path: str) -> bool:
     except OSError:
         return False
     # Shell semantics: the FINAL effective assignment wins — an early posture followed by a
-    # reassignment to "" (or an unset) is undecided at runtime and must still nudge.
+    # reassignment to "" (or an unset) is undecided at runtime and must still nudge. Only
+    # PERSISTENT assignment shapes count: `[export] VAR=value` (or a line of nothing but
+    # assignments). A command-prefix temp env (`VAR=x some-command`) does not survive the
+    # source, so it fails toward "undecided" (nudge fires).
     final_value: str | None = None
     for ln in lines:
         try:
             words = shlex.split(ln, comments=True)
         except ValueError:  # unbalanced quotes — malformed, ignore the line
             continue
-        for i, word in enumerate(words):
+        if not words:
+            continue
+        if words[0] == "unset":
+            if _FLAGS_VAR in words[1:]:
+                final_value = None
+            continue
+        if words[0] in ("export", "declare", "typeset"):
+            assigns = words[1:]
+        elif all(_ASSIGN_RE.match(w) for w in words):
+            assigns = words
+        else:  # a command line (possibly temp-env-prefixed) — nothing persists
+            continue
+        for word in assigns:
             if word.startswith(f"{_FLAGS_VAR}="):
                 final_value = word[len(_FLAGS_VAR) + 1 :]
-            elif word == "unset" and _FLAGS_VAR in words[i + 1 :]:
-                final_value = None
     if final_value is None:
         return False
     try:

@@ -229,6 +229,16 @@ def test_write_nudge_fires_on_posture_lookalike_tokens(tmp_path, capsys, flags_l
     assert "unattended" in err
 
 
+def test_write_nudge_fires_on_command_prefix_temp_env(tmp_path, capsys):
+    """An UNQUOTED `FLAGS=--settings /path` is a temporary command env in shell — it does
+    not persist for the driver after sourcing, so the posture is NOT decided and the
+    nudge must still fire."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text("CONDUCTOR_RESUME_CLAUDE_FLAGS=--settings /tmp/settings.json\n")
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" in err
+
+
 def test_render_preserves_the_three_guards():
     s = _render()
     assert "flock -n 9" in s  # (c) one fire at a time
