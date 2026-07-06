@@ -97,7 +97,7 @@ resolution invariant, and the open implementation question about mode detection.
   `env-unsafe` line to `resume-autodev.log`, exits non-zero, never reaches the fire; proceeds
   on 0600 (or no file).
 
-- [ ] **Task 1.1 — `conductor/authority.py`: the declared op set + posture resolver + env writer (TDD).**
+- [x] **Task 1.1 — `conductor/authority.py`: the declared op set + posture resolver + env writer (TDD).**
   Read `assertions/self_enforcement/test_a01_authority_preview.py`, `test_a02_posture_fail_closed.py`,
   `test_a03_resume_env_mode.py` first. Write failing unit tests in
   `tests/conductor/test_authority.py` covering: (a) the set covers all seven categories with
@@ -141,7 +141,7 @@ resolution invariant, and the open implementation question about mode detection.
   Run unit tests → PASS. `ruff check . && ruff format --check . && pyright . && pytest -q`.
   Commit.
 
-- [ ] **Task 1.2 — `conductor authority preview <plan.md>` (TDD).** `authority.py` gains
+- [x] **Task 1.2 — `conductor authority preview <plan.md>` (TDD).** `authority.py` gains
   `preview(plan_text: str) -> str` and `main(argv) -> int` handling `preview <plan.md>`.
   Parse phases with the existing plan dialect parser (`ledger.sync.parse_plan_md` /
   `_phase_heading` — do not write a second parser). For EACH phase, print the phase title and
@@ -163,7 +163,7 @@ resolution invariant, and the open implementation question about mode detection.
   `a1-authority-preview-covers-recipe-ops`, `a2-unknown-mode-resolves-least-privileged`,
   `a3-resume-env-mode-0600`. Quality gate. Commit.
 
-- [ ] **Task 1.3 — driver refuses a writable `resume-env.sh` (TDD).** Read
+- [x] **Task 1.3 — driver refuses a writable `resume-env.sh` (TDD).** Read
   `assertions/self_enforcement/test_a04_driver_refuses_writable_env.py` first — it executes the
   rendered driver for real with stub bins. In `conductor/resume_script.py::render`, immediately
   BEFORE the line that sources `resume-env.sh`, insert a permission guard; bump
@@ -192,7 +192,7 @@ resolution invariant, and the open implementation question about mode detection.
   still pass (no rot patterns, no baked bypass, sourcing still present). Run the manifest
   command for `a4-driver-refuses-writable-env` → PASS. Quality gate. Commit.
 
-- [ ] **Task 1.4 — `skills/start/SKILL.md`: interactive posture flow (review-verified — no frozen
+- [x] **Task 1.4 — `skills/start/SKILL.md`: interactive posture flow (review-verified — no frozen
   assertion; spec §Phase 1 cases (A) and (B)).** Extend step 6's UNATTENDED PERMISSIONS block:
   - **Detect the launching session's posture.** If the harness exposes the session permission
     mode, read it; if it cannot be read, ask the owner ONCE ("what posture should the
