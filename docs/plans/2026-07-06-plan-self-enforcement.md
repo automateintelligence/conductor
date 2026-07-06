@@ -272,7 +272,7 @@ resolution invariant, and the open implementation question about mode detection.
   `_write`: split + regated nudge; `TEMPLATE_VERSION` bump to 4)
 - Test: `tests/conductor/test_resume_script.py` (extend)
 
-- [ ] **Task 3.1 — `posture=` label at fire-start (TDD).** Read
+- [x] **Task 3.1 — `posture=` label at fire-start (TDD).** Read
   `assertions/self_enforcement/test_a05_posture_label.py` first. In `render`, after the env
   file is sourced (Phase 1's guard) and before the fire, DERIVE the label from the configured
   flags — never a constant, and never echo the raw flag value or the settings path:
@@ -295,7 +295,7 @@ resolution invariant, and the open implementation question about mode detection.
   `a5-posture-label-reflects-flags` → PASS; re-run the a4 manifest command (same template) →
   still PASS. Quality gate. Commit.
 
-- [ ] **Task 3.2 — write-nudge split + regate (review-verified — no frozen assertion; spec:
+- [x] **Task 3.2 — write-nudge split + regate (review-verified — no frozen assertion; spec:
   "gated on 'permission posture undecided' rather than 'resume-env.sh absent'").** In
   `_write`, replace the `if not os.path.isfile(env_path):` nudge gate with a posture probe:
   read `resume-env.sh` if present; posture is DECIDED iff its `CONDUCTOR_RESUME_CLAUDE_FLAGS`
