@@ -329,7 +329,7 @@ project's `assertions/manifest.yaml` (project = `CONDUCTOR_HOME`, already export
 `bin/conductor`), exit 0 clean / non-zero with one named finding per line. Fail-closed
 throughout: unparseable command → reject; unparseable (SyntaxError) test file → reject.
 
-- [ ] **Task 4.1 — `conductor/gate_lint.py`: pinned-command rule (TDD).** Read
+- [x] **Task 4.1 — `conductor/gate_lint.py`: pinned-command rule (TDD).** Read
   `assertions/self_enforcement/test_a06_gate_lint_unpinned.py` first. Write failing tests in
   `tests/conductor/test_gate_lint.py` (fixture projects in `tmp_path` with `CONDUCTOR_HOME`
   pointed at them, exactly like the frozen tests). Rule: load the manifest through the
@@ -349,7 +349,7 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
   path appears in output, and that `unpinned` never appears for a clean gate). Implement,
   PASS, quality gate, commit.
 
-- [ ] **Task 4.2 — negative-clause + trivially-true rules over the referenced test files (TDD).**
+- [x] **Task 4.2 — negative-clause + trivially-true rules over the referenced test files (TDD).**
   Read `test_a07_gate_lint_negative_clause.py` and `test_a16_gate_lint_trivial.py` first.
   Resolve each entry's referenced `.py` test files from its command tokens (same token→path
   resolution stance as `freeze._referenced_files`; a referenced file that does not exist →
@@ -371,7 +371,7 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
   `a6-gate-lint-fail-closed-on-unpinned`, `a7-gate-lint-flags-missing-negative`,
   `a16-gate-lint-flags-trivially-true` → PASS. Quality gate. Commit.
 
-- [ ] **Task 4.3 — freeze/verify covers `<spec>.assertions.md` (TDD).** Read
+- [x] **Task 4.3 — freeze/verify covers `<spec>.assertions.md` (TDD).** Read
   `test_a09_freeze_covers_assertions_source.py` first. In `freeze.py`: discover the
   human-authored assertions source — parse `<project>/.conductor/goal.md` for a
   `docs/specs/<name>.md` path and take its `.assertions.md` sibling (the preferred, precise
@@ -389,7 +389,7 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
   baseline stays clean. Run the manifest command for `a9-freeze-covers-assertions-source` →
   PASS. Quality gate. Commit.
 
-- [ ] **Task 4.4 — the `gate freeze` contract needle + `gate lint` in the start skill.** Read
+- [x] **Task 4.4 — the `gate freeze` contract needle + `gate lint` in the start skill.** Read
   `test_a08_freeze_needle.py` first: it requires an ACTIVE needle line inside
   `test_start_skill_contract` matching `^\s*["'](conductor )?gate freeze["'],?\s*$`. In
   `tests/conductor/test_skill_outputs.py::test_start_skill_contract`, add two needles to the
