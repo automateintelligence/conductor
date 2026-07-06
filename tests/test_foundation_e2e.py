@@ -28,6 +28,10 @@ def test_gate_red_then_green(tmp_path):
         **os.environ,
         "CONDUCTOR_MANIFEST": str(tmp_path / "manifest.yaml"),
         "PYTHONPATH": str(tmp_path),
+        # hermetic: run state in tmp; nonexistent baseline = freeze guard off, so the
+        # repo's live assertions/.frozen can't tamper-fail this fabricated manifest
+        "CONDUCTOR_HOME": str(tmp_path),
+        "CONDUCTOR_FREEZE_BASELINE": str(tmp_path / "no-baseline"),
     }
     run = [
         sys.executable,

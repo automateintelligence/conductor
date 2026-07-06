@@ -31,7 +31,7 @@ import sys
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and
 # `/conductor:start` reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 2
+TEMPLATE_VERSION = 3
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
@@ -94,8 +94,20 @@ if [ ! -x "$CLAUDE_BIN" ] || [ ! -x "${{CONDUCTOR:-}}" ]; then
 fi
 
 # Owner/machine env (merge-verify command, plugin dirs, docker host, extra claude flags). Kept
-# OUT of this generated file so regeneration never clobbers it.
-[ -f "$PROJECT/.conductor/resume-env.sh" ] && . "$PROJECT/.conductor/resume-env.sh"
+# OUT of this generated file so regeneration never clobbers it. SAFETY: the file can carry the
+# bypass flag and a shell-executed CONDUCTOR_MERGE_VERIFY, so a group- or world-writable copy is
+# a privilege-escalation vector — refuse it LOUD (env-unsafe, exit 5) before sourcing, like
+# driver-unresolved. Only a 0600 (or absent) file proceeds to the fire.
+ENV_FILE="$PROJECT/.conductor/resume-env.sh"
+if [ -f "$ENV_FILE" ]; then
+    ENV_MODE="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null)"
+    # FAIL-CLOSED: an unreadable mode (both stat forms failed) refuses like a writable one.
+    if [ -z "$ENV_MODE" ] || [ $(( 8#$ENV_MODE & 8#022 )) -ne 0 ]; then
+        printf '%s env-unsafe mode=%s %s\\n' "$(ts)" "$ENV_MODE" "$ENV_FILE" >> "$LOG"
+        exit 5
+    fi
+    . "$ENV_FILE"
+fi
 
 # Run topology: the worker resumes in the worktree. Do NOT export CONDUCTOR_RUN_BRANCH — the CLI
 # reads .conductor/run_branch (single source of truth); a stale literal here would override it.
@@ -133,7 +145,11 @@ done
 # is EMPTY (supervised only): a full-access agent firing every heartbeat is a standing security
 # posture, so the owner opts in explicitly, never the generator.
 printf '%s fire-start\\n' "$(ts)" >> "$LOG"
-"$CLAUDE_BIN" -p "/conductor:autodev" ${{CONDUCTOR_RESUME_CLAUDE_FLAGS:-}} >> "$LOG" 2>&1
+# Re-parse the owner's flags with THEIR OWN quoting (a bare unquoted expansion would word-split
+# a quoted `--settings '/path with space'` into fragments). eval adds no new trust surface here:
+# resume-env.sh is already sourced — i.e. executed — owner-owned, 0600-guarded content.
+eval "set -- ${{CONDUCTOR_RESUME_CLAUDE_FLAGS:-}}"
+"$CLAUDE_BIN" -p "/conductor:autodev" "$@" >> "$LOG" 2>&1
 rc=$?
 printf '%s fire-end rc=%s\\n' "$(ts)" "$rc" >> "$LOG"
 exit "$rc"
