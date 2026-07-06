@@ -82,6 +82,6 @@ local session is bounded by the ledger lease (§7, E8) for correctness + an expl
 cloud-stop on local resume for cost.
 
 ## Security note
-`--permission-mode bypassPermissions` lets an unattended worker run git/gh/edits without
+`--dangerously-skip-permissions` lets an unattended worker run git/gh/edits without
 prompts. Prefer a scoped tool allowlist in `settings.json` over a blanket bypass; run in a
 trusted/sandboxed checkout.
