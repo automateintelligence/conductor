@@ -67,6 +67,28 @@ def test_render_sources_owner_env_out_of_line():
     )  # named in the header so owners know where it goes
 
 
+def test_render_never_bakes_a_permission_bypass():
+    """Owner decision: --dangerously-skip-permissions / bypassPermissions are NEVER defaulted into
+    the driver. Unattended authority is an explicit opt-in via CONDUCTOR_RESUME_CLAUDE_FLAGS."""
+    s = _render()
+    # the flag must appear ONLY in comment guidance, never on the actual fire command line
+    fire = [ln for ln in s.splitlines() if ln.strip().startswith('"$CLAUDE_BIN" -p')]
+    assert len(fire) == 1
+    assert "--dangerously-skip-permissions" not in fire[0]
+    assert "bypassPermissions" not in fire[0]
+    # the opt-in hook IS present (empty default), so an owner can enable it from resume-env.sh
+    assert "${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}" in fire[0]
+
+
+def test_write_nudges_owner_about_unattended_permissions(tmp_path, capsys):
+    """When no resume-env.sh exists, `write` reminds the owner that unattended fires need
+    pre-authorized permissions — without choosing the bypass for them."""
+    out = tmp_path / "resume-autodev.sh"
+    rs.main(["write", "--project", PROJECT, "--worktree", WORKTREE, "--out", str(out)])
+    err = capsys.readouterr().err
+    assert "unattended" in err and "resume-env.sh" in err
+
+
 def test_render_preserves_the_three_guards():
     s = _render()
     assert "flock -n 9" in s  # (c) one fire at a time

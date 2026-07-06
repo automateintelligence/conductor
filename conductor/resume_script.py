@@ -120,7 +120,18 @@ done
 "$CONDUCTOR" assert run --level spec >/dev/null 2>&1 && exit 0
 
 # One headless phase of progress, in the run worktree. Bracket the fire in the log so a stalled
-# or crash-looping driver is visible (fire-start with no matching fire-end = a hung fire).
+# or crash-looping driver is visible: `fire-start` with no matching `fire-end` = a hung fire
+# (e.g. a headless -p session BLOCKED on a permission prompt it cannot answer); `fire-end rc=`
+# non-zero = the fire errored out. Reconcile's log-tail warns on either.
+#
+# PERMISSION OPT-IN (owner decision — NOT defaulted): an autonomous phase runs gh PR create/merge,
+# push, docker, broad edits, and subagents. A headless `-p` session can't answer permission
+# prompts, so if none of those are pre-authorized it STALLS on the first one — the same
+# silent-stall CLASS this driver otherwise fixes. To let unattended fires complete, set in
+# resume-env.sh EITHER a least-privilege allowlist (point claude at a scoped settings.json) OR, for
+# full autonomy, CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions". The default here
+# is EMPTY (supervised only): a full-access agent firing every heartbeat is a standing security
+# posture, so the owner opts in explicitly, never the generator.
 printf '%s fire-start\\n' "$(ts)" >> "$LOG"
 "$CLAUDE_BIN" -p "/conductor:autodev" ${{CONDUCTOR_RESUME_CLAUDE_FLAGS:-}} >> "$LOG" 2>&1
 rc=$?
@@ -183,6 +194,18 @@ def _write(project: str, worktree: str, out: str | None, force: bool = False) ->
         f.write(text)
     os.chmod(out, os.stat(out).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     print(f"wrote {out} (template v{TEMPLATE_VERSION})", file=sys.stderr)
+    # Awareness nudge (owner decision, never auto-enabled): unless the run worktree pre-authorizes
+    # every tool an autonomous phase needs, an unattended headless fire STALLS on the first
+    # permission prompt. Point them at the opt-in without choosing it for them.
+    env_path = os.path.join(os.path.dirname(out) or ".", "resume-env.sh")
+    if not os.path.isfile(env_path):
+        print(
+            f"note: unattended fires need permissions pre-authorized. If a phase should run "
+            f"without a live session, put a scoped settings.json OR "
+            f'CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions" in {env_path} '
+            f"(full autonomy = standing security posture; your call).",
+            file=sys.stderr,
+        )
     return 0
 
 

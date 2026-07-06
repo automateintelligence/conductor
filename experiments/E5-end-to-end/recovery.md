@@ -46,11 +46,16 @@ dies with it — and MUST, in order:
 */20 * * * * /path/to/conductor-resume.sh          # conductor-autodev <main-root>
 ```
 
-Inside the script, run `claude -p "/conductor:autodev" --permission-mode bypassPermissions
---no-session-persistence </dev/null >> ~/conductor-resume.log 2>&1` — or tighten
-`bypassPermissions` to a scoped settings.json allowlist (git/gh/pytest/ruff/pyright/conductor)
-if unattended full write authority is unwanted. Note `$USER` is unset under cron — use
-`$(id -un)`. The script itself is OWNER-owned run infrastructure: workers never modify it.
+The generated driver fires `claude -p "/conductor:autodev" ${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}` —
+**no permission bypass baked in**. An autonomous phase needs `gh`/push/docker/edits/subagents; a
+headless `-p` can't answer prompts, so unless the run worktree pre-authorizes them the unattended
+fire stalls on the first prompt. Authority for an unattended run is the OWNER's explicit opt-in in
+`<project>/.conductor/resume-env.sh`: a scoped `settings.json` allowlist
+(git/gh/pytest/ruff/pyright/conductor/docker — least privilege) OR
+`CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"` (full autonomy). The generator
+never defaults it: a full-access agent firing every heartbeat is a standing posture, the owner's
+call. Note `$USER` is unset under cron — use `$(id -un)`. The script itself is OWNER-owned run
+infrastructure: workers never modify it.
 
 **Tested:** a fresh `claude -p` re-ran reconcile-first `/conductor` and skipped every
 already-done step — clean resume, no double-work. The OS trigger is a snippet, not

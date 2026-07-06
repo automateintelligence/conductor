@@ -126,10 +126,20 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      <project>/.conductor/resume.lock` for the whole fire.
    - **Machine/run-specific env goes in `<main-root>/.conductor/resume-env.sh`** (gitignored),
      which the driver sources — NEVER inline in the driver, so regeneration can't clobber it. Put
-     the owner-owned `CONDUCTOR_MERGE_VERIFY` there (plus any dev-mode `CONDUCTOR_PLUGIN_DIRS`,
-     `DOCKER_HOST`, or `CONDUCTOR_RESUME_CLAUDE_FLAGS` such as `--permission-mode
-     bypassPermissions`). Do NOT set `CONDUCTOR_RUN_BRANCH` — the CLI reads `.conductor/run_branch`,
-     the single source of truth; a stale literal would override it.
+     the owner-owned `CONDUCTOR_MERGE_VERIFY` there (plus any dev-mode `CONDUCTOR_PLUGIN_DIRS` or
+     `DOCKER_HOST`). Do NOT set `CONDUCTOR_RUN_BRANCH` — the CLI reads `.conductor/run_branch`, the
+     single source of truth; a stale literal would override it.
+   - **UNATTENDED PERMISSIONS — the owner's explicit call, never defaulted.** An autonomous phase
+     runs `gh` PR create/merge, `git push`, docker, broad edits, and subagents. A headless `claude
+     -p` session can't answer permission prompts, so if the run worktree doesn't pre-authorize
+     those, an unattended Tier-B fire **stalls on the first prompt** — a permission-flavored variant
+     of the same silent-stall class. The driver fires with `${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}`
+     (default EMPTY = supervised only) — it never bakes a bypass. **Surface this to the owner and
+     let them choose** how the unattended run gets authority in `resume-env.sh`: (a) least-privilege
+     — point claude at a scoped `settings.json` allowlist (git/gh/pytest/ruff/pyright/conductor/docker);
+     or (b) full autonomy — `CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"`, and say
+     plainly that this is a **standing** posture (a full-access agent firing every heartbeat, not a
+     one-shot). Default (neither) = the run only progresses while a supervised session is open.
    - **RECONCILE is verify-first: SKIP the driver only if it still verifies.** `conductor
      resume-script verify --project <main-root> --worktree <run-worktree> --script <path>` exits 0
      when current; non-zero means the template changed or the installed driver is an older

@@ -141,6 +141,26 @@ Silent is the real defect. Cheap options, any of which would have caught this in
 
 ---
 
+## Second failure class — unattended permission stall (found 2026-07-05, folded into 0.5.2)
+
+Firing the driver by hand during recovery surfaced a *second* silent-stall class, same symptom,
+different cause. The driver runs a **headless `claude -p /conductor:autodev`**, which cannot answer
+permission prompts. An autonomous phase does `gh` PR create/merge, `git push`, docker, broad edits,
+and spawns subagents — none covered by a default `auto` permission mode with a small allowlist. So
+an unattended fire **stalls on the first un-allowlisted call**, exactly the "looks resumable, never
+progresses" outage this doc is about.
+
+Owner decision (recorded): **do not default `--dangerously-skip-permissions`** — a full-access agent
+firing every heartbeat is a *standing* security posture, and wrong for other users. It must be the
+owner's explicit opt-in. Resolution in 0.5.2:
+- the generated driver fires `${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}` (default EMPTY = supervised only),
+  never a baked bypass;
+- the owner opts into unattended authority in `resume-env.sh` — a scoped `settings.json` allowlist
+  (least privilege) OR `CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"` (full);
+- a stall surfaces through the same channel as bin-rot: `fire-start` with no `fire-end` (hung on a
+  prompt) or `fire-end rc=` non-zero, which reconcile's log-tail warns on;
+- `resume-script write` prints an awareness note when no `resume-env.sh` exists.
+
 ## Secondary observations (lower priority)
 
 - **Owner-checkout resume gap.** On resume from the owner's main checkout, registering the in-session
