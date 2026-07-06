@@ -340,6 +340,31 @@ def test_trivial_nonempty_container_literals_are_flagged(tmp_path):
 
 def test_empty_container_literal_is_not_flagged_trivially_true(tmp_path):
     # `assert []` is always FALSE — a broken test, not a tautology; pytest reports it
-    body = "def test_x():\n    assert 'ERROR' not in 'ok'\n    assert 'ok' in 'ok'\n"
+    body = "def test_x():\n    assert 'ERROR' not in 'ok'\n    assert []\n"
     proj = _mk_project(tmp_path, PINNED, body=body)
     assert "trivial" not in "\n".join(_lint(proj)).lower()
+
+
+def test_value_taking_flag_cannot_smuggle_the_test_path(tmp_path):
+    # codex round 2: pytest consumes `assertions/sample` as --ignore's VALUE, so the
+    # command has no real positional target; token-shape must reject it
+    cmd = (
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest --noconftest "
+        "-p no:cacheprovider --ignore assertions/sample"
+    )
+    proj = _mk_project(tmp_path, cmd)
+    joined = "\n".join(_lint(proj))
+    assert "unpinned" in joined.lower()
+
+
+def test_attached_short_form_config_flags_are_rejected(tmp_path):
+    # codex round 2: -cpytest.ini / -oaddopts=... reload config without an exact
+    # `-c` / `-o` token
+    for i, flag in enumerate(["-cpytest.ini", "-oaddopts=-pevil"]):
+        cmd = (
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest "
+            f"-p no:cacheprovider {flag} {TEST_REL}"
+        )
+        proj = _mk_project(tmp_path / f"case-{i}", cmd)
+        joined = "\n".join(_lint(proj))
+        assert "unpinned" in joined.lower(), flag

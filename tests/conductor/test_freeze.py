@@ -242,3 +242,15 @@ def test_goal_named_spec_with_missing_assertions_source_fails_closed(tmp_path):
     (tmp_path / "docs" / "specs" / "fixture-spec.md.assertions.md").unlink()
     with pytest.raises(Exception, match="missing-assertions-source"):
         freeze.record(manifest, baseline, str(tmp_path))
+
+
+def test_goal_without_spec_path_fails_closed_never_globs(tmp_path):
+    # codex round 2: a stale/malformed goal must not silently freeze an unrelated
+    # spec's assertions via the glob fallback
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)  # one glob candidate exists
+    dot = tmp_path / ".conductor"
+    dot.mkdir(exist_ok=True)
+    (dot / "goal.md").write_text("Do the thing\n")  # no docs/specs path
+    with pytest.raises(Exception, match="assertions-source"):
+        freeze.record(manifest, baseline, str(tmp_path))

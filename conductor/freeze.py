@@ -119,11 +119,12 @@ def _assertions_source(repo_root: str) -> dict:
     done-DEFINITION, made tamper-evident alongside the manifest and test files.
 
     Preferred, precise path: parse `<project>/.conductor/goal.md` for a
-    `docs/specs/<name>.md` path and take its `.assertions.md` sibling. Glob
-    `docs/specs/*.assertions.md` ONLY when no goal identifies one: exactly one
-    match -> use it; multiple -> fail closed (freezing every spec's assertions
-    silently would let an edit to an UNRELATED spec's assertions break this run's
-    gate); none -> no source entry (old behavior)."""
+    `docs/specs/<name>.md` path and take its `.assertions.md` sibling; a goal
+    whose named spec has no `.assertions.md` sibling — or that names no spec at
+    all — fails closed. Glob `docs/specs/*.assertions.md` ONLY when no goal file
+    exists: exactly one match -> use it; multiple -> fail closed (freezing every
+    spec's assertions silently would let an edit to an UNRELATED spec's
+    assertions break this run's gate); none -> no source entry (old behavior)."""
     goal_path = os.path.join(repo_root, ".conductor", "goal.md")
     if os.path.isfile(goal_path):
         with open(goal_path, encoding="utf-8") as f:
@@ -138,6 +139,12 @@ def _assertions_source(repo_root: str) -> dict:
                 f"missing-assertions-source: the goal names "
                 f"{m.group(0)} but {rel} does not exist"
             )
+        # a goal that names no spec must not silently glob an unrelated spec's
+        # assertions — fail closed
+        raise MissingAssertionsSource(
+            "unidentifiable-assertions-source: .conductor/goal.md exists but "
+            "names no docs/specs/<name>.md path"
+        )
     matches = sorted(
         glob.glob(os.path.join(repo_root, "docs", "specs", "*.assertions.md"))
     )

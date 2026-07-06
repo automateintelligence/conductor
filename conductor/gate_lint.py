@@ -51,9 +51,27 @@ REQUIRED_PLUGIN_DISABLE = "no:cacheprovider"
 # splice in a second command, a redirect, or a substitution. Reject outright.
 _SHELL_META = ("`", "$(", ";", "|", "&", ">", "<", "\n")
 
-# Flags that reload configuration the pin exists to exclude (ini overrides can
-# re-enable plugins/conftest behavior). Fail-closed.
-_BANNED_FLAGS = ("-c", "-o", "--override-ini")
+# Fail-closed flag policy: a pytest flag is allowed only when its ARITY is known —
+# a value-taking flag (`--ignore <path>`, `-cpytest.ini`, `-o addopts=...`) can
+# consume what looks like the test path or reload configuration, so anything not
+# recognized as a no-arg flag (or a safe `=`-form) is rejected as unpinned.
+_NOARG_FLAGS = frozenset(
+    {
+        "-q",
+        "-qq",
+        "-v",
+        "-vv",
+        "-s",
+        "-x",
+        "--exitfirst",
+        "--noconftest",
+        "--strict-markers",
+        "--strict-config",
+        "--no-header",
+        "--no-summary",
+    }
+)
+_SAFE_EQ_PREFIXES = ("--tb=", "--maxfail=", "--timeout=", "--color=")
 
 _SAFE_PATH_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/:-*?[]"
@@ -116,11 +134,15 @@ def _check_command(raw: str, repo_root: str) -> tuple[list[str], list[str]]:
             j += 2
             continue
         if tok.startswith("-"):
-            base = tok.split("=", 1)[0]
-            if base in _BANNED_FLAGS:
-                return unpinned(f"flag {tok!r} reloads configuration the pin excludes")
             if tok == REQUIRED_FLAG:
                 saw_noconftest = True
+            elif tok in _NOARG_FLAGS or tok.startswith(_SAFE_EQ_PREFIXES):
+                pass
+            else:
+                return unpinned(
+                    f"flag {tok!r} is not a recognized no-arg pytest flag "
+                    f"(unknown arity/config reload — fail-closed)"
+                )
             j += 1
             continue
         # a non-flag token must be a test path (validated to exist by the file rules)
