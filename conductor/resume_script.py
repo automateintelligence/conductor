@@ -223,17 +223,46 @@ def _write(project: str, worktree: str, out: str | None, force: bool = False) ->
     print(f"wrote {out} (template v{TEMPLATE_VERSION})", file=sys.stderr)
     # Awareness nudge (owner decision, never auto-enabled): unless the run worktree pre-authorizes
     # every tool an autonomous phase needs, an unattended headless fire STALLS on the first
-    # permission prompt. Point them at the opt-in without choosing it for them.
+    # permission prompt. Gate on "permission posture UNDECIDED", not "resume-env.sh absent": a
+    # file that exists but sets no posture (empty FLAGS, unrelated exports) still stalls
+    # unattended fires, so it still gets the nudge. Point at both opt-ins without choosing.
     env_path = os.path.join(os.path.dirname(out) or ".", "resume-env.sh")
-    if not os.path.isfile(env_path):
+    if not _posture_decided(env_path):
         print(
-            f"note: unattended fires need permissions pre-authorized. If a phase should run "
-            f"without a live session, put a scoped settings.json OR "
-            f'CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions" in {env_path} '
-            f"(full autonomy = standing security posture; your call).",
+            f"note: unattended fires need permissions pre-authorized or they STALL on the "
+            f"first prompt. Pick a posture in {env_path}:\n"
+            f'  (scoped) CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings <path-to-scoped-settings.json>"\n'
+            f"           — least privilege: allowlist git/gh/pytest/ruff/pyright/conductor/docker\n"
+            f'  (full)   CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"\n'
+            f"           — standing full-access posture; your explicit call, never defaulted.",
             file=sys.stderr,
         )
     return 0
+
+
+# An ACTIVE (non-comment) FLAGS assignment — a commented-out example line must not count
+# as a decided posture, or the nudge goes silent while unattended fires still stall.
+_FLAGS_ASSIGN_RE = re.compile(r"^\s*(export\s+)?CONDUCTOR_RESUME_CLAUDE_FLAGS=")
+# The posture spellings the DRIVER's fire-start case recognizes — probe and driver must
+# agree, or write re-nudges an owner who already decided (training them to ignore it).
+_POSTURE_TOKENS = ("--dangerously-skip-permissions", "bypassPermissions", "--settings")
+
+
+def _posture_decided(env_path: str) -> bool:
+    """Has the owner picked a permission posture in resume-env.sh? DECIDED iff an active
+    CONDUCTOR_RESUME_CLAUDE_FLAGS assignment carries a bypass or --settings posture.
+    Absent or unreadable file, or a posture-less FLAGS line, is UNDECIDED (nudge fires)."""
+    if not os.path.isfile(env_path):
+        return False
+    try:
+        with open(env_path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return False
+    return any(
+        _FLAGS_ASSIGN_RE.match(ln) and any(tok in ln for tok in _POSTURE_TOKENS)
+        for ln in lines
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

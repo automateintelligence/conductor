@@ -113,6 +113,70 @@ def test_write_nudges_owner_about_unattended_permissions(tmp_path, capsys):
     assert "unattended" in err and "resume-env.sh" in err
 
 
+def _write_and_read_err(tmp_path, capsys):
+    out = tmp_path / "resume-autodev.sh"
+    rc = rs.main(
+        ["write", "--project", PROJECT, "--worktree", WORKTREE, "--out", str(out)]
+    )
+    assert rc == 0
+    return capsys.readouterr().err
+
+
+def test_write_nudge_fires_when_env_file_exists_but_posture_undecided(tmp_path, capsys):
+    """The gate is 'permission posture undecided', NOT 'resume-env.sh absent': a file that
+    exists but sets no posture (empty FLAGS, unrelated exports) still gets the nudge."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text(
+        'export CONDUCTOR_MERGE_VERIFY="pytest -q"\nCONDUCTOR_RESUME_CLAUDE_FLAGS=""\n'
+    )
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" in err and "resume-env.sh" in err
+
+
+def test_write_nudge_names_both_posture_branches(tmp_path, capsys):
+    """The nudge is split into two concrete named branches — scoped (--settings, least
+    privilege) and full (--dangerously-skip-permissions, owner's explicit call) — with
+    BOTH flag spellings present so the owner can copy either."""
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "--settings" in err
+    assert "--dangerously-skip-permissions" in err
+    assert "scoped" in err
+    assert "full" in err
+    assert "CONDUCTOR_RESUME_CLAUDE_FLAGS" in err
+
+
+@pytest.mark.parametrize(
+    "flags_line",
+    [
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings /home/u/scoped-settings.json"',
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"',
+        'export CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"',
+        # the other full-bypass spelling the driver labels posture=full-bypass —
+        # probe and driver must agree or the owner is re-nudged after deciding
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--permission-mode bypassPermissions"',
+    ],
+)
+def test_write_nudge_silent_when_posture_decided(tmp_path, capsys, flags_line):
+    """Either posture in the resume-env.sh FLAGS line silences the nudge — the owner
+    already made the call; repeating the prompt would train them to ignore it."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text(flags_line + "\n")
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" not in err
+
+
+def test_write_nudge_ignores_commented_out_posture_lines(tmp_path, capsys):
+    """A commented-out example FLAGS line is NOT a decision — silencing the nudge on it
+    leaves the owner posture-less and the unattended fire stalling silently."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text(
+        '# CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"  # uncomment for full\n'
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS=""\n'
+    )
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" in err
+
+
 def test_render_preserves_the_three_guards():
     s = _render()
     assert "flock -n 9" in s  # (c) one fire at a time
