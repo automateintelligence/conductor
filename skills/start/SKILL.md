@@ -37,6 +37,11 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    `start_probe.assertions_ready(expected_ids, "assertions/manifest.yaml", <assert-run --level spec
    exit>)` is True** — i.e. the manifest has one entry per `/spec-craft:executable-assertions` id
    AND the runner exit ∈ {0,1} (Codex #3). Otherwise (re)build it.
+   **Then LINT the gate:** run `conductor gate lint` — it fail-closes on the mechanically-detectable
+   weak-frozen-test patterns (an unpinned manifest command, a test file with no negative clause, a
+   trivially-true assertion). ANY finding blocks the run: fix the assertion tests via
+   `/conductor:assertions-to-tests` (or the manifest command form) until the lint is clean — NEVER
+   weaken or skip the lint. Only a clean lint proceeds to the freeze.
    **Then FREEZE the gate (§5):** `conductor gate freeze` records `assertions/.frozen` (commit it)
    so the worker cannot later weaken a check; the runner fail-closes (exit 6) if a frozen
    assertion or its test file changes. SKIP if `.frozen` exists and `conductor gate verify` is clean.

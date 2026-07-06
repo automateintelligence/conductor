@@ -54,6 +54,8 @@ def test_start_skill_contract():
         "croncreate",
         "/conductor:autodev",
         "start_probe.assertions_ready",
+        "gate freeze",
+        "conductor gate lint",
         "already done",
         "resume",
         "plan-lint",
