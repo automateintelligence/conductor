@@ -106,3 +106,54 @@ a durable driver (crontab marker or scheduled_tasks.json) exists and tails the r
 
 B-7 (run-infra digest guard), A-3 (a permission dry-run tick), and A-7 (disarm the bypass on run
 completion) are deferred to a later pass; noted so their omission is deliberate.
+
+## Expectations
+
+### Success scenarios
+
+1. An operator authorizes a **least-privilege** unattended run with one `grant --scoped` command:
+   it produces a ready-to-use scoped allowlist and the exact env line that loads it, with no file
+   authored by hand.
+2. Turning on **full** unattended autonomy requires the operator to pass an explicit acknowledgment
+   token; the bare `grant --full` refuses and explains why.
+3. The **permission posture** of every unattended fire is visible in the resume log as a bare label
+   (supervised / scoped / full-bypass).
+4. The unattended-authority decision is **discoverable from the README**, not only from
+   agent-facing skill files.
+5. A done-gate that could be weak or bypassable is caught **before it is frozen**: `gate lint`
+   rejects an unpinned manifest command and flags an assertion with no negative clause, and the
+   freeze covers the human-authored `<spec>.assertions.md`.
+6. The run-branch name and the repo default branch each come from **one command** that both `start`
+   and `autodev` call, so the two skills cannot derive them differently.
+7. `driver status` tells the operator, on demand, whether the unattended run has a durable driver
+   and whether recent fires failed.
+
+### Failure scenarios (confidently wrong)
+
+1. `grant --scoped` emits an allowlist so permissive (a `Bash(*)`-style wildcard) that "scoped" is
+   full access wearing a safe label.
+2. `grant --scoped` emits an allowlist so tight the unattended fire stalls on a tool it needs — the
+   safe path fails the exact silent-stall way the design exists to prevent.
+3. `grant --full` writes the bypass flag without the acknowledgment token (the guard is cosmetic).
+4. Posture logging prints the settings-file path or any secret instead of a bare label.
+5. `gate lint` passes a manifest command that can load an unfrozen `conftest.py` — the frozen-gate
+   bypass it exists to catch.
+6. `run-branch name` disagrees with a prose-derived slug, or `default-branch` emits an empty string
+   (breaking a `git fetch`) instead of falling open to `main`.
+7. `driver status` reports healthy while the durable driver is absent, or while every recent fire
+   logged `driver-unresolved` / a non-zero exit.
+
+### Must-nots
+
+1. No phase changes **default behavior**: an operator who invokes none of the new commands still
+   gets no permission bypass and the current merge/reconcile/gate semantics. Every addition is
+   opt-in.
+2. `grant` must **never** enable full bypass without the explicit acknowledgment token.
+3. A `resume-env.sh` the tool creates must **never** be group- or world-writable — it can carry the
+   bypass flag and the `CONDUCTOR_MERGE_VERIFY` command that runs as shell.
+4. `gate lint` must be **fail-closed**: an unparseable or ambiguous manifest command counts as
+   reject, never pass.
+5. No phase modifies the live running run's `.conductor/` scratch, its Tier-B driver, or its
+   crontab — the new behavior takes effect only when the owner updates the plugin after the run.
+6. A resolver (`default-branch`, `run-branch name`) must never emit an empty value that would make a
+   git command operate on the wrong or a missing ref; it falls open to a safe default.
