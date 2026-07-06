@@ -316,6 +316,7 @@ The `conductor` command (`bin/conductor`) fronts the Python modules.
 | `conductor ledger reconcile <issue#> [--tests-red] [--pr-merged] [--commits N] [-R N] [--now-ts N] [-L N]` | Apply the §7 reconcile rules (precedence git/tests > PR > label); the durable per-phase retry count is maintained by reconcile itself and escalates to `status:blocked` at the cap `R`; returns `{action, new_status}`. |
 | `conductor goal set <text...>` / `conductor goal get` | Record / read the durable goal (`.conductor/goal.md`). |
 | `conductor preflight` | Static availability gate: every conducted skill resolves, else exit 1. |
+| `conductor authority preview <plan.md>` | Dry-run of unattended authority: prints, per phase of the plan, every privileged operation an unattended fire performs (branch, push, gh pr, merge, docker via `CONDUCTOR_MERGE_VERIFY`, subagents, file writes), each marked owner-required unless the session pre-authorizes it. |
 | `conductor merge-gate <pr>` | Autonomous merge safety gate (see below); exit 0 ok, 1 blocked. |
 | `conductor gate {freeze\|verify}` | Freeze the done-gate at setup / verify it is unchanged. The runner enforces this — see [Why the worker can't cheat the gate](#why-the-worker-cant-cheat-the-gate). |
 
