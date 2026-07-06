@@ -151,15 +151,22 @@ eval "set -- ${{CONDUCTOR_RESUME_CLAUDE_FLAGS:-}}"
 # POSTURE VISIBILITY (audit, review A-4/A-6): label every fire with the permission posture
 # DERIVED from the SAME parsed argv the fire executes with — never a constant, never the raw
 # flag value or a settings path (the log must not leak them), and never a second divergent
-# parse (a quoted 'bypassPermissions' value must log what it executes). Bypass wins when both
-# appear: the more privileged posture is the honest label. Patterns are space-anchored so a
-# flag VALUE merely containing the substring (e.g. a path named x--dangerously-…) cannot
-# mislabel the fire; --permission-mode bypassPermissions is the other spelling of full bypass.
+# parse (a quoted 'bypassPermissions' value must log what it executes). EXACT argv-token
+# comparison, not substring matching, so a flag VALUE merely containing a flag-looking token
+# (even with spaces) cannot mislabel the fire. Bypass wins when both appear: the more
+# privileged posture is the honest label. bypassPermissions counts only as the VALUE of a
+# preceding --permission-mode (its other full-bypass spelling).
 POSTURE="supervised"
-case " $* " in
-    *" --dangerously-skip-permissions"*|*" --permission-mode bypassPermissions"*|*" --permission-mode=bypassPermissions"*) POSTURE="full-bypass" ;;
-    *" --settings"*) POSTURE="scoped" ;;
-esac
+prev=""
+for arg in "$@"; do
+    case "$arg" in
+        --dangerously-skip-permissions) POSTURE="full-bypass" ;;
+        --permission-mode=bypassPermissions) POSTURE="full-bypass" ;;
+        bypassPermissions) [ "$prev" = "--permission-mode" ] && POSTURE="full-bypass" ;;
+        --settings|--settings=*) [ "$POSTURE" = "full-bypass" ] || POSTURE="scoped" ;;
+    esac
+    prev="$arg"
+done
 printf '%s fire-start posture=%s\\n' "$(ts)" "$POSTURE" >> "$LOG"
 "$CLAUDE_BIN" -p "/conductor:autodev" "$@" >> "$LOG" 2>&1
 rc=$?

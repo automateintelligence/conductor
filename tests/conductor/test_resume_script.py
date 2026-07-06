@@ -87,22 +87,21 @@ def test_render_never_bakes_a_permission_bypass():
     ]
     assert len(evals) == 1
     # no bypass flag baked anywhere outside comments — the ONLY permitted non-comment
-    # occurrence is the posture-detection `case` match pattern (detection, not enablement).
-    # Exact whole-line equality: a tail appended to that line (e.g. `set -- <flag> "$@"`)
+    # occurrences are the posture-detection `case` arms (detection, not enablement).
+    # Exact whole-line equality: a tail appended to an arm (e.g. `set -- <flag> "$@"`)
     # would be enablement and must fail here.
-    detection_arm = (
-        '*" --dangerously-skip-permissions"*'
-        '|*" --permission-mode bypassPermissions"*'
-        '|*" --permission-mode=bypassPermissions"*)'
-        ' POSTURE="full-bypass" ;;'
-    )
+    detection_arms = {
+        '--dangerously-skip-permissions) POSTURE="full-bypass" ;;',
+        '--permission-mode=bypassPermissions) POSTURE="full-bypass" ;;',
+        'bypassPermissions) [ "$prev" = "--permission-mode" ] && POSTURE="full-bypass" ;;',
+    }
     for ln in s.splitlines():
         stripped = ln.strip()
         if stripped.startswith("#"):
             continue
         if "--dangerously-skip-permissions" in ln or "bypassPermissions" in ln:
-            assert stripped == detection_arm, (
-                f"bypass flag outside the posture-detection case pattern: {ln!r}"
+            assert stripped in detection_arms, (
+                f"bypass flag outside the posture-detection case arms: {ln!r}"
             )
 
 
@@ -624,6 +623,20 @@ def test_posture_not_fooled_by_flag_substring_inside_a_value(tmp_path):
         tmp_path,
         "substr",
         'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings /tmp/x--dangerously-skip-permissions.json"',
+    )
+    lines = _posture_lines(log)
+    assert any("posture=scoped" in ln for ln in lines), lines
+    assert not any("posture=full-bypass" in ln for ln in lines), lines
+
+
+def test_posture_not_fooled_by_flag_token_inside_spaced_value(tmp_path):
+    """EXACT argv-token derivation: a single settings-path ARGUMENT containing a space
+    plus a flag-looking token must stay scoped — argv boundaries are honored, so the
+    embedded ` --dangerously-skip-permissions.json` never reads as a real flag."""
+    log = _fire_with_env_line(
+        tmp_path,
+        "spacedval",
+        "CONDUCTOR_RESUME_CLAUDE_FLAGS=\"--settings '/tmp/a --dangerously-skip-permissions.json'\"",
     )
     lines = _posture_lines(log)
     assert any("posture=scoped" in ln for ln in lines), lines
