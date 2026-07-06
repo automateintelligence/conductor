@@ -86,10 +86,23 @@ def test_render_never_bakes_a_permission_bypass():
         if ln.strip().startswith("eval") and "${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}" in ln
     ]
     assert len(evals) == 1
-    # no bypass flag baked anywhere outside comments
+    # no bypass flag baked anywhere outside comments — the ONLY permitted non-comment
+    # occurrences are the posture-detection `case` arms (detection, not enablement).
+    # Exact whole-line equality: a tail appended to an arm (e.g. `set -- <flag> "$@"`)
+    # would be enablement and must fail here.
+    detection_arms = {
+        '--dangerously-skip-permissions) POSTURE="full-bypass" ;;',
+        '--permission-mode=bypassPermissions) POSTURE="full-bypass" ;;',
+        'bypassPermissions) [ "$prev" = "--permission-mode" ] && POSTURE="full-bypass" ;;',
+    }
     for ln in s.splitlines():
-        if not ln.strip().startswith("#"):
-            assert "--dangerously-skip-permissions" not in ln
+        stripped = ln.strip()
+        if stripped.startswith("#"):
+            continue
+        if "--dangerously-skip-permissions" in ln or "bypassPermissions" in ln:
+            assert stripped in detection_arms, (
+                f"bypass flag outside the posture-detection case arms: {ln!r}"
+            )
 
 
 def test_write_nudges_owner_about_unattended_permissions(tmp_path, capsys):
@@ -99,6 +112,131 @@ def test_write_nudges_owner_about_unattended_permissions(tmp_path, capsys):
     rs.main(["write", "--project", PROJECT, "--worktree", WORKTREE, "--out", str(out)])
     err = capsys.readouterr().err
     assert "unattended" in err and "resume-env.sh" in err
+
+
+def _write_and_read_err(tmp_path, capsys):
+    out = tmp_path / "resume-autodev.sh"
+    rc = rs.main(
+        ["write", "--project", PROJECT, "--worktree", WORKTREE, "--out", str(out)]
+    )
+    assert rc == 0
+    return capsys.readouterr().err
+
+
+def test_write_nudge_fires_when_env_file_exists_but_posture_undecided(tmp_path, capsys):
+    """The gate is 'permission posture undecided', NOT 'resume-env.sh absent': a file that
+    exists but sets no posture (empty FLAGS, unrelated exports) still gets the nudge."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text(
+        'export CONDUCTOR_MERGE_VERIFY="pytest -q"\nCONDUCTOR_RESUME_CLAUDE_FLAGS=""\n'
+    )
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" in err and "resume-env.sh" in err
+
+
+def test_write_nudge_names_both_posture_branches(tmp_path, capsys):
+    """The nudge is split into two concrete named branches — scoped (--settings, least
+    privilege) and full (--dangerously-skip-permissions, owner's explicit call) — with
+    BOTH flag spellings present so the owner can copy either."""
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "--settings" in err
+    assert "--dangerously-skip-permissions" in err
+    assert "scoped" in err
+    assert "full" in err
+    assert "CONDUCTOR_RESUME_CLAUDE_FLAGS" in err
+
+
+@pytest.mark.parametrize(
+    "flags_line",
+    [
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings /home/u/scoped-settings.json"',
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"',
+        'export CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"',
+        # the other full-bypass spelling the driver labels posture=full-bypass —
+        # probe and driver must agree or the owner is re-nudged after deciding
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--permission-mode bypassPermissions"',
+    ],
+)
+def test_write_nudge_silent_when_posture_decided(tmp_path, capsys, flags_line):
+    """Either posture in the resume-env.sh FLAGS line silences the nudge — the owner
+    already made the call; repeating the prompt would train them to ignore it."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text(flags_line + "\n")
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" not in err
+
+
+def test_write_nudge_ignores_commented_out_posture_lines(tmp_path, capsys):
+    """A commented-out example FLAGS line is NOT a decision — silencing the nudge on it
+    leaves the owner posture-less and the unattended fire stalling silently."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text(
+        '# CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"  # uncomment for full\n'
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS=""\n'
+    )
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" in err
+
+
+@pytest.mark.parametrize(
+    "override_line",
+    [
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS=""',
+        "unset CONDUCTOR_RESUME_CLAUDE_FLAGS",
+    ],
+)
+def test_write_nudge_fires_when_later_override_clears_posture(
+    tmp_path, capsys, override_line
+):
+    """Shell semantics: the FINAL effective assignment wins. A posture followed by an
+    empty reassignment (or unset) is undecided at runtime — the nudge must still fire."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text(
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings /tmp/settings.json"\n'
+        + override_line
+        + "\n"
+    )
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" in err
+
+
+def test_write_nudge_ignores_comment_tail_on_empty_assignment(tmp_path, capsys):
+    """An inline comment AFTER an empty active assignment is guidance, not a decision:
+    `FLAGS="" # use --settings /path` must still nudge (the active value is empty)."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text(
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="" # use --settings /path for scoped\n'
+    )
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" in err
+
+
+@pytest.mark.parametrize(
+    "flags_line",
+    [
+        # posture-token SUBSTRINGS inside other tokens are not a decision — the probe
+        # mirrors the driver's exact-token derivation (which labels these supervised)
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--model foo--settings-bar"',
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--permission-mode=bypassPermissions-disabled"',
+    ],
+)
+def test_write_nudge_fires_on_posture_lookalike_tokens(tmp_path, capsys, flags_line):
+    """Probe/driver agreement: values the driver would label supervised (lookalike
+    substrings, not exact posture tokens) must NOT silence the nudge."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text(flags_line + "\n")
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" in err
+
+
+def test_write_nudge_fires_on_command_prefix_temp_env(tmp_path, capsys):
+    """An UNQUOTED `FLAGS=--settings /path` is a temporary command env in shell — it does
+    not persist for the driver after sourcing, so the posture is NOT decided and the
+    nudge must still fire."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text("CONDUCTOR_RESUME_CLAUDE_FLAGS=--settings /tmp/settings.json\n")
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" in err
 
 
 def test_render_preserves_the_three_guards():
@@ -419,6 +557,160 @@ def test_driver_preserves_quoted_flag_values_with_spaces(tmp_path):
     # negative: the word-split fragments must not appear as argv entries
     assert "'/tmp/space" not in argv
     assert "path/settings.json'" not in argv
+
+
+# ---- posture visibility: fire-start carries a DERIVED posture label (Phase 3, A5) ----
+
+
+def _posture_lines(log):
+    return [ln for ln in log.splitlines() if "posture=" in ln]
+
+
+def _fire_with_env_line(tmp, name, env_line):
+    """One harness per case (fresh log): optionally write resume-env.sh (0600), fire,
+    return the log text."""
+    base = tmp / name
+    base.mkdir()
+    project, driver, home, _fired = _mk_env_harness(base)
+    if env_line is not None:
+        env_file = project / ".conductor" / "resume-env.sh"
+        env_file.write_text(env_line + "\n")
+        os.chmod(env_file, 0o600)
+    proc = _fire_driver(driver, home)
+    log_file = project / ".conductor" / "resume-autodev.log"
+    log = log_file.read_text() if log_file.is_file() else ""
+    # harness sanity: the stub fire must have happened, else the case proves nothing
+    assert "fire-start" in log, (name, proc.returncode, proc.stdout, proc.stderr, log)
+    return log
+
+
+def test_posture_label_derived_from_flags_three_inputs(tmp_path):
+    """Bypass flags -> full-bypass; --settings <path> -> scoped (path leaked nowhere);
+    empty -> supervised. Three pairwise-distinct labels prove the label is DERIVED,
+    never a constant."""
+    secret_settings = str(tmp_path / "scoped-secret-settings.json")
+
+    log_bypass = _fire_with_env_line(
+        tmp_path,
+        "bypass",
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"',
+    )
+    log_scoped = _fire_with_env_line(
+        tmp_path,
+        "scoped",
+        f'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings {secret_settings}"',
+    )
+    log_supervised = _fire_with_env_line(tmp_path, "supervised", None)
+
+    for log, label in (
+        (log_bypass, "posture=full-bypass"),
+        (log_scoped, "posture=scoped"),
+        (log_supervised, "posture=supervised"),
+    ):
+        lines = _posture_lines(log)
+        assert lines, f"no posture= line logged; expected {label}\n{log}"
+        assert any(label in ln for ln in lines), (label, lines)
+
+    # must-not: the posture line carries the BARE label — never the raw flag value
+    for ln in _posture_lines(log_bypass):
+        assert "--dangerously-skip-permissions" not in ln, ln
+    # must-not: the settings path appears NOWHERE in the whole log
+    assert secret_settings not in log_scoped, log_scoped
+    # scoped is a bare label, not full-bypass mislabeled
+    assert not any("posture=full-bypass" in ln for ln in _posture_lines(log_scoped))
+
+
+def test_posture_bypass_wins_when_both_flags_present(tmp_path):
+    """--dangerously-skip-permissions AND --settings together -> full-bypass (the more
+    privileged posture is the honest label)."""
+    log = _fire_with_env_line(
+        tmp_path,
+        "both",
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings /tmp/s.json --dangerously-skip-permissions"',
+    )
+    lines = _posture_lines(log)
+    assert any("posture=full-bypass" in ln for ln in lines), lines
+    assert not any("posture=scoped" in ln for ln in lines), lines
+
+
+def test_posture_recognizes_permission_mode_bypass_spelling(tmp_path):
+    """`--permission-mode bypassPermissions` is the other full-bypass spelling — labeling
+    it supervised would be exactly the audit misrepresentation A5 exists to prevent."""
+    log = _fire_with_env_line(
+        tmp_path,
+        "permmode",
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--permission-mode bypassPermissions"',
+    )
+    assert any("posture=full-bypass" in ln for ln in _posture_lines(log)), log
+
+
+def test_posture_not_fooled_by_flag_substring_inside_a_value(tmp_path):
+    """A settings PATH that merely contains the bypass substring must stay scoped — the
+    patterns are space-anchored, matching flag words, not arbitrary value substrings."""
+    log = _fire_with_env_line(
+        tmp_path,
+        "substr",
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings /tmp/x--dangerously-skip-permissions.json"',
+    )
+    lines = _posture_lines(log)
+    assert any("posture=scoped" in ln for ln in lines), lines
+    assert not any("posture=full-bypass" in ln for ln in lines), lines
+
+
+def test_posture_not_fooled_by_flag_token_inside_spaced_value(tmp_path):
+    """EXACT argv-token derivation: a single settings-path ARGUMENT containing a space
+    plus a flag-looking token must stay scoped — argv boundaries are honored, so the
+    embedded ` --dangerously-skip-permissions.json` never reads as a real flag."""
+    log = _fire_with_env_line(
+        tmp_path,
+        "spacedval",
+        "CONDUCTOR_RESUME_CLAUDE_FLAGS=\"--settings '/tmp/a --dangerously-skip-permissions.json'\"",
+    )
+    lines = _posture_lines(log)
+    assert any("posture=scoped" in ln for ln in lines), lines
+    assert not any("posture=full-bypass" in ln for ln in lines), lines
+
+
+def test_posture_derived_from_executed_argv_not_raw_string(tmp_path):
+    """The label is derived from the SAME parsed argv the fire executes with: a QUOTED
+    'bypassPermissions' value executes as full bypass and must log full-bypass, not
+    supervised (a divergent raw-string parse would misrepresent the audit trail)."""
+    log = _fire_with_env_line(
+        tmp_path,
+        "quotedbp",
+        "CONDUCTOR_RESUME_CLAUDE_FLAGS=\"--permission-mode 'bypassPermissions'\"",
+    )
+    assert any("posture=full-bypass" in ln for ln in _posture_lines(log)), log
+
+
+def test_posture_not_fooled_by_bypasspermissions_substring_in_a_path(tmp_path):
+    """The bypassPermissions spelling is anchored to the --permission-mode flag+value
+    shape — a settings PATH containing the bare substring must stay scoped."""
+    log = _fire_with_env_line(
+        tmp_path,
+        "bpsubstr",
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings /tmp/bypassPermissions.json"',
+    )
+    lines = _posture_lines(log)
+    assert any("posture=scoped" in ln for ln in lines), lines
+    assert not any("posture=full-bypass" in ln for ln in lines), lines
+
+
+def test_render_posture_line_never_interpolates_raw_flags():
+    """Static must-not: the printf that logs the posture label must interpolate the derived
+    $POSTURE variable, never $CONDUCTOR_RESUME_CLAUDE_FLAGS (which would leak the raw flag
+    value or the settings path into the log)."""
+    s = _render()
+    posture_printfs = [
+        ln for ln in s.splitlines() if "printf" in ln and "posture=" in ln
+    ]
+    assert len(posture_printfs) == 1, posture_printfs
+    line = posture_printfs[0]
+    assert "CONDUCTOR_RESUME_CLAUDE_FLAGS" not in line, line
+    assert '"$POSTURE"' in line, line
+    # the label is DERIVED: a case statement maps flags -> label before the fire
+    assert 'POSTURE="supervised"' in s  # least-privileged default
+    assert s.index('POSTURE="supervised"') < s.index(line)
 
 
 def test_render_shell_escapes_paths():

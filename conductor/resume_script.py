@@ -31,7 +31,7 @@ import sys
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and
 # `/conductor:start` reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 3
+TEMPLATE_VERSION = 4
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
@@ -144,11 +144,30 @@ done
 # full autonomy, CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions". The default here
 # is EMPTY (supervised only): a full-access agent firing every heartbeat is a standing security
 # posture, so the owner opts in explicitly, never the generator.
-printf '%s fire-start\\n' "$(ts)" >> "$LOG"
 # Re-parse the owner's flags with THEIR OWN quoting (a bare unquoted expansion would word-split
 # a quoted `--settings '/path with space'` into fragments). eval adds no new trust surface here:
 # resume-env.sh is already sourced — i.e. executed — owner-owned, 0600-guarded content.
 eval "set -- ${{CONDUCTOR_RESUME_CLAUDE_FLAGS:-}}"
+# POSTURE VISIBILITY (audit, review A-4/A-6): label every fire with the permission posture
+# DERIVED from the SAME parsed argv the fire executes with — never a constant, never the raw
+# flag value or a settings path (the log must not leak them), and never a second divergent
+# parse (a quoted 'bypassPermissions' value must log what it executes). EXACT argv-token
+# comparison, not substring matching, so a flag VALUE merely containing a flag-looking token
+# (even with spaces) cannot mislabel the fire. Bypass wins when both appear: the more
+# privileged posture is the honest label. bypassPermissions counts only as the VALUE of a
+# preceding --permission-mode (its other full-bypass spelling).
+POSTURE="supervised"
+prev=""
+for arg in "$@"; do
+    case "$arg" in
+        --dangerously-skip-permissions) POSTURE="full-bypass" ;;
+        --permission-mode=bypassPermissions) POSTURE="full-bypass" ;;
+        bypassPermissions) [ "$prev" = "--permission-mode" ] && POSTURE="full-bypass" ;;
+        --settings|--settings=*) [ "$POSTURE" = "full-bypass" ] || POSTURE="scoped" ;;
+    esac
+    prev="$arg"
+done
+printf '%s fire-start posture=%s\\n' "$(ts)" "$POSTURE" >> "$LOG"
 "$CLAUDE_BIN" -p "/conductor:autodev" "$@" >> "$LOG" 2>&1
 rc=$?
 printf '%s fire-end rc=%s\\n' "$(ts)" "$rc" >> "$LOG"
@@ -212,17 +231,96 @@ def _write(project: str, worktree: str, out: str | None, force: bool = False) ->
     print(f"wrote {out} (template v{TEMPLATE_VERSION})", file=sys.stderr)
     # Awareness nudge (owner decision, never auto-enabled): unless the run worktree pre-authorizes
     # every tool an autonomous phase needs, an unattended headless fire STALLS on the first
-    # permission prompt. Point them at the opt-in without choosing it for them.
+    # permission prompt. Gate on "permission posture UNDECIDED", not "resume-env.sh absent": a
+    # file that exists but sets no posture (empty FLAGS, unrelated exports) still stalls
+    # unattended fires, so it still gets the nudge. Point at both opt-ins without choosing.
     env_path = os.path.join(os.path.dirname(out) or ".", "resume-env.sh")
-    if not os.path.isfile(env_path):
+    if not _posture_decided(env_path):
         print(
-            f"note: unattended fires need permissions pre-authorized. If a phase should run "
-            f"without a live session, put a scoped settings.json OR "
-            f'CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions" in {env_path} '
-            f"(full autonomy = standing security posture; your call).",
+            f"note: unattended fires need permissions pre-authorized or they STALL on the "
+            f"first prompt. Pick a posture in {env_path}:\n"
+            f'  (scoped) CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings <path-to-scoped-settings.json>"\n'
+            f"           — least privilege: allowlist git/gh/pytest/ruff/pyright/conductor/docker\n"
+            f'  (full)   CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"\n'
+            f"           — standing full-access posture; your explicit call, never defaulted.",
             file=sys.stderr,
         )
     return 0
+
+
+_FLAGS_VAR = "CONDUCTOR_RESUME_CLAUDE_FLAGS"
+# A shell variable-assignment word (`NAME=...`) — used to tell a line of persistent
+# assignments apart from a command with a temporary env prefix.
+_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _posture_of(args: list[str]) -> str:
+    """The posture label for a parsed flags argv — the Python transliteration of the
+    DRIVER's exact-token fire-start derivation. Probe and driver must agree, or write
+    re-nudges an owner who already decided (training them to ignore it). Exact tokens,
+    never substrings; bypass wins over scoped."""
+    posture = "supervised"
+    prev = ""
+    for arg in args:
+        if arg in (
+            "--dangerously-skip-permissions",
+            "--permission-mode=bypassPermissions",
+        ) or (arg == "bypassPermissions" and prev == "--permission-mode"):
+            posture = "full-bypass"
+        elif (
+            arg == "--settings" or arg.startswith("--settings=")
+        ) and posture != "full-bypass":
+            posture = "scoped"
+        prev = arg
+    return posture
+
+
+def _posture_decided(env_path: str) -> bool:
+    """Has the owner picked a permission posture in resume-env.sh? DECIDED iff an ACTIVE
+    CONDUCTOR_RESUME_CLAUDE_FLAGS assignment VALUE carries a bypass or --settings posture.
+    Lines are parsed shell-wise (shlex, comments stripped) so a commented-out example line
+    or a comment tail on an empty assignment never counts as a decision. Absent/unreadable
+    file, malformed line, or a posture-less value is UNDECIDED (nudge fires)."""
+    if not os.path.isfile(env_path):
+        return False
+    try:
+        with open(env_path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return False
+    # Shell semantics: the FINAL effective assignment wins — an early posture followed by a
+    # reassignment to "" (or an unset) is undecided at runtime and must still nudge. Only
+    # PERSISTENT assignment shapes count: `[export] VAR=value` (or a line of nothing but
+    # assignments). A command-prefix temp env (`VAR=x some-command`) does not survive the
+    # source, so it fails toward "undecided" (nudge fires).
+    final_value: str | None = None
+    for ln in lines:
+        try:
+            words = shlex.split(ln, comments=True)
+        except ValueError:  # unbalanced quotes — malformed, ignore the line
+            continue
+        if not words:
+            continue
+        if words[0] == "unset":
+            if _FLAGS_VAR in words[1:]:
+                final_value = None
+            continue
+        if words[0] in ("export", "declare", "typeset"):
+            assigns = words[1:]
+        elif all(_ASSIGN_RE.match(w) for w in words):
+            assigns = words
+        else:  # a command line (possibly temp-env-prefixed) — nothing persists
+            continue
+        for word in assigns:
+            if word.startswith(f"{_FLAGS_VAR}="):
+                final_value = word[len(_FLAGS_VAR) + 1 :]
+    if final_value is None:
+        return False
+    try:
+        args = shlex.split(final_value)
+    except ValueError:  # malformed value — undecided, fail toward nudging
+        return False
+    return _posture_of(args) != "supervised"
 
 
 def main(argv: list[str] | None = None) -> int:
