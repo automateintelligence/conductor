@@ -149,11 +149,12 @@ done
 # or a settings path (the log must not leak them). Bypass wins when both flags appear: the
 # more privileged posture is the honest label. Patterns are space-anchored so a flag VALUE
 # that merely contains the substring (e.g. a settings path named x--dangerously-…) cannot
-# mislabel the fire; bypassPermissions catches the --permission-mode spelling of full bypass.
+# mislabel the fire; --permission-mode bypassPermissions is the other spelling of full bypass
+# (anchored to the flag+value shape so a path merely containing bypassPermissions stays honest).
 POSTURE="supervised"
 case " ${{CONDUCTOR_RESUME_CLAUDE_FLAGS:-}} " in
-    *" --dangerously-skip-permissions"*|*"bypassPermissions"*) POSTURE="full-bypass" ;;
-    *" --settings"*)                                           POSTURE="scoped" ;;
+    *" --dangerously-skip-permissions"*|*" --permission-mode bypassPermissions"*|*" --permission-mode=bypassPermissions"*) POSTURE="full-bypass" ;;
+    *" --settings"*) POSTURE="scoped" ;;
 esac
 printf '%s fire-start posture=%s\\n' "$(ts)" "$POSTURE" >> "$LOG"
 # Re-parse the owner's flags with THEIR OWN quoting (a bare unquoted expansion would word-split
@@ -240,18 +241,23 @@ def _write(project: str, worktree: str, out: str | None, force: bool = False) ->
     return 0
 
 
-# An ACTIVE (non-comment) FLAGS assignment — a commented-out example line must not count
-# as a decided posture, or the nudge goes silent while unattended fires still stall.
-_FLAGS_ASSIGN_RE = re.compile(r"^\s*(export\s+)?CONDUCTOR_RESUME_CLAUDE_FLAGS=")
 # The posture spellings the DRIVER's fire-start case recognizes — probe and driver must
 # agree, or write re-nudges an owner who already decided (training them to ignore it).
-_POSTURE_TOKENS = ("--dangerously-skip-permissions", "bypassPermissions", "--settings")
+_POSTURE_TOKENS = (
+    "--dangerously-skip-permissions",
+    "--permission-mode bypassPermissions",
+    "--permission-mode=bypassPermissions",
+    "--settings",
+)
+_FLAGS_VAR = "CONDUCTOR_RESUME_CLAUDE_FLAGS"
 
 
 def _posture_decided(env_path: str) -> bool:
-    """Has the owner picked a permission posture in resume-env.sh? DECIDED iff an active
-    CONDUCTOR_RESUME_CLAUDE_FLAGS assignment carries a bypass or --settings posture.
-    Absent or unreadable file, or a posture-less FLAGS line, is UNDECIDED (nudge fires)."""
+    """Has the owner picked a permission posture in resume-env.sh? DECIDED iff an ACTIVE
+    CONDUCTOR_RESUME_CLAUDE_FLAGS assignment VALUE carries a bypass or --settings posture.
+    Lines are parsed shell-wise (shlex, comments stripped) so a commented-out example line
+    or a comment tail on an empty assignment never counts as a decision. Absent/unreadable
+    file, malformed line, or a posture-less value is UNDECIDED (nudge fires)."""
     if not os.path.isfile(env_path):
         return False
     try:
@@ -259,10 +265,17 @@ def _posture_decided(env_path: str) -> bool:
             lines = f.read().splitlines()
     except OSError:
         return False
-    return any(
-        _FLAGS_ASSIGN_RE.match(ln) and any(tok in ln for tok in _POSTURE_TOKENS)
-        for ln in lines
-    )
+    for ln in lines:
+        try:
+            words = shlex.split(ln, comments=True)
+        except ValueError:  # unbalanced quotes — malformed, fail toward nudging
+            continue
+        for word in words:
+            if word.startswith(f"{_FLAGS_VAR}=") and any(
+                tok in word for tok in _POSTURE_TOKENS
+            ):
+                return True
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:

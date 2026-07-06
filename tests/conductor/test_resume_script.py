@@ -91,7 +91,9 @@ def test_render_never_bakes_a_permission_bypass():
     # Exact whole-line equality: a tail appended to that line (e.g. `set -- <flag> "$@"`)
     # would be enablement and must fail here.
     detection_arm = (
-        '*" --dangerously-skip-permissions"*|*"bypassPermissions"*)'
+        '*" --dangerously-skip-permissions"*'
+        '|*" --permission-mode bypassPermissions"*'
+        '|*" --permission-mode=bypassPermissions"*)'
         ' POSTURE="full-bypass" ;;'
     )
     for ln in s.splitlines():
@@ -172,6 +174,17 @@ def test_write_nudge_ignores_commented_out_posture_lines(tmp_path, capsys):
     env.write_text(
         '# CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"  # uncomment for full\n'
         'CONDUCTOR_RESUME_CLAUDE_FLAGS=""\n'
+    )
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" in err
+
+
+def test_write_nudge_ignores_comment_tail_on_empty_assignment(tmp_path, capsys):
+    """An inline comment AFTER an empty active assignment is guidance, not a decision:
+    `FLAGS="" # use --settings /path` must still nudge (the active value is empty)."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text(
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="" # use --settings /path for scoped\n'
     )
     err = _write_and_read_err(tmp_path, capsys)
     assert "unattended" in err
@@ -589,6 +602,19 @@ def test_posture_not_fooled_by_flag_substring_inside_a_value(tmp_path):
         tmp_path,
         "substr",
         'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings /tmp/x--dangerously-skip-permissions.json"',
+    )
+    lines = _posture_lines(log)
+    assert any("posture=scoped" in ln for ln in lines), lines
+    assert not any("posture=full-bypass" in ln for ln in lines), lines
+
+
+def test_posture_not_fooled_by_bypasspermissions_substring_in_a_path(tmp_path):
+    """The bypassPermissions spelling is anchored to the --permission-mode flag+value
+    shape — a settings PATH containing the bare substring must stay scoped."""
+    log = _fire_with_env_line(
+        tmp_path,
+        "bpsubstr",
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings /tmp/bypassPermissions.json"',
     )
     lines = _posture_lines(log)
     assert any("posture=scoped" in ln for ln in lines), lines
