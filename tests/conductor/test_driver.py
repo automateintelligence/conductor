@@ -120,6 +120,19 @@ def test_status_marker_for_another_root_is_not_durable(tmp_path, monkeypatch, ca
     assert driver.status(str(proj)) == 1
 
 
+def test_status_commented_out_marker_line_is_not_durable(tmp_path, monkeypatch):
+    """A disabled (commented-out) crontab entry still carrying the marker is NOT an
+    active driver — it must not false-green the health signal."""
+    proj, root = _mk_project(tmp_path)
+    _stub_crontab(
+        tmp_path,
+        monkeypatch,
+        ["# " + ln for ln in _marker_lines(root)],
+    )
+    _isolate_scheduled_tasks(tmp_path, monkeypatch)
+    assert driver.status(str(proj)) == 1
+
+
 # ---- durability: the scheduled_tasks.json leg ----------------------------------
 
 

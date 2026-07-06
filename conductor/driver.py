@@ -155,7 +155,11 @@ def status(project: str) -> int:
     driver with no fires yet — healthy."""
     root = resume_script.main_root(project)
     marker = resume_script.cron_marker(root)
-    if any(marker in ln for ln in _crontab_lines()):
+    # An ACTIVE crontab entry only: a commented-out/disabled line that still carries
+    # the marker is not a durable driver and must not false-green the signal.
+    if any(
+        marker in ln and not ln.lstrip().startswith("#") for ln in _crontab_lines()
+    ):
         leg = "crontab marker"
     elif _scheduled_task_matches(root):
         leg = "scheduled task"
