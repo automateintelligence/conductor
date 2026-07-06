@@ -137,3 +137,99 @@ def test_dir_target_leaves_product_code_editable(tmp_path):
     (tmp_path / "sub" / "a.py").write_text("def a():\n    return 42\n")
     res = freeze.verify(manifest, baseline, str(tmp_path))
     assert res["ok"] is True and res["tampered"] == []
+
+
+# ---------------------------------------------- assertions-source coverage (A9, Phase 4)
+
+
+import json  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+def _add_source(tmp_path, goal=True, specs=("fixture-spec",)):
+    d = tmp_path / "docs" / "specs"
+    d.mkdir(parents=True, exist_ok=True)
+    for name in specs:
+        (d / f"{name}.md").write_text(f"# {name}\n")
+        (d / f"{name}.md.assertions.md").write_text(f"# assertions for {name}\n")
+    if goal:
+        dot = tmp_path / ".conductor"
+        dot.mkdir(exist_ok=True)
+        (dot / "goal.md").write_text(f"Implement docs/specs/{specs[0]}.md until done\n")
+    return d / f"{specs[0]}.md.assertions.md"
+
+
+def test_freeze_records_and_verify_trips_on_assertions_source_change(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    src = _add_source(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    rel = "docs/specs/fixture-spec.md.assertions.md"
+    assert rel in doc.get("sources", {})
+
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True and res["tampered"] == []
+
+    src.write_text(src.read_text() + "- weakened after freeze\n")
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("assertions-source-changed" in t and rel in t for t in res["tampered"])
+
+
+def test_verify_trips_on_assertions_source_removed(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    src = _add_source(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    src.unlink()
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("assertions-source-removed" in t for t in res["tampered"])
+
+
+def test_old_format_baseline_without_sources_verifies_as_before(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    doc.pop("sources", None)  # pre-upgrade baseline shape
+    open(baseline, "w").write(json.dumps(doc))
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True and res["tampered"] == []
+
+
+def test_glob_fallback_single_match_used_when_no_goal(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert "docs/specs/fixture-spec.md.assertions.md" in doc.get("sources", {})
+
+
+def test_glob_fallback_multiple_matches_without_goal_fails_closed(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False, specs=("spec-a", "spec-b"))
+    with pytest.raises(Exception, match="ambiguous-assertions-source"):
+        freeze.record(manifest, baseline, str(tmp_path))
+
+
+def test_no_source_at_all_keeps_old_behavior(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert "sources" not in doc
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True
+
+
+def test_goal_naming_spec_wins_over_other_assertion_files(tmp_path):
+    # goal names spec-a; spec-b's assertions changing must NOT trip this run's gate
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=True, specs=("spec-a", "spec-b"))
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/spec-a.md.assertions.md"]
+    other = tmp_path / "docs" / "specs" / "spec-b.md.assertions.md"
+    other.write_text("changed\n")
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True

@@ -16,6 +16,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shlex
 import sys
 
@@ -104,6 +105,46 @@ def _referenced_files(entry: dict, repo_root: str) -> dict:
     return files
 
 
+class AmbiguousAssertionsSource(RuntimeError):
+    """Multiple docs/specs/*.assertions.md and no goal names one — fail closed."""
+
+
+def _assertions_source(repo_root: str) -> dict:
+    """{relpath: sha256} for the human-authored `<spec>.assertions.md` — the
+    done-DEFINITION, made tamper-evident alongside the manifest and test files.
+
+    Preferred, precise path: parse `<project>/.conductor/goal.md` for a
+    `docs/specs/<name>.md` path and take its `.assertions.md` sibling. Glob
+    `docs/specs/*.assertions.md` ONLY when no goal identifies one: exactly one
+    match -> use it; multiple -> fail closed (freezing every spec's assertions
+    silently would let an edit to an UNRELATED spec's assertions break this run's
+    gate); none -> no source entry (old behavior)."""
+    goal_path = os.path.join(repo_root, ".conductor", "goal.md")
+    if os.path.isfile(goal_path):
+        with open(goal_path, encoding="utf-8") as f:
+            goal = f.read()
+        m = re.search(r"docs/specs/[^\s`'\"]+?\.md", goal)
+        if m:
+            rel = m.group(0) + ".assertions.md"
+            path = os.path.join(repo_root, rel)
+            if os.path.isfile(path):
+                return {rel: _sha256_file(path)}
+            return {}  # the goal identified a spec; its assertions file is absent
+    matches = sorted(
+        glob.glob(os.path.join(repo_root, "docs", "specs", "*.assertions.md"))
+    )
+    if len(matches) > 1:
+        rels = ", ".join(os.path.relpath(p, repo_root) for p in matches)
+        raise AmbiguousAssertionsSource(
+            f"ambiguous-assertions-source: no goal names a spec and multiple "
+            f"candidates exist ({rels})"
+        )
+    if matches:
+        rel = os.path.relpath(matches[0], repo_root)
+        return {rel: _sha256_file(matches[0])}
+    return {}
+
+
 def gate_state(manifest_path: str, repo_root: str) -> dict:
     state: dict = {}
     for entry in _load(manifest_path):
@@ -121,8 +162,12 @@ def record(
 ) -> str:
     """Snapshot the current gate to the baseline file (called at /conductor:start)."""
     state = gate_state(manifest_path, repo_root)
+    doc: dict = {"version": 1, "ids": state}
+    sources = _assertions_source(repo_root)
+    if sources:
+        doc["sources"] = sources
     with open(baseline_path, "w", encoding="utf-8") as f:
-        json.dump({"version": 1, "ids": state}, f, indent=2, sort_keys=True)
+        json.dump(doc, f, indent=2, sort_keys=True)
     return baseline_path
 
 
@@ -138,7 +183,9 @@ def verify(
         return {"ok": True, "tampered": [], "frozen": False}
     try:
         with open(baseline_path, encoding="utf-8") as f:
-            base = json.load(f)["ids"]
+            base_doc = json.load(f)
+        base = base_doc["ids"]
+        base_sources = base_doc.get("sources", {}) or {}
     except Exception as exc:
         return {
             "ok": False,
@@ -167,6 +214,14 @@ def verify(
                 tampered.append(f"{aid}: test-file-removed ({rel})")
             elif now != dig:
                 tampered.append(f"{aid}: test-file-changed ({rel})")
+    # the human-authored assertions source (a pre-upgrade baseline has no "sources"
+    # key and verifies exactly as before)
+    for rel, dig in base_sources.items():
+        path = rel if os.path.isabs(rel) else os.path.join(repo_root, rel)
+        if not os.path.isfile(path):
+            tampered.append(f"assertions-source-removed ({rel})")
+        elif _sha256_file(path) != dig:
+            tampered.append(f"assertions-source-changed ({rel})")
     return {"ok": not tampered, "tampered": tampered, "frozen": True}
 
 
@@ -178,7 +233,11 @@ def main(argv: list | None = None) -> int:
 
         return gate_lint.main()
     if cmd == "freeze":
-        print(f"[GATE] froze done-gate baseline -> {record()}")
+        try:
+            print(f"[GATE] froze done-gate baseline -> {record()}")
+        except AmbiguousAssertionsSource as exc:
+            print(f"[GATE] {exc}", file=sys.stderr)
+            return 1
         return 0
     if cmd == "verify":
         res = verify()
