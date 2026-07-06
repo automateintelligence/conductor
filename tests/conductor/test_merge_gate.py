@@ -518,6 +518,34 @@ def test_base_leg_fetches_baseRefName():
     assert "baseRefName" in set(calls[0].split(","))
 
 
+def test_topology_off_line_emitted_without_run_branch(monkeypatch, tmp_path, capsys):
+    # spec Phase 5: "instead of silently disabling the base leg" — no run_branch file and
+    # no env → ONE stderr info line, base leg stays disabled, NOT a blocker.
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+    monkeypatch.delenv("CONDUCTOR_RUN_BRANCH", raising=False)
+    out = _base_call(base="main")
+    err = capsys.readouterr().err
+    assert err.count("topology-off:no-run_branch") == 1
+    assert not any(b.startswith("base-mismatch") for b in out["blockers"])
+    assert not any("topology-off" in b for b in out["blockers"])  # info, never a blocker
+
+
+def test_topology_off_line_absent_with_run_branch_file(monkeypatch, tmp_path, capsys):
+    (tmp_path / ".conductor").mkdir()
+    (tmp_path / ".conductor" / "run_branch").write_text("conductor/run-eval\n")
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+    monkeypatch.delenv("CONDUCTOR_RUN_BRANCH", raising=False)
+    _base_call(base="conductor/run-eval")
+    assert "topology-off:no-run_branch" not in capsys.readouterr().err
+
+
+def test_topology_off_line_absent_with_env(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))  # no file, but env configures it
+    monkeypatch.setenv("CONDUCTOR_RUN_BRANCH", "conductor/run-eval")
+    _base_call(base="conductor/run-eval")
+    assert "topology-off:no-run_branch" not in capsys.readouterr().err
+
+
 def test_empty_run_branch_file_fails_closed(monkeypatch, tmp_path):
     # codex PR-31 #3: a PRESENT-but-empty run_branch file is corrupt topology, not
     # "no topology" — it must surface as process-check-error, never silently disable.

@@ -209,6 +209,9 @@ def check(
     try:  # process legs: models drop clerical steps unless the gate enforces them
         # 0.5.0 run topology: phase PRs must target the run branch, never main directly.
         expected_base = _expected_base()
+        if expected_base is None:  # info, NOT a blocker: 0.4.x direct-merge runs keep
+            # working — the SILENCE is what changes (spec Phase 5, review B-5)
+            print("topology-off:no-run_branch", file=sys.stderr)
         if expected_base and (d.get("baseRefName") or "") != expected_base:
             blockers.append(f"base-mismatch:{d.get('baseRefName')}")
         if not _CLOSES_RE.search(d.get("body") or ""):
