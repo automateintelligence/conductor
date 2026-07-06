@@ -66,6 +66,7 @@ SETUP  (you run this once)
     └─ /conductor:start <spec>   ── the supervisor; idempotent, reconcile-first ───┐
          0. conductor preflight ........... does every conducted skill resolve? (fail-closed)
          1. /conductor:assertions-to-tests  reads <spec>.assertions.md → assertions/manifest.yaml + RED tests = DONE-GATE
+            conductor gate lint ............ fail-closed lint of the gate's own quality (unpinned/weak tests)
             conductor gate freeze .......... snapshot + commit the gate (FROZEN; worker can't weaken it)
          2. /superpowers:writing-plans .... plan.md (phases → tasks)        [only if no plan yet]
          3. /conductor:issue-sync ......... GitHub milestone + phase issues + task sub-issues + labels
@@ -337,7 +338,7 @@ The `conductor` command (`bin/conductor`) fronts the Python modules.
 | `conductor preflight` | Static availability gate: every conducted skill resolves, else exit 1. |
 | `conductor authority preview <plan.md>` | Dry-run of unattended authority: prints, per phase of the plan, every privileged operation an unattended fire performs (branch, push, gh pr, merge, docker via `CONDUCTOR_MERGE_VERIFY`, subagents, file writes), each marked owner-required unless the session pre-authorizes it. |
 | `conductor merge-gate <pr>` | Autonomous merge safety gate (see below); exit 0 ok, 1 blocked. |
-| `conductor gate {freeze\|verify}` | Freeze the done-gate at setup / verify it is unchanged. The runner enforces this — see [Why the worker can't cheat the gate](#why-the-worker-cant-cheat-the-gate). |
+| `conductor gate {lint\|freeze\|verify}` | Lint the gate for mechanically-detectable weak-test patterns (unpinned commands, no negative clause, trivially-true asserts; fail-closed), then freeze it at setup / verify it is unchanged. Freeze also digests the `<spec>.assertions.md` source. The runner enforces this — see [Why the worker can't cheat the gate](#why-the-worker-cant-cheat-the-gate). |
 
 `conductor merge-gate` blocks a merge on any of: draft PR, merge state not `CLEAN`,
 mergeable not `MERGEABLE`, review decision `CHANGES_REQUESTED`, unresolved review threads,
