@@ -271,6 +271,25 @@ lines tagged `# conductor-autodev <main-root>` (the main-checkout root, identica
 run worktree and the owner checkout) — spec in
 [`experiments/E5-end-to-end/recovery.md`](experiments/E5-end-to-end/recovery.md).
 
+#### Unattended authority
+
+There is no conductor-specific permission command: an unattended run **inherits the
+permission mode of the session you launch `/conductor:start` in**. The permission decision
+is made once, at launch, on the same path you already use for every Claude session.
+
+- **Launch in bypass mode** (`claude --dangerously-skip-permissions`) and `start` warns you
+  about the standing blast radius — full access on every heartbeat, for the life of the run —
+  and requires you to acknowledge before it continues.
+- **Launch in a less-privileged mode** and `start` shows a dry-run (`conductor authority
+  preview`) naming the concrete privileged operations each phase performs (branch, push,
+  `gh pr`, merge, docker via `CONDUCTOR_MERGE_VERIFY`, subagents, file writes) and which of
+  them would need you. It then offers three ways forward: relaunch elevated, widen the
+  session allowlist, or proceed as-is knowing exactly which steps will wait for you.
+
+Safety floor either way: any `resume-env.sh` conductor writes (the Tier-B watchdog's env
+file) is mode `0600`, and the generated driver refuses to source one that is group- or
+world-writable.
+
 ### 4. Check in, resume, or stop
 
 - **Where is it?** Read the latest handoff in `.conductor/` (local resume scratch), or the
