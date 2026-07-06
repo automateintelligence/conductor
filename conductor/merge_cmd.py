@@ -74,6 +74,32 @@ def _pr_base(repo: str, pr: int, run: Any = subprocess.run) -> str:
     return base
 
 
+def _pr_head(repo: str, pr: int, run: Any = subprocess.run) -> str:
+    out = run(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(pr),
+            "-R",
+            repo,
+            "--json",
+            "headRefOid",
+            "-q",
+            ".headRefOid",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=_GH_TIMEOUT,
+    )
+    if out.returncode != 0:
+        raise RuntimeError(f"pr-head-lookup-failed: {(out.stderr or '').strip()}")
+    head = (out.stdout or "").strip()
+    if not head:
+        raise RuntimeError("pr-head-empty")
+    return head
+
+
 def merge(
     repo: str,
     pr: int,
@@ -88,6 +114,9 @@ def merge(
     try:
         base = _pr_base(repo, pr, run)
         default = _default_branch(repo, run)
+        head = _pr_head(
+            repo, pr, run
+        )  # bind the merge to the exact commit we gate (anti-TOCTOU)
     except Exception as exc:  # gh failure/timeout -> fail closed, never merge blind
         return {"ok": False, "merged": False, "blockers": [f"lookup-error: {exc}"]}
     if base == default and not allow_direct:
@@ -103,6 +132,9 @@ def merge(
     gate = check_fn(repo, pr, local_verify=local_verify)
     if not gate["ok"]:
         return {"ok": False, "merged": False, "blockers": gate["blockers"]}
+    # --match-head-commit binds the merge to the SHA we gated: if the PR head moved between the
+    # gate and here (a push in the TOCTOU window), GitHub rejects the merge instead of landing an
+    # ungated commit. never --squash, never --admin, never force.
     merged = run(
         [
             "gh",
@@ -112,7 +144,9 @@ def merge(
             "-R",
             repo,
             "--merge",
-        ],  # never --squash, never --admin
+            "--match-head-commit",
+            head,
+        ],
         capture_output=True,
         text=True,
         timeout=_GH_TIMEOUT,

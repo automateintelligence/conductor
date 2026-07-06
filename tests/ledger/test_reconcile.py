@@ -155,6 +155,19 @@ def test_green_with_progress_does_not_bump():
     assert not g.set_body.called  # genuine progress is not a failed attempt
 
 
+def test_green_no_progress_but_pr_merged_does_not_block():  # merged phase awaiting phase-done
+    g = _gh(
+        {"state": "open", "labels": ["status:in-progress"], "assignees": ["w"], "id": 1},
+        body="<!-- conductor-lease worker=w ts=100 --> <!-- conductor-attempts n=2 -->",
+    )
+    out = reconcile.reconcile(
+        "o/r", 1, tests_red=False, pr_merged=True, commits_since_baseline=0,
+        R=3, gh=g, now_ts=110, L=900,  # merged = succeeded, not stuck -> no no-progress bump
+    )
+    assert out["action"] == "none"
+    assert not g.set_body.called
+
+
 def test_commits_not_reported_never_blocks():  # fail-safe: -1 = unknown, never a false block
     g = _gh(
         {"state": "open", "labels": ["status:in-progress"], "assignees": ["w"], "id": 1},

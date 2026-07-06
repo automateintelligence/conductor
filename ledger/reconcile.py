@@ -56,8 +56,11 @@ def reconcile(
     #    `commits_since_baseline == -1` = "not reported" -> fail-safe: a caller that omits the
     #    count can NEVER be falsely blocked. Genuine progress (commits > 0, tests green) doesn't
     #    bump. The count is DURABLE (issue body), surviving fires and fresh worker contexts.
+    #    `pr_merged` guards ONLY the no-progress leg: a phase whose PR merged succeeded (it is
+    #    awaiting `phase-done`, not stuck), so a zero-commit fire on it must not count — but a
+    #    tests_red phase still counts regardless (unchanged behavior).
     if status == "status:in-progress" and st["assignees"] and (
-        tests_red or commits_since_baseline == 0
+        tests_red or (commits_since_baseline == 0 and not pr_merged)
     ):
         if claim.bump_attempts(repo, n, gh) >= R:
             reason = "retry-cap-exceeded" if tests_red else "no-progress-cap-exceeded"
