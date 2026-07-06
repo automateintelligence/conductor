@@ -27,6 +27,7 @@ import os
 import re
 import shlex
 import stat
+import subprocess
 import sys
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and
@@ -52,6 +53,104 @@ _OWNER_ENV_RE = re.compile(
     r"^\s*export\s+(CONDUCTOR_MERGE_VERIFY|CONDUCTOR_PLUGIN_DIRS|DOCKER_HOST|CONDUCTOR_RESUME_CLAUDE_FLAGS)\b",
     re.MULTILINE,
 )
+
+
+def main_root(path: str) -> str:
+    """The MAIN-checkout root for any path inside the repo: dirname of
+    `git rev-parse --path-format=absolute --git-common-dir`. IDENTICAL whether computed
+    from the owner checkout or a linked run worktree (`--show-toplevel` is NOT — it
+    returns the worktree path there, so install and removal would disagree)."""
+    common = subprocess.run(
+        [
+            "git",
+            "-C",
+            path,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    ).stdout.strip()
+    return os.path.dirname(common)
+
+
+def cron_marker(root: str) -> str:
+    """The literal crontab tag for one project's Tier-B lines. Computed ONCE here so
+    install (`install-cron`) and the autodev STOP-branch removal (`uninstall-cron`)
+    share one implementation and cannot drift."""
+    return f"# conductor-autodev {root}"
+
+
+class CrontabReadError(RuntimeError):
+    """`crontab -l` failed for a reason OTHER than 'no crontab for this user'. Treating a
+    read FAILURE as an empty crontab would make install/uninstall (which write the full
+    table back) silently destroy every pre-existing job — refuse loudly instead."""
+
+
+def _read_crontab() -> str:
+    """The current user crontab; a genuinely ABSENT crontab reads as empty. Locale is
+    pinned to C so the 'no crontab' absence message is stable; any other non-zero exit
+    (spool unreadable, cron misconfigured) raises CrontabReadError — fail-closed, never
+    mistake a read failure for emptiness."""
+    proc = subprocess.run(
+        ["crontab", "-l"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+    )
+    if proc.returncode == 0:
+        return proc.stdout
+    if "no crontab" in (proc.stderr or "").lower():
+        return ""
+    raise CrontabReadError(
+        f"crontab -l failed (rc={proc.returncode}): {(proc.stderr or '').strip()}"
+    )
+
+
+def _write_crontab(lines: list[str]) -> int:
+    """Replace the user crontab via `crontab -`."""
+    body = "\n".join(lines) + "\n" if lines else ""
+    proc = subprocess.run(["crontab", "-"], input=body, text=True, timeout=30)
+    return proc.returncode
+
+
+def _without_marker(lines: list[str], marker: str) -> list[str]:
+    """`grep -F -v -- <marker>` semantics: drop exactly the lines carrying this
+    project's marker as a fixed string; every other line survives byte-identical."""
+    return [ln for ln in lines if marker not in ln]
+
+
+def install_cron(project: str) -> int:
+    """Append the Tier-B `@reboot` + heartbeat crontab lines, tagged with this project's
+    marker. Idempotent: any line already carrying the marker is dropped first, so a
+    re-run rewrites exactly two marked lines and never duplicates them. The script path
+    is shell-quoted (a root with a space must not break the cron command); the marker
+    comment stays the literal unquoted `# conductor-autodev <root>` the removal greps."""
+    root = main_root(project)
+    marker = cron_marker(root)
+    script = shlex.quote(f"{root}/.conductor/resume-autodev.sh")
+    lines = _without_marker(_read_crontab().splitlines(), marker)
+    lines.append(f"@reboot sleep 30 && {script} {marker}")
+    lines.append(f"*/20 * * * * {script} {marker}")
+    return _write_crontab(lines)
+
+
+def uninstall_cron(project: str) -> int:
+    """Remove exactly the lines carrying this project's marker — the same
+    cron_marker(main_root(...)) install used, so removal always matches install. A
+    crontab with no marked lines (including no crontab at all) is a true no-op:
+    nothing is written."""
+    root = main_root(project)
+    marker = cron_marker(root)
+    lines = _read_crontab().splitlines()
+    kept = _without_marker(lines, marker)
+    if kept == lines:
+        return 0
+    return _write_crontab(kept)
 
 
 def render(project: str, worktree: str) -> str:
@@ -350,7 +449,30 @@ def main(argv: list[str] | None = None) -> int:
             sp.add_argument(
                 "--script", required=True, help="installed driver to verify"
             )
+    for name in ("install-cron", "uninstall-cron"):
+        sp = sub.add_parser(name)
+        sp.add_argument(
+            "--project",
+            required=True,
+            help="any path inside the repo; the marker root is dirname(--git-common-dir)",
+        )
     args = p.parse_args(argv)
+    if args.cmd in ("install-cron", "uninstall-cron"):
+        fn = install_cron if args.cmd == "install-cron" else uninstall_cron
+        try:
+            return fn(args.project)
+        except subprocess.CalledProcessError as e:
+            # main_root on a non-repo path: name the failure, never traceback.
+            detail = (e.stderr or "").strip()
+            print(
+                f"cannot resolve main root for {args.project}: "
+                f"{detail or e}",
+                file=sys.stderr,
+            )
+            return 1
+        except CrontabReadError as e:
+            print(str(e), file=sys.stderr)
+            return 1
     if args.cmd == "write":
         return _write(args.project, args.worktree, args.out, args.force)
     ok, reasons = verify(args.project, args.worktree, args.script)

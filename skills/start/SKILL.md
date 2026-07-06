@@ -112,14 +112,20 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    **heartbeat**: `CronCreate` fires **only while the REPL is idle**, so a tick never overlaps a
    running fire — it no-ops until the current phase finishes, so the interval need not match phase
    duration.
-   **VERIFY durability — do not trust the flag.** Current CLI builds silently ignore
-   `durable: true`: the response says "Session-only (not written to disk…)" and no
-   `scheduled_tasks.json` appears (verified live 2026-07-02). If the response does NOT confirm
-   persistence, the loop dies with the terminal — for an unattended run, **install the Tier-B OS
-   fallback NOW; do not merely warn the user**:
-   - **GENERATE the resume driver mechanically — never hand-write it.** `conductor resume-script
-     write --project <main-root> --worktree <run-worktree> --out <main-root>/.conductor/resume-autodev.sh`
-     (`<main-root>` = the crontab-marker path below; `<run-worktree>` = step 5b's worktree). The
+   **Tier-B is the fail-closed DEFAULT for an unattended run — never a durability judgment
+   call.** Current CLI builds silently ignore `durable: true`: the response says "Session-only
+   (not written to disk…)" and no `scheduled_tasks.json` appears (verified live 2026-07-02). Do
+   NOT gate the OS fallback on judging that response — for an unattended run ALWAYS run
+   `conductor driver install --worktree <run-worktree>` (from the repo; project defaults to
+   `CONDUCTOR_HOME`/cwd), then `conductor driver status` to **verify durability** and surface
+   recent failed fires. `driver install` writes the resume script (via `conductor resume-script
+   write`, respecting its inline-owner-env no-clobber guard) AND the marker-tagged crontab lines
+   (via `install-cron`) in one tested step; `driver status` exits non-zero unless a durable
+   driver exists (crontab marker or a matching scheduled task) with a clean recent log tail.
+   - **The resume driver is GENERATED mechanically — never hand-write it.** (`conductor
+     resume-script write --project <main-root> --worktree <run-worktree> --out
+     <main-root>/.conductor/resume-autodev.sh` is exactly what `driver install` runs;
+     `<main-root>` = the crontab-marker path below; `<run-worktree>` = step 5b's worktree). The
      generated driver resolves the `claude` and `conductor` bins at RUN time (repairs cron's
      minimal PATH, then `command -v` with a stable-launcher fallback for claude and a
      newest-installed glob for conductor) and FAILS LOUD (`exit 3`, logs `driver-unresolved`) if
@@ -182,19 +188,25 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      upgrade). If verify reports `owner-env inline` (an older driver with `export
      CONDUCTOR_MERGE_VERIFY` etc. baked in), move those lines into `resume-env.sh` FIRST — `write`
      refuses to overwrite inline owner env without `--force`, so it can't be dropped silently.
-   - **Surface a stalled driver — silence was the original defect.** On reconcile, tail
-     `<main-root>/.conductor/resume-autodev.log`; if recent fires show `driver-unresolved` or
-     `fire-end rc=` non-zero (the generated driver logs both), WARN the owner loudly — the run has
-     been failing to make headless progress. (The driver already fails loud per-fire; this makes a
-     repeated failure visible at the next owner check-in instead of accumulating unnoticed.)
-   - add crontab entries carrying the LITERAL marker `# conductor-autodev <main-root>`, where
+   - **Surface a stalled driver — silence was the original defect.** On reconcile, run
+     `conductor driver status`: it exits non-zero when the durable driver is missing (printing
+     why, with the install command) or when recent fires in
+     `<main-root>/.conductor/resume-autodev.log` show `driver-unresolved` / `fire-end rc=`
+     non-zero (the generated driver logs both) — those offending log lines are NAMED verbatim.
+     On a non-zero status, WARN the owner loudly — the run has been failing to make
+     headless progress. (The driver already fails loud per-fire; the tested status command makes
+     a repeated failure visible at the next owner check-in instead of accumulating unnoticed.)
+   - the crontab entries carry the LITERAL marker `# conductor-autodev <main-root>`, where
      `<main-root>` is `$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")` —
      the MAIN checkout root, which is IDENTICAL whether computed from the owner checkout or the
      run worktree (`--show-toplevel` is NOT: it returns the worktree path there, so install and
-     removal would disagree). Removal greps for this exact fixed string. One `@reboot` line and
-     one periodic heartbeat (e.g. `*/20 * * * *`).
-   The marker tag is load-bearing: the autodev STOP branch removes exactly those lines when the
-   gate goes green (see `experiments/E5-end-to-end/recovery.md`).
+     removal would disagree). The marker is COMPUTED BY THE CLI — `conductor resume-script
+     install-cron` / `uninstall-cron` share the one implementation — never derived in prose.
+     Removal greps for this exact fixed string. One `@reboot` line and one periodic heartbeat
+     (`*/20 * * * *`).
+   The marker tag is load-bearing: the autodev STOP branch removes exactly those lines (via
+   `conductor resume-script uninstall-cron`) when the gate goes green (see
+   `experiments/E5-end-to-end/recovery.md`).
    **Tell the user one limit:** recurring in-session crons **auto-expire after 7 days** —
    re-invoke `/conductor:start` to extend a longer run (the Tier-B heartbeat does this itself).
    **Tell the user one gap:** when you resume from the owner's main checkout with a live session
