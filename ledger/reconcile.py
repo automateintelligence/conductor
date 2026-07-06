@@ -10,7 +10,7 @@ def reconcile(
     *,
     tests_red: bool,
     pr_merged: bool,
-    commits_since_baseline: int,  # reserved: Plan-4 §7 git-commits precedence leg; not yet consumed by any repair
+    commits_since_baseline: int = -1,  # commits the phase made THIS fire; -1 = not reported (fail-safe: no no-progress escalation)
     R: int,
     gh: Any,
     now_ts: int | None = None,
@@ -48,12 +48,23 @@ def reconcile(
             claim.reset_attempts(repo, n, gh)  # fresh owner -> fresh count (Codex #3)
             return repair("status:ready", "stale-lease-reclaim")
 
-    # 2. Retry cap (§6.1) — a LIVE owner's genuine repeated failures -> blocked. The attempt
-    #    count is DURABLE (issue body), so it survives across fires and fresh worker contexts;
-    #    this fire's still-red result counts as one failed attempt.
-    if tests_red and status == "status:in-progress" and st["assignees"]:
+    # 2. Retry / no-progress cap (§6.1) — a LIVE owner's phase that isn't ADVANCING -> blocked.
+    #    "Not advancing" = tests still red, OR this fire made zero commits while the phase stays
+    #    in-progress (`commits_since_baseline == 0`). The second leg closes the green-but-
+    #    unmergeable infinite loop (review B-2): a phase that can't merge is fired forever making
+    #    no progress and was never counted, because the old cap only saw `tests_red`.
+    #    `commits_since_baseline == -1` = "not reported" -> fail-safe: a caller that omits the
+    #    count can NEVER be falsely blocked. Genuine progress (commits > 0, tests green) doesn't
+    #    bump. The count is DURABLE (issue body), surviving fires and fresh worker contexts.
+    #    `pr_merged` guards ONLY the no-progress leg: a phase whose PR merged succeeded (it is
+    #    awaiting `phase-done`, not stuck), so a zero-commit fire on it must not count — but a
+    #    tests_red phase still counts regardless (unchanged behavior).
+    if status == "status:in-progress" and st["assignees"] and (
+        tests_red or (commits_since_baseline == 0 and not pr_merged)
+    ):
         if claim.bump_attempts(repo, n, gh) >= R:
-            return repair("status:blocked", "retry-cap-exceeded")
+            reason = "retry-cap-exceeded" if tests_red else "no-progress-cap-exceeded"
+            return repair("status:blocked", reason)
 
     # 3. done/closed but tests red -> reopen -> in-progress.
     if (status == "status:done" or closed) and tests_red:

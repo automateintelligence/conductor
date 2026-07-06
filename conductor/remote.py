@@ -20,6 +20,9 @@ def resolve() -> str:
 
 
 def main() -> int:
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+        print("usage: conductor remote — print the git remote pointing at this repo (workers use\nthis instead of assuming 'origin'; many repos are 'github'). Falls back to 'origin'.")
+        return 0
     try:
         print(resolve())
     except (

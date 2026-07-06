@@ -42,16 +42,19 @@ step 3b's terminal crontab removal.
    escalated — never left to accumulate for the owner's final review. If the merge brought
    changes, re-run `conductor assert run --level spec` before proceeding: gate-green must mean
    green against CURRENT reality, not day-1 reality.
-2. **RECONCILE (precedence git/tests > PR > label).** `conductor ledger reconcile <n> --from-gate`
-   — test state is **derived** from `assertions/run/results.json` via the issue's
-   `conductor-assertions` marker; never hand-report `--tests-red` (worker-reported truth decays).
-   Run `conductor assert run --level spec` first so results.json is fresh. A closed
-   `status:done` phase whose gate is green is **terminal** — reconcile leaves it closed even
-   without PR state (git/tests > PR); pass `--pr-merged` only when you have verified it.
-   The per-phase retry count is **durable** (issue body) and maintained by reconcile itself: a
-   still-red live-owned phase is counted, and at the cap `retry-cap-exceeded` → `status:blocked`
-   (escalates — a genuinely failing phase stops instead of looping every fire); `stale-lease-reclaim`
-   resets it. PROGRESS SELF-CHECK.
+2. **RECONCILE (precedence git/tests > PR > label).** `conductor ledger reconcile <n> --from-gate
+   --commits <k>` where `<k>` = commits this phase branch gained THIS fire (0 if the fire made
+   none) — reconcile's no-progress leg needs it, and omitting it is fail-safe (defaults to
+   "not reported", never a false block). Test state is **derived** from
+   `assertions/run/results.json` via the issue's `conductor-assertions` marker; never hand-report
+   `--tests-red` (worker-reported truth decays). Run `conductor assert run --level spec` first so
+   results.json is fresh. A closed `status:done` phase whose gate is green is **terminal** —
+   reconcile leaves it closed even without PR state (git/tests > PR); pass `--pr-merged` only when
+   you have verified it. The per-phase retry count is **durable** (issue body) and maintained by
+   reconcile itself — this IS the PROGRESS SELF-CHECK, mechanized: a still-red OR making-no-progress
+   (`--commits 0`) live-owned phase is counted, and at the cap → `status:blocked`
+   (`retry-cap-exceeded` when red, `no-progress-cap-exceeded` when green-but-stuck — the latter
+   stops a phase that can't merge from looping forever); `stale-lease-reclaim` resets it.
 3. **SPEC-DONE GATE.** `conductor assert run --level spec` (fail-closed; unrunnable = NOT done).
    **All green AND no plans left** → the run is complete:
    **3a. OPEN THE FINAL OWNER PR (run topology only — skip when no run branch is configured).**
@@ -132,10 +135,13 @@ step 3b's terminal crontab removal.
       merge-gate enforces both: `CONDUCTOR_MIN_REVIEWS` marker comments and review-of-final-state —
       the fallback satisfies them by running the SAME independent review rounds on the final diff,
       on `/code-review` instead of Codex.
-   7. **merge INTO THE RUN BRANCH, ONLY if `conductor merge-gate <pr>` returns ok** (§6.2).
-      Then `gh pr merge --merge` (no squash), or `--merge --auto` if a merge queue is
-      configured. Gate blocks → resolve (e.g. rebase the PHASE branch on `merge-state:BEHIND`)
-      or escalate; **never force-merge**. Then `git checkout <run-branch> && git pull`.
+   7. **merge INTO THE RUN BRANCH with `conductor merge <pr>`** (§6.2) — the ONE merge command:
+      it runs `merge-gate` and performs `gh pr merge --merge` (no squash) only if the gate is ok,
+      and refuses `base=default` so the final owner PR can never be auto-merged. **Never run raw
+      `gh pr merge`** (that bypasses the gate — the whole point). Gate blocks → `conductor merge`
+      exits non-zero and prints the blockers; resolve (e.g. rebase the PHASE branch on
+      `merge-state:BEHIND`) or escalate; **never force-merge**. Then `git checkout <run-branch> &&
+      git pull`.
    8. `/document-release`.
    Capture `baseline_revision..final_revision` (equal = did nothing). Respect the per-fire budget
    (checkpoint+handoff if exceeded).
