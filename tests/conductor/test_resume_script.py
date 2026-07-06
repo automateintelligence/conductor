@@ -294,6 +294,91 @@ def test_write_regenerates_clean_driver_without_force(tmp_path):
     assert out.read_text() == _render()
 
 
+# ---- env-file safety guard: never source a group- or world-writable resume-env.sh ----
+
+
+def test_render_guards_env_file_permissions_before_sourcing():
+    """Static contract: the guard (env-unsafe + exit 5) appears BEFORE the sourcing line,
+    and the sourcing is inside the guarded block, not a bare `[ -f ... ] && .`."""
+    s = _render()
+    assert "env-unsafe" in s
+    assert "exit 5" in s
+    guard_at = s.index("env-unsafe")
+    source_at = s.index('. "$ENV_FILE"')
+    assert guard_at < source_at
+    assert '[ -f "$PROJECT/.conductor/resume-env.sh" ] && .' not in s
+
+
+def _mk_env_harness(tmp):
+    """Mirror of the frozen A4 harness: stub claude/conductor in a temp HOME's .local/bin
+    (the driver's PATH repair puts it first, so the real bins can never fire)."""
+    project = tmp / "proj"
+    worktree = tmp / "wt"
+    home = tmp / "home"
+    bindir = home / ".local" / "bin"
+    for d in (project / ".conductor", worktree, bindir):
+        d.mkdir(parents=True)
+    fired = tmp / "fired"
+    claude = bindir / "claude"
+    claude.write_text(f"#!/bin/sh\ntouch {fired}\nexit 0\n")
+    os.chmod(claude, 0o755)
+    stub_conductor = bindir / "conductor"
+    stub_conductor.write_text("#!/bin/sh\nexit 1\n")  # gate not green -> proceed
+    os.chmod(stub_conductor, 0o755)
+    driver = project / ".conductor" / "resume-autodev.sh"
+    driver.write_text(rs.render(str(project), str(worktree)))
+    os.chmod(driver, 0o755)
+    return project, driver, home, fired
+
+
+def _fire_driver(driver, home):
+    env = {
+        "HOME": str(home),
+        "PATH": "/usr/bin:/bin",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+    }
+    return subprocess.run(
+        ["bash", str(driver)], env=env, capture_output=True, text=True, timeout=30
+    )
+
+
+@pytest.mark.parametrize("mode", [0o660, 0o606, 0o666])
+def test_driver_refuses_writable_env_file_loud_and_never_fires(tmp_path, mode):
+    project, driver, home, fired = _mk_env_harness(tmp_path)
+    env_file = project / ".conductor" / "resume-env.sh"
+    env_file.write_text('CONDUCTOR_RESUME_CLAUDE_FLAGS=""\n')
+    os.chmod(env_file, mode)
+    proc = _fire_driver(driver, home)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode != 0
+    assert "env-unsafe" in log
+    assert f"mode={mode:o}" in log
+    assert not fired.exists()
+    assert "fire-start" not in log
+
+
+def test_driver_proceeds_on_0600_env_file(tmp_path):
+    project, driver, home, fired = _mk_env_harness(tmp_path)
+    env_file = project / ".conductor" / "resume-env.sh"
+    env_file.write_text('CONDUCTOR_RESUME_CLAUDE_FLAGS=""\n')
+    os.chmod(env_file, 0o600)
+    proc = _fire_driver(driver, home)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert "env-unsafe" not in log
+    assert fired.exists()
+    assert "fire-start" in log
+    assert proc.returncode == 0
+
+
+def test_driver_proceeds_when_env_file_absent(tmp_path):
+    project, driver, home, fired = _mk_env_harness(tmp_path)
+    proc = _fire_driver(driver, home)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert "env-unsafe" not in log
+    assert fired.exists()
+    assert proc.returncode == 0
+
+
 def test_render_shell_escapes_paths():
     """A worktree path with a space/quote must not break or inject into the emitted shell."""
     nasty = "/home/u/pro j'x"
