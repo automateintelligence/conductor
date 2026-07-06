@@ -425,7 +425,7 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
   default (the frozen fixture uses `trunk`, so `echo main` hard-coding fails); resolution
   failure → exactly `main`, exit 0 (fail-open, NEVER empty).
 
-- [ ] **Task 5.1 — `conductor/branches.py` resolvers (TDD).** Read
+- [x] **Task 5.1 — `conductor/branches.py` resolvers (TDD).** Read
   `test_a10_default_branch.py` and `test_a11_run_branch_name.py` first. Failing unit tests in
   `tests/conductor/test_branches.py`, then implement:
 
@@ -458,7 +458,7 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
   `a10-default-branch-never-empty` and `a11-run-branch-name-deterministic` → PASS. Quality
   gate. Commit.
 
-- [ ] **Task 5.2 — skills call the resolvers (TDD against frozen A12).** Read
+- [x] **Task 5.2 — skills call the resolvers (TDD against frozen A12).** Read
   `test_a12_skills_call_resolvers.py` first. In `skills/start/SKILL.md` step 5b: replace
   "compute `conductor/run-<spec-slug>` from THIS spec's filename" with
   `RB="$(conductor run-branch name <spec>)"` then
@@ -474,7 +474,7 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
   `pytest tests/conductor/test_skill_outputs.py -v` and the manifest command for
   `a12-skills-call-the-resolvers` → PASS. Quality gate. Commit.
 
-- [ ] **Task 5.3 — merge-gate `topology-off:no-run_branch` line (review-verified — no frozen
+- [x] **Task 5.3 — merge-gate `topology-off:no-run_branch` line (review-verified — no frozen
   assertion; spec: "instead of silently disabling the base leg").** In
   `conductor/merge_gate.py`, where `_expected_base()` returns `None` because the
   `.conductor/run_branch` file is absent (and `CONDUCTOR_RUN_BRANCH` unset), emit one
