@@ -248,15 +248,28 @@ def _write(project: str, worktree: str, out: str | None, force: bool = False) ->
     return 0
 
 
-# The posture spellings the DRIVER's fire-start case recognizes — probe and driver must
-# agree, or write re-nudges an owner who already decided (training them to ignore it).
-_POSTURE_TOKENS = (
-    "--dangerously-skip-permissions",
-    "--permission-mode bypassPermissions",
-    "--permission-mode=bypassPermissions",
-    "--settings",
-)
 _FLAGS_VAR = "CONDUCTOR_RESUME_CLAUDE_FLAGS"
+
+
+def _posture_of(args: list[str]) -> str:
+    """The posture label for a parsed flags argv — the Python transliteration of the
+    DRIVER's exact-token fire-start derivation. Probe and driver must agree, or write
+    re-nudges an owner who already decided (training them to ignore it). Exact tokens,
+    never substrings; bypass wins over scoped."""
+    posture = "supervised"
+    prev = ""
+    for arg in args:
+        if arg in (
+            "--dangerously-skip-permissions",
+            "--permission-mode=bypassPermissions",
+        ) or (arg == "bypassPermissions" and prev == "--permission-mode"):
+            posture = "full-bypass"
+        elif (
+            arg == "--settings" or arg.startswith("--settings=")
+        ) and posture != "full-bypass":
+            posture = "scoped"
+        prev = arg
+    return posture
 
 
 def _posture_decided(env_path: str) -> bool:
@@ -287,7 +300,11 @@ def _posture_decided(env_path: str) -> bool:
                 final_value = None
     if final_value is None:
         return False
-    return any(tok in final_value for tok in _POSTURE_TOKENS)
+    try:
+        args = shlex.split(final_value)
+    except ValueError:  # malformed value — undecided, fail toward nudging
+        return False
+    return _posture_of(args) != "supervised"
 
 
 def main(argv: list[str] | None = None) -> int:

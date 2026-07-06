@@ -211,6 +211,24 @@ def test_write_nudge_ignores_comment_tail_on_empty_assignment(tmp_path, capsys):
     assert "unattended" in err
 
 
+@pytest.mark.parametrize(
+    "flags_line",
+    [
+        # posture-token SUBSTRINGS inside other tokens are not a decision — the probe
+        # mirrors the driver's exact-token derivation (which labels these supervised)
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--model foo--settings-bar"',
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--permission-mode=bypassPermissions-disabled"',
+    ],
+)
+def test_write_nudge_fires_on_posture_lookalike_tokens(tmp_path, capsys, flags_line):
+    """Probe/driver agreement: values the driver would label supervised (lookalike
+    substrings, not exact posture tokens) must NOT silence the nudge."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text(flags_line + "\n")
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" in err
+
+
 def test_render_preserves_the_three_guards():
     s = _render()
     assert "flock -n 9" in s  # (c) one fire at a time
