@@ -23,6 +23,7 @@ trap this spec exists to kill. Every assertion below is written to fail if the i
 - **A13 driver-status-nonzero-without-durable-driver** — silent-stall: the operator's health signal must be honest about absence.
 - **A14 driver-status-flags-recent-failed-fires** — silent-stall: the signal must also catch a driver that runs but keeps failing.
 - **A15 readme-authority-present-and-no-grant-leftover** — regression: the doc must describe the session-inherit model and never the removed `grant`.
+- **A16 gate-lint-flags-trivially-true-assertion** — integrity: a tautological frozen test (`assert True`) passes any implementation and hollows the gate.
 
 ## Deliberately not encoded
 
@@ -126,3 +127,9 @@ trap this spec exists to kill. Every assertion below is written to fail if the i
 - **Setup:** the USER-FACING docs after Phase 2 — `README.md`, `experiments/E5-end-to-end/recovery.md`, `skills/*/SKILL.md`. (This spec and its `.assertions.md` legitimately name the removed command to document its removal and are EXCLUDED from the check — else it self-references.)
 - **Observation:** README contains an "Unattended authority" section describing session-inherited posture (warning+acknowledgment / dry-run); none of the user-facing docs above contains `grant --scoped` or `grant --full`.
 - **Kind:** example.
+
+## A16 — gate-lint-flags-trivially-true-assertion
+- **Claim:** `conductor gate lint` flags an assertion test whose only assertion is trivially true (passes any implementation).
+- **Setup:** two assertion test files — one whose body is `assert True` (or a bare non-empty literal / `assert 1`), one that asserts against real behavior.
+- **Observation:** the trivially-true file → flagged (non-zero / named); the real-behavior file → not flagged for this reason. An unparseable test → flagged (fail-closed), never silently passed.
+- **Kind:** property.

@@ -97,13 +97,26 @@ undecided" rather than "resume-env.sh absent".
 ## Phase 4 — `conductor gate lint`: frozen-gate quality + integrity (review B-4)
 
 **Spec:** Add `conductor gate lint` (run at `/conductor:start` before `gate freeze`) that fails
-closed on a manifest command that could load an unfrozen conftest (requires the pinned
-`--noconftest` / `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` form) and flags an assertion test file with no
-negative ("must not contain") clause. Add a `gate freeze` contract-test needle so the freeze step
-cannot silently rot out of the skill. Extend `gate freeze`/`verify` to also hash `<spec>.assertions.md`.
+closed on the **mechanically-detectable** weak-frozen-test patterns — the subset a linter can catch
+without judgment:
+- a manifest command that could load an unfrozen conftest (requires the pinned `--noconftest` /
+  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` form);
+- an assertion test file with **no negative** ("must not contain" / `assertNot`-style) clause;
+- an assertion test with a **trivially-true** assertion (`assert True`, `assert 1`, a bare non-empty
+  literal) — a tautology that passes any implementation.
+
+Add a `gate freeze` contract-test needle so the freeze step cannot silently rot out of the skill.
+Extend `gate freeze`/`verify` to also hash `<spec>.assertions.md`.
+
+> **Boundary (deliberate):** `gate lint` catches only the mechanically-detectable holes above. The
+> judgment-requiring ones — a hard-coded value that tracks no source of truth, a `property` tested on
+> one case, an "X is used" check that only proves X exists — are caught by the **red-team step** in
+> `/conductor:assertions-to-tests` (shipped 0.6.1), not by the linter. Prose for what needs a mind;
+> mechanism for what a machine can see.
 
 - [ ] `gate lint` rejects an unpinned manifest command; accepts the pinned form
 - [ ] `gate lint` flags an assertion test with no negative clause
+- [ ] `gate lint` flags an assertion test with a trivially-true assertion
 - [ ] a `gate freeze` needle exists in the start contract test
 - [ ] `gate freeze`/`verify` covers `<spec>.assertions.md`
 
