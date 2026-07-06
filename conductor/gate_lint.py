@@ -199,14 +199,24 @@ def _has_negative_clause(tree: ast.AST) -> bool:
     return False
 
 
+def _is_trivially_true(test: ast.expr) -> bool:
+    """A bare truthy literal: `True`, `1`, a non-empty str/bytes, or a non-empty
+    container literal (`[1]`, `(1,)`, `{"x": 1}`, `{1}`) — tautologies that pass
+    any implementation."""
+    if isinstance(test, ast.Constant):
+        return bool(test.value)
+    if isinstance(test, (ast.List, ast.Tuple, ast.Set)):
+        return bool(test.elts)
+    if isinstance(test, ast.Dict):
+        return bool(test.keys)
+    return False
+
+
 def _trivial_assert_lines(tree: ast.AST) -> list[int]:
-    """Lines of `assert <bare truthy constant>` — tautologies passing any product."""
     return [
         node.lineno
         for node in ast.walk(tree)
-        if isinstance(node, ast.Assert)
-        and isinstance(node.test, ast.Constant)
-        and bool(node.test.value)
+        if isinstance(node, ast.Assert) and _is_trivially_true(node.test)
     ]
 
 

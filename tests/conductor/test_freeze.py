@@ -233,3 +233,12 @@ def test_goal_naming_spec_wins_over_other_assertion_files(tmp_path):
     other.write_text("changed\n")
     res = freeze.verify(manifest, baseline, str(tmp_path))
     assert res["ok"] is True
+
+
+def test_goal_named_spec_with_missing_assertions_source_fails_closed(tmp_path):
+    # codex review round 1: silently omitting the source reopens the integrity hole
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path)
+    (tmp_path / "docs" / "specs" / "fixture-spec.md.assertions.md").unlink()
+    with pytest.raises(Exception, match="missing-assertions-source"):
+        freeze.record(manifest, baseline, str(tmp_path))

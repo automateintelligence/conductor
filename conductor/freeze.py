@@ -109,6 +109,11 @@ class AmbiguousAssertionsSource(RuntimeError):
     """Multiple docs/specs/*.assertions.md and no goal names one — fail closed."""
 
 
+class MissingAssertionsSource(RuntimeError):
+    """The goal names a spec but its `.assertions.md` sibling is absent — fail
+    closed: freezing without the done-definition reopens the integrity hole."""
+
+
 def _assertions_source(repo_root: str) -> dict:
     """{relpath: sha256} for the human-authored `<spec>.assertions.md` — the
     done-DEFINITION, made tamper-evident alongside the manifest and test files.
@@ -129,7 +134,10 @@ def _assertions_source(repo_root: str) -> dict:
             path = os.path.join(repo_root, rel)
             if os.path.isfile(path):
                 return {rel: _sha256_file(path)}
-            return {}  # the goal identified a spec; its assertions file is absent
+            raise MissingAssertionsSource(
+                f"missing-assertions-source: the goal names "
+                f"{m.group(0)} but {rel} does not exist"
+            )
     matches = sorted(
         glob.glob(os.path.join(repo_root, "docs", "specs", "*.assertions.md"))
     )
@@ -235,7 +243,7 @@ def main(argv: list | None = None) -> int:
     if cmd == "freeze":
         try:
             print(f"[GATE] froze done-gate baseline -> {record()}")
-        except AmbiguousAssertionsSource as exc:
+        except (AmbiguousAssertionsSource, MissingAssertionsSource) as exc:
             print(f"[GATE] {exc}", file=sys.stderr)
             return 1
         return 0

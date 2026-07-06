@@ -325,3 +325,21 @@ def test_gate_lint_dispatch_through_bin_conductor(tmp_path):
     )
     assert proc.returncode != 0
     assert "unpinned" in (proc.stdout + proc.stderr).lower()
+
+
+def test_trivial_nonempty_container_literals_are_flagged(tmp_path):
+    # codex review round 1: bare truthy containers are literals too
+    for i, stmt in enumerate(
+        ["assert [1]", "assert (1,)", 'assert {"x": 1}', "assert {1}"]
+    ):
+        body = f"def test_x():\n    assert 'ERROR' not in 'ok'\n    {stmt}\n"
+        proj = _mk_project(tmp_path / f"case-{i}", PINNED, body=body)
+        joined = "\n".join(_lint(proj))
+        assert "trivially-true" in joined.lower(), stmt
+
+
+def test_empty_container_literal_is_not_flagged_trivially_true(tmp_path):
+    # `assert []` is always FALSE — a broken test, not a tautology; pytest reports it
+    body = "def test_x():\n    assert 'ERROR' not in 'ok'\n    assert 'ok' in 'ok'\n"
+    proj = _mk_project(tmp_path, PINNED, body=body)
+    assert "trivial" not in "\n".join(_lint(proj)).lower()
