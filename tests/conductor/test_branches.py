@@ -73,6 +73,27 @@ def test_degenerate_stem_falls_back_to_hash_slug():
     assert name != branches.run_branch_name("specs/....md")
 
 
+def test_interior_dot_runs_collapse_to_one_dot():
+    # git check-ref-format rejects ".." inside a ref component
+    name = branches.run_branch_name("specs/a..b.md")
+    assert name == "conductor/run-a.b"
+    assert ".." not in name
+    proc = subprocess.run(
+        ["git", "check-ref-format", f"refs/heads/{name}"], capture_output=True
+    )
+    assert proc.returncode == 0, name
+
+
+def test_dot_lock_suffix_falls_back_to_hash_slug():
+    # git check-ref-format rejects a ref component ending in ".lock"
+    name = branches.run_branch_name("specs/deps.lock.md")
+    assert re.fullmatch(r"conductor/run-spec-[0-9a-f]{8}", name), name
+    proc = subprocess.run(
+        ["git", "check-ref-format", f"refs/heads/{name}"], capture_output=True
+    )
+    assert proc.returncode == 0, name
+
+
 def test_non_alnum_leading_stem_falls_back_to_hash_slug():
     name = branches.run_branch_name("specs/-x-.md")
     # ".strip('-.')" leaves "x" here; a stem like "__" (strips to nothing after

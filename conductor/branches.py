@@ -32,12 +32,13 @@ def run_branch_name(spec_path: str) -> str:
 
     Slug = the spec filename's stem, lowercased, non-`[a-z0-9._-]` runs collapsed to one
     hyphen, then stripped of leading/trailing `-`/`.` so the result is a valid ref segment
-    matching `[a-z0-9][a-z0-9._-]*`. A stem that strips to nothing (or can't start with an
-    alphanumeric) falls back to a deterministic `spec-<sha256[:8]>` of the full path —
-    still unique per spec, never an invalid ref."""
+    matching `[a-z0-9][a-z0-9._-]*`. Dot runs collapse to one dot (git rejects `..` inside a
+    ref). A stem that strips to nothing, can't start with an alphanumeric, or would end the
+    ref component in `.lock` (also git-rejected) falls back to a deterministic
+    `spec-<sha256[:8]>` of the full path — still unique per spec, never an invalid ref."""
     stem = pathlib.PurePath(spec_path).stem.lower()
-    slug = re.sub(r"[^a-z0-9._-]+", "-", stem).strip("-.")
-    if not slug or not re.match(r"[a-z0-9]", slug):
+    slug = re.sub(r"\.{2,}", ".", re.sub(r"[^a-z0-9._-]+", "-", stem)).strip("-.")
+    if not slug or not re.match(r"[a-z0-9]", slug) or slug.endswith(".lock"):
         slug = "spec-" + hashlib.sha256(spec_path.encode()).hexdigest()[:8]
     return f"conductor/run-{slug}"
 
