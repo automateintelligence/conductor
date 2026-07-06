@@ -28,12 +28,15 @@ step 3b's terminal crontab removal.
 1. **RE-LOAD GOAL (fresh context).** Done only when `conductor assert run --level spec` exits 0.
    Re-read goal + paths from the durable handoff/ledger; trust git/issues, not memory. Read the
    run branch from `<project>/.conductor/run_branch`; file missing → recompute the EXACT name
-   `conductor/run-<spec-slug>` from the goal's spec path and check `git ls-remote origin
-   refs/heads/<that name>` — present → rewrite the file (fresh-clone reconcile); absent while
-   the goal says topology is configured → HALT and escalate (never fall back to a wildcard
-   scan or to direct default-branch merges).
+   `conductor/run-<spec-slug>` from the goal's spec path and check `git ls-remote "$(conductor
+   remote)" refs/heads/<that name>` — present → rewrite the file (fresh-clone reconcile); absent
+   while the goal says topology is configured → HALT and escalate (never fall back to a wildcard
+   scan or to direct default-branch merges). **Resolve the remote with `conductor remote`, never
+   assume `origin`** — it derives the remote from the repo URL (many repos use `github`), matching
+   what `merge-gate` uses; a hardcoded `origin` fails the fetch/merge on those repos.
 1b. **KEEP THE RUN BRANCH CURRENT (every fire, before anything else builds).** On the run
-   branch: `git fetch origin <default> && git merge origin/<default>` (MERGE, never rebase — a
+   branch, with `R="$(conductor remote)"`: `git fetch "$R" <default> && git merge "$R"/<default>`
+   (MERGE, never rebase — a
    shared integration branch's history is load-bearing; phase branches may rebase, the run
    branch never does). Conflicts get resolved NOW, by you, in this small increment — or
    escalated — never left to accumulate for the owner's final review. If the merge brought

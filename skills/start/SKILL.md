@@ -110,14 +110,48 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    `scheduled_tasks.json` appears (verified live 2026-07-02). If the response does NOT confirm
    persistence, the loop dies with the terminal — for an unattended run, **install the Tier-B OS
    fallback NOW; do not merely warn the user**:
-   - write a resume script that runs `claude -p "/conductor:autodev"` from the RUN WORKTREE
-     (step 5b — never the owner's checkout; autodev, not start — a headless one-shot session
-     must do a phase, not register a cron that dies with it) and, in order: (a) **exits if any
-     claude process is already running with cwd inside the worktree or project** — the live
-     terminal's in-session cron is then the sole driver, so the two drivers can never
-     double-fire; (b) **exits once `conductor assert run --level spec` is green** — a finished
-     run gets no-op fires; (c) holds `flock -n <project>/.conductor/resume.lock` for the whole
-     fire — no overlapping headless sessions;
+   - **GENERATE the resume driver mechanically — never hand-write it.** `conductor resume-script
+     write --project <main-root> --worktree <run-worktree> --out <main-root>/.conductor/resume-autodev.sh`
+     (`<main-root>` = the crontab-marker path below; `<run-worktree>` = step 5b's worktree). The
+     generated driver resolves the `claude` and `conductor` bins at RUN time (repairs cron's
+     minimal PATH, then `command -v` with a stable-launcher fallback for claude and a
+     newest-installed glob for conductor) and FAILS LOUD (`exit 3`, logs `driver-unresolved`) if
+     either can't resolve — so a claude/node/plugin upgrade cannot silently rot it the way a
+     hand-written generation-time-pinned path did (live-run silent stall 2026-07-05, see
+     `docs/reviews/2026-07-05-conductor-tier-b-driver-robustness.md`). It fires `claude -p
+     "/conductor:autodev"` from the RUN WORKTREE (never the owner's checkout; autodev, not start —
+     a headless one-shot must do a phase, not register a cron that dies with it), guarding: (a)
+     exit if a claude process already holds the worktree/project cwd (never double-drive); (b)
+     exit once `conductor assert run --level spec` is green; (c) `flock -n
+     <project>/.conductor/resume.lock` for the whole fire.
+   - **Machine/run-specific env goes in `<main-root>/.conductor/resume-env.sh`** (gitignored),
+     which the driver sources — NEVER inline in the driver, so regeneration can't clobber it. Put
+     the owner-owned `CONDUCTOR_MERGE_VERIFY` there (plus any dev-mode `CONDUCTOR_PLUGIN_DIRS` or
+     `DOCKER_HOST`). Do NOT set `CONDUCTOR_RUN_BRANCH` — the CLI reads `.conductor/run_branch`, the
+     single source of truth; a stale literal would override it.
+   - **UNATTENDED PERMISSIONS — the owner's explicit call, never defaulted.** An autonomous phase
+     runs `gh` PR create/merge, `git push`, docker, broad edits, and subagents. A headless `claude
+     -p` session can't answer permission prompts, so if the run worktree doesn't pre-authorize
+     those, an unattended Tier-B fire **stalls on the first prompt** — a permission-flavored variant
+     of the same silent-stall class. The driver fires with `${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}`
+     (default EMPTY = supervised only) — it never bakes a bypass. **Surface this to the owner and
+     let them choose** how the unattended run gets authority in `resume-env.sh`: (a) least-privilege
+     — point claude at a scoped `settings.json` allowlist (git/gh/pytest/ruff/pyright/conductor/docker);
+     or (b) full autonomy — `CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"`, and say
+     plainly that this is a **standing** posture (a full-access agent firing every heartbeat, not a
+     one-shot). Default (neither) = the run only progresses while a supervised session is open.
+   - **RECONCILE is verify-first: SKIP the driver only if it still verifies.** `conductor
+     resume-script verify --project <main-root> --worktree <run-worktree> --script <path>` exits 0
+     when current; non-zero means the template changed or the installed driver is an older
+     pinned-path format → regenerate with `write` (this is how a resumed run self-heals after an
+     upgrade). If verify reports `owner-env inline` (an older driver with `export
+     CONDUCTOR_MERGE_VERIFY` etc. baked in), move those lines into `resume-env.sh` FIRST — `write`
+     refuses to overwrite inline owner env without `--force`, so it can't be dropped silently.
+   - **Surface a stalled driver — silence was the original defect.** On reconcile, tail
+     `<main-root>/.conductor/resume-autodev.log`; if recent fires show `driver-unresolved` or
+     `fire-end rc=` non-zero (the generated driver logs both), WARN the owner loudly — the run has
+     been failing to make headless progress. (The driver already fails loud per-fire; this makes a
+     repeated failure visible at the next owner check-in instead of accumulating unnoticed.)
    - add crontab entries carrying the LITERAL marker `# conductor-autodev <main-root>`, where
      `<main-root>` is `$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")` —
      the MAIN checkout root, which is IDENTICAL whether computed from the owner checkout or the
@@ -128,6 +162,10 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    gate goes green (see `experiments/E5-end-to-end/recovery.md`).
    **Tell the user one limit:** recurring in-session crons **auto-expire after 7 days** —
    re-invoke `/conductor:start` to extend a longer run (the Tier-B heartbeat does this itself).
+   **Tell the user one gap:** when you resume from the owner's main checkout with a live session
+   open, the Tier-B driver's guard (a) no-ops on every fire (a claude process holds the cwd), so
+   the run makes **zero headless progress until this session goes idle or closes**. Say so
+   explicitly rather than leaving the owner to assume it is progressing.
 7. **(Phase 2 only)** start the dispatcher loop — the supervisor that caps concurrency and assigns
    eligible phases to parallel workers. Single-loop needs no cap (`CronCreate` can't overlap fires);
    controlled parallelism is the dispatcher's job, not the cron cadence.
