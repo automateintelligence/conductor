@@ -95,17 +95,23 @@ def preview(plan_text: str) -> str:
         raise ValueError("no phases found in plan — nothing to preview")
     lines = [
         "Unattended authority preview — the privileged operations each unattended",
-        "autodev fire performs, per phase. In a non-bypass session, any of these the",
-        "session's permission mode does not pre-authorize will PROMPT — a headless fire",
-        "cannot answer, so that phase stalls until the owner is present.",
+        "autodev fire performs, per phase. Promptability cannot be introspected from",
+        "the plan alone, so FAIL-CLOSED every op below is marked owner-required: in a",
+        "non-bypass session it PROMPTS unless the session's own permission config",
+        "pre-authorizes it — a headless fire cannot answer, so that phase stalls until",
+        "the owner is present.",
     ]
     for phase in plan["phases"]:
         lines.append("")
         lines.append(f"{phase['title']}:")
         for op in sorted(RECIPE_PRIVILEGED_OPS):
-            lines.append(f"  - {op}")
+            lines.append(
+                f"  - {op} — [owner-required: prompts unless the session pre-authorizes it]"
+            )
     lines += [
         "",
+        "Every op above is marked owner-required/manual because promptability cannot be",
+        "introspected from the plan; a bypass session pre-authorizes all of them.",
         "Options: elevate (relaunch the session in bypass mode — you will be warned and",
         "asked to acknowledge), widen the session's own allowlist to cover the operations",
         "above, or proceed knowing exactly which steps will need you.",

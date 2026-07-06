@@ -145,7 +145,11 @@ done
 # is EMPTY (supervised only): a full-access agent firing every heartbeat is a standing security
 # posture, so the owner opts in explicitly, never the generator.
 printf '%s fire-start\\n' "$(ts)" >> "$LOG"
-"$CLAUDE_BIN" -p "/conductor:autodev" ${{CONDUCTOR_RESUME_CLAUDE_FLAGS:-}} >> "$LOG" 2>&1
+# Re-parse the owner's flags with THEIR OWN quoting (a bare unquoted expansion would word-split
+# a quoted `--settings '/path with space'` into fragments). eval adds no new trust surface here:
+# resume-env.sh is already sourced — i.e. executed — owner-owned, 0600-guarded content.
+eval "set -- ${{CONDUCTOR_RESUME_CLAUDE_FLAGS:-}}"
+"$CLAUDE_BIN" -p "/conductor:autodev" "$@" >> "$LOG" 2>&1
 rc=$?
 printf '%s fire-end rc=%s\\n' "$(ts)" "$rc" >> "$LOG"
 exit "$rc"

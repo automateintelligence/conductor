@@ -76,8 +76,20 @@ def test_render_never_bakes_a_permission_bypass():
     assert len(fire) == 1
     assert "--dangerously-skip-permissions" not in fire[0]
     assert "bypassPermissions" not in fire[0]
-    # the opt-in hook IS present (empty default), so an owner can enable it from resume-env.sh
-    assert "${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}" in fire[0]
+    # the fire consumes the owner's flags as re-parsed positional args, quoting preserved
+    assert '"$@"' in fire[0]
+    # the opt-in hook IS present (empty default) on the eval/set-- line feeding the fire,
+    # so an owner can enable it from resume-env.sh
+    evals = [
+        ln
+        for ln in s.splitlines()
+        if ln.strip().startswith("eval") and "${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}" in ln
+    ]
+    assert len(evals) == 1
+    # no bypass flag baked anywhere outside comments
+    for ln in s.splitlines():
+        if not ln.strip().startswith("#"):
+            assert "--dangerously-skip-permissions" not in ln
 
 
 def test_write_nudges_owner_about_unattended_permissions(tmp_path, capsys):
@@ -377,6 +389,36 @@ def test_driver_proceeds_when_env_file_absent(tmp_path):
     assert "env-unsafe" not in log
     assert fired.exists()
     assert proc.returncode == 0
+
+
+def test_driver_preserves_quoted_flag_values_with_spaces(tmp_path):
+    """A quoted `--settings '/path with space'` in CONDUCTOR_RESUME_CLAUDE_FLAGS must reach
+    claude as exactly TWO argv words (the owner's own quoting re-parsed), never word-split
+    into four fragments by a bare unquoted expansion."""
+    project, driver, home, _fired = _mk_env_harness(tmp_path)
+    argv_file = tmp_path / "argv"
+    claude = home / ".local" / "bin" / "claude"
+    claude.write_text(
+        f'#!/bin/sh\nfor a in "$@"; do printf \'%s\\n\' "$a"; done > "{argv_file}"\n'
+    )
+    os.chmod(claude, 0o755)
+    env_file = project / ".conductor" / "resume-env.sh"
+    env_file.write_text(
+        "CONDUCTOR_RESUME_CLAUDE_FLAGS=\"--settings '/tmp/space path/settings.json'\"\n"
+    )
+    os.chmod(env_file, 0o600)
+    proc = _fire_driver(driver, home)
+    assert proc.returncode == 0
+    argv = argv_file.read_text().splitlines()
+    assert argv == [
+        "-p",
+        "/conductor:autodev",
+        "--settings",
+        "/tmp/space path/settings.json",
+    ]
+    # negative: the word-split fragments must not appear as argv entries
+    assert "'/tmp/space" not in argv
+    assert "path/settings.json'" not in argv
 
 
 def test_render_shell_escapes_paths():

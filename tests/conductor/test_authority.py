@@ -206,6 +206,21 @@ def test_preview_lists_every_op_under_every_phase():
     assert "prompt" in low
 
 
+def test_preview_annotates_every_op_line_owner_required():
+    """Fail-closed: promptability cannot be introspected from the plan alone, so EVERY
+    per-op line carries the owner-required intervention annotation appended AFTER the
+    verbatim op text — never a bare, unannotated op line."""
+    out = authority.preview(PLAN)
+    op_lines = [ln for ln in out.splitlines() if ln.startswith("  - ")]
+    assert len(op_lines) == 2 * len(authority.RECIPE_PRIVILEGED_OPS)  # once per phase
+    for ln in op_lines:
+        assert "owner-required" in ln, f"unannotated op line: {ln!r}"
+    for op in sorted(authority.RECIPE_PRIVILEGED_OPS):
+        assert f"  - {op} — [owner-required" in out  # op verbatim, annotation appended
+        # negative: the bare op line without the annotation must not exist
+        assert f"  - {op}\n" not in out
+
+
 def test_preview_tracks_the_declared_set_not_a_literal(monkeypatch):
     """Drop-one simulation: shrinking the set must shrink the output — a hard-coded
     literal list would keep printing the dropped op."""
