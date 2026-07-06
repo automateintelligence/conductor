@@ -32,10 +32,20 @@ owner authorizes an unattended run without hand-authoring anything.
   that loads it, covering git/gh/pytest/ruff/pyright/conductor/docker. It is the default and the
   recommended path. The generated allowlist MUST reject blanket wildcards (`Bash(*)`, `Bash(*:*)`).
 - `conductor resume-script grant --full` writes `CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"`
-  but ONLY when an explicit `--i-understand-standing-full-access` token is also passed; without the
-  token it refuses (non-zero) and prints why.
+  but ONLY when an explicit `--i-understand-standing-full-access` token (a required, self-documenting
+  flag — a friction speed-bump, not a secret) is also passed; without the token it refuses (non-zero)
+  and prints why.
 - Any `resume-env.sh` the command creates is `chmod 0600`. The generated driver refuses to source a
   `resume-env.sh` that is group- or world-writable (fail loud, like `driver-unresolved`).
+- **How the owner reaches this decision (RECOMMENDED — open for owner confirmation):**
+  `/conductor:start` SURFACES the authority choice interactively in the owner's live session
+  (scoped is the default; full requires the confirm token) and invokes `grant` accordingly, so the
+  decision is on the documented path, not a command the owner must know to run. The headless
+  `/conductor:autodev` fires never prompt — authority is always granted at setup, ahead of the run.
+  This surfacing is agent-executed prose (interactive), so it is NOT a frozen assertion; the frozen
+  gate is the `grant` primitive below (A1). Alternatives considered: a standalone `grant` command
+  only (discoverability gap), or a `--full-auto` flag on `start` (bundles the dangerous choice into
+  setup) — both rejected in favor of surface-and-confirm.
 
 - [ ] `grant --scoped` writes both artifacts and names the loader flag
 - [ ] `grant --full` without the token refuses; with the token writes the bypass line
