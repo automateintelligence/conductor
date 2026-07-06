@@ -1,0 +1,113 @@
+{
+  "ids": {
+    "a1-authority-preview-covers-recipe-ops": {
+      "entry": "ed6031cbd8494ead9a6ccb5e0ad358669aa23c4e27ddeb27c20e2701ae3f726e",
+      "files": {
+        "assertions/self_enforcement/test_a01_authority_preview.py": "0c16474d252a6b89e0a57a80fba77b2d2c97234f76520ba1f22f9c059c5e76c5"
+      }
+    },
+    "a10-default-branch-never-empty": {
+      "entry": "2db0eb0e941648a14aec164de651e144c71d7ed6030b57a8878e4e3c97ef93c1",
+      "files": {
+        "assertions/self_enforcement/test_a10_default_branch.py": "e55a59693bc9d9d72c76bc2a3b22b387f0755bccbfaa5261ba6a03b982172059"
+      }
+    },
+    "a11-run-branch-name-deterministic": {
+      "entry": "2d18d7418c4863ef7eb60b8e703cef60f7c999d616dc97653d1a999fad7c4520",
+      "files": {
+        "assertions/self_enforcement/test_a11_run_branch_name.py": "8aaed7008028e9de5d3eb55b42b72aecc746c3a1dd8d8f71b239a2ba32349e0a"
+      }
+    },
+    "a12-skills-call-the-resolvers": {
+      "entry": "de9e268019c03bd7804871f0d4518d4037dcbe43ec0d1f6a66a2bf69ad5cba58",
+      "files": {
+        "assertions/self_enforcement/test_a12_skills_call_resolvers.py": "93f3d1b50975404fec0268f8bbfb0a2f236cead8c622754a7f2350927fead236"
+      }
+    },
+    "a13-driver-status-nonzero-without-driver": {
+      "entry": "d3ad7a8d45323f663c2fa75af5d6ddbbf6eaece10afe4cecab08010606d53171",
+      "files": {
+        "assertions/self_enforcement/test_a13_driver_status_durable.py": "8e6768f7e7d90c744d40f3ccd4295ee62839f7bfb34b95185ec2f7458e826628"
+      }
+    },
+    "a14-driver-status-flags-failed-fires": {
+      "entry": "3a4586475077695a6af77ca4c951df9ce7915026cecfd219046992b2075dd0da",
+      "files": {
+        "assertions/self_enforcement/test_a14_driver_status_failed_fires.py": "a15db7bf988f1c0373b1d1360507928c2e65035982ff43e0cf010340e1269f61"
+      }
+    },
+    "a15-readme-authority-no-grant-leftover": {
+      "entry": "dc4ade00ddc1636e0f371ddd7a118437cc497dcc5aa6660b565180fbe74f7896",
+      "files": {
+        "assertions/self_enforcement/test_a15_readme_authority.py": "be79b0ec81c1758bbd32311780c146c6ad9a31ebd9679fbffcb7ef49fa00623f"
+      }
+    },
+    "a16-gate-lint-flags-trivially-true": {
+      "entry": "a21a87b7ec3184b5176a8a5e1f2f069c0f3f9fbdc9f4feeedb72683271498855",
+      "files": {
+        "assertions/self_enforcement/test_a16_gate_lint_trivial.py": "675f247a83bd3d0caafdcefe4674bc96c79e104140cc2998e40e729560c5cdcd"
+      }
+    },
+    "a2-unknown-mode-resolves-least-privileged": {
+      "entry": "ab52496623f2a5a606249dfde2dc8529e1e78526e1fef371607cf6cb1ea75bd4",
+      "files": {
+        "assertions/self_enforcement/test_a02_posture_fail_closed.py": "3f7eb8f4ab784c27201e67e6010bab160bb0942bb67502336e48bbfc6f8665ac"
+      }
+    },
+    "a3-resume-env-mode-0600": {
+      "entry": "7b68a0517946bc8d1f01414316b6cf137a7cfff4e09de95892bb0cfaa701dc08",
+      "files": {
+        "assertions/self_enforcement/test_a03_resume_env_mode.py": "42bc981b833016b7602cdc7a86883c603d26b77ff8871298975670febe904ee0"
+      }
+    },
+    "a4-driver-refuses-writable-env": {
+      "entry": "6405f9e0f022fc0d9abc8beeecf2ddb459387d9bd252a27fba9a3588390a922e",
+      "files": {
+        "assertions/self_enforcement/test_a04_driver_refuses_writable_env.py": "05b530d45acd8b52d47e0cc0b8197a2f2f9272ef7f3f1ebeb98bb03088c26970"
+      }
+    },
+    "a5-posture-label-reflects-flags": {
+      "entry": "f9a8ac5450bdc94bbf18fb8bf66ed61d306266d7cb88ffce4eaac5fd8ada506e",
+      "files": {
+        "assertions/self_enforcement/test_a05_posture_label.py": "734c33b3ad80b3227b3d3f80775854ba97ef3dc06f74b7f28c2ae5c9cc28c371"
+      }
+    },
+    "a6-gate-lint-fail-closed-on-unpinned": {
+      "entry": "c16a44c489bb02fd978f1ed1e36ac55fbb449f02ce69b0dddb5047d9e4e8a123",
+      "files": {
+        "assertions/self_enforcement/test_a06_gate_lint_unpinned.py": "7109268aa98c2edc3292837b101eed615fbeee2603f17782e5cdc9adbab9072d"
+      }
+    },
+    "a7-gate-lint-flags-missing-negative": {
+      "entry": "5f91de0d2f0ca62fb585d4ecc84f4a6552d0b7512f67566b0405481257b57907",
+      "files": {
+        "assertions/self_enforcement/test_a07_gate_lint_negative_clause.py": "fa89d172cb94cb4c437bd6aa2812414e00e85b65ccd0b69e2d04b9b0c6ecf925"
+      }
+    },
+    "a8-gate-freeze-needle-present": {
+      "entry": "0d7a09ed720ed1353fce887e6954b3bcce88e83ffb2db5d44ee73acb6ba1e289",
+      "files": {
+        "assertions/self_enforcement/test_a08_freeze_needle.py": "9da3de82fe68fb07e4156b0d81ff8308a656d74ac26ea7290b393f9f85e00a0f"
+      }
+    },
+    "a9-freeze-covers-assertions-source": {
+      "entry": "6f04d4c505222fcf9a4116e380e7eff718d2d5b771e711c8b42c36bc4a681346",
+      "files": {
+        "assertions/self_enforcement/test_a09_freeze_covers_assertions_source.py": "5dc35d45d50ba1a740583e8be569a39a53d406942f2fb4af46ea50066c173054"
+      }
+    },
+    "answer-42": {
+      "entry": "8d75b6f0ffbd95ae7fc8a91d15ab3b83208fe912a83c2d4de20465109cee827d",
+      "files": {
+        "assertions/answer/test_answer.py": "29d03d588233bcd064b4fc34c062ad11a9e7b58df1e61bdf447898f3a3e9bacf"
+      }
+    },
+    "feature-shipped": {
+      "entry": "15012e6c7eba5d2744b4e8cea34919bf33a64a8f9fe7f1f69a1982d22040461e",
+      "files": {
+        "assertions/feature/test_feature.py": "3cfce85b72fa8eb431f9397f3ebfd8f50478d1763cf7d5b66895c91f7e4a747b"
+      }
+    }
+  },
+  "version": 1
+}

@@ -19,3 +19,132 @@ assertions:
     setup: ""
     timeout: 30
     level: spec
+  # --- docs/specs/2026-07-05-self-enforcement.md done-gate (A1-A16) ---
+  - id: a1-authority-preview-covers-recipe-ops
+    claim: "conductor authority preview emits every op in RECIPE_PRIVILEGED_OPS, which itself tracks the recipe's privileged verbs"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a01_authority_preview.py"
+    setup: ""
+    teardown: ""
+    timeout: 60
+    level: spec
+    kind: property
+  - id: a2-unknown-mode-resolves-least-privileged
+    claim: "resolve_posture maps unknown/unreadable/ambiguous session modes to supervised, never to a bypass posture"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a02_posture_fail_closed.py"
+    setup: ""
+    teardown: ""
+    timeout: 60
+    level: spec
+    kind: property
+  - id: a3-resume-env-mode-0600
+    claim: "any resume-env.sh the tool writes is created mode 0600 with zero group/other bits"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a03_resume_env_mode.py"
+    setup: ""
+    teardown: ""
+    timeout: 60
+    level: spec
+    kind: property
+  - id: a4-driver-refuses-writable-env
+    claim: "the generated driver refuses (loud, non-zero, no fire) a group- or world-writable resume-env.sh and proceeds on 0600"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a04_driver_refuses_writable_env.py"
+    setup: ""
+    teardown: ""
+    timeout: 120
+    level: spec
+    kind: property
+  - id: a5-posture-label-reflects-flags
+    claim: "the driver logs posture=full-bypass|scoped|supervised derived from the configured flags, leaking neither flag nor settings path"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a05_posture_label.py"
+    setup: ""
+    teardown: ""
+    timeout: 120
+    level: spec
+    kind: property
+  - id: a6-gate-lint-fail-closed-on-unpinned
+    claim: "gate lint rejects (naming it) any manifest command short of the pinned standalone form; accepts the pinned form; fail-closed on unparseable"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a06_gate_lint_unpinned.py"
+    setup: ""
+    teardown: ""
+    timeout: 120
+    level: spec
+    kind: property
+  - id: a7-gate-lint-flags-missing-negative
+    claim: "gate lint flags an assertion test file with no negative clause and passes one that has it"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a07_gate_lint_negative_clause.py"
+    setup: ""
+    teardown: ""
+    timeout: 120
+    level: spec
+    kind: property
+  - id: a8-gate-freeze-needle-present
+    claim: "the start contract test carries an active 'gate freeze' needle and the start skill still satisfies it"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a08_freeze_needle.py"
+    setup: ""
+    teardown: ""
+    timeout: 30
+    level: spec
+    kind: contract
+  - id: a9-freeze-covers-assertions-source
+    claim: "gate freeze digests <spec>.assertions.md and gate verify trips after that file changes"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a09_freeze_covers_assertions_source.py"
+    setup: ""
+    teardown: ""
+    timeout: 120
+    level: spec
+    kind: contract
+  - id: a10-default-branch-never-empty
+    claim: "conductor default-branch prints one non-empty line; on resolution failure exactly 'main'"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a10_default_branch.py"
+    setup: ""
+    teardown: ""
+    timeout: 120
+    level: spec
+    kind: property
+  - id: a11-run-branch-name-deterministic
+    claim: "conductor run-branch name is deterministic, canonical (conductor/run-<slug>), and distinct across specs"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a11_run_branch_name.py"
+    setup: ""
+    teardown: ""
+    timeout: 120
+    level: spec
+    kind: property
+  - id: a12-skills-call-the-resolvers
+    claim: "start and autodev skills invoke conductor run-branch name and conductor default-branch instead of deriving in prose"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a12_skills_call_resolvers.py"
+    setup: ""
+    teardown: ""
+    timeout: 30
+    level: spec
+    kind: contract
+  - id: a13-driver-status-nonzero-without-driver
+    claim: "conductor driver status exits non-zero without a durable driver and zero with the crontab marker present"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a13_driver_status_durable.py"
+    setup: ""
+    teardown: ""
+    timeout: 120
+    level: spec
+    kind: property
+  - id: a14-driver-status-flags-failed-fires
+    claim: "conductor driver status names recent driver-unresolved / non-zero fires and exits non-zero on them; clean log stays zero"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a14_driver_status_failed_fires.py"
+    setup: ""
+    teardown: ""
+    timeout: 120
+    level: spec
+    kind: property
+  - id: a15-readme-authority-no-grant-leftover
+    claim: "README documents the session-inherit Unattended authority model and no user-facing doc references the removed grant command"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a15_readme_authority.py"
+    setup: ""
+    teardown: ""
+    timeout: 30
+    level: spec
+    kind: example
+  - id: a16-gate-lint-flags-trivially-true
+    claim: "gate lint flags a trivially-true assertion test (assert True / assert 1) and fail-closes on an unparseable one"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a16_gate_lint_trivial.py"
+    setup: ""
+    teardown: ""
+    timeout: 120
+    level: spec
+    kind: property
