@@ -174,3 +174,83 @@ def test_invalid_key_names_are_rejected(tmp_path):
             authority.write_resume_env(str(tmp_path), {bad: "v"})
     # a rejected env must not leave a partial file behind
     assert not (tmp_path / ".conductor" / "resume-env.sh").exists()
+
+
+# ---- preview: the dry-run report iterates the declared set, per phase ----
+
+PLAN = """# Plan — fixture
+
+**Normative spec:** docs/specs/fixture.md
+
+## Phase 1 — Alpha (a1-fixture)
+
+**Spec:** §1
+- [ ] a task
+
+## Phase 2 — Beta (a2-fixture)
+
+**Spec:** §2
+- [ ] another task
+"""
+
+
+def test_preview_lists_every_op_under_every_phase():
+    out = authority.preview(PLAN)
+    for phase_title in ("Phase 1 — Alpha (a1-fixture)", "Phase 2 — Beta (a2-fixture)"):
+        assert phase_title in out
+    for op in authority.RECIPE_PRIVILEGED_OPS:
+        assert out.count(op) == 2  # once per phase, verbatim
+    # header/footer prose: what an unattended fire does, what a non-bypass session prompts for
+    low = out.lower()
+    assert "unattended" in low
+    assert "prompt" in low
+
+
+def test_preview_tracks_the_declared_set_not_a_literal(monkeypatch):
+    """Drop-one simulation: shrinking the set must shrink the output — a hard-coded
+    literal list would keep printing the dropped op."""
+    kept = sorted(authority.RECIPE_PRIVILEGED_OPS)
+    dropped = kept.pop()
+    monkeypatch.setattr(authority, "RECIPE_PRIVILEGED_OPS", frozenset(kept))
+    out = authority.preview(PLAN)
+    assert dropped not in out
+    for op in kept:
+        assert op in out
+
+
+def test_preview_never_mentions_the_removed_grant_command():
+    out = authority.preview(PLAN)
+    assert "grant --scoped" not in out
+    assert "grant --full" not in out
+
+
+def test_preview_rejects_a_phaseless_plan():
+    import pytest
+
+    with pytest.raises(ValueError):
+        authority.preview("# just a title\n\nno phases here\n")
+
+
+def test_main_preview_prints_report(tmp_path, capsys):
+    plan = tmp_path / "plan.md"
+    plan.write_text(PLAN)
+    assert authority.main(["preview", str(plan)]) == 0
+    out = capsys.readouterr().out
+    for op in authority.RECIPE_PRIVILEGED_OPS:
+        assert op in out
+
+
+def test_main_preview_fails_closed_on_unreadable_or_phaseless_plan(tmp_path, capsys):
+    assert authority.main(["preview", str(tmp_path / "missing.md")]) != 0
+    phaseless = tmp_path / "phaseless.md"
+    phaseless.write_text("# no phases\n")
+    assert authority.main(["preview", str(phaseless)]) != 0
+    err = capsys.readouterr().err
+    assert err.strip()  # a reason is printed, never a silent non-zero
+
+
+def test_main_rejects_unknown_subcommand():
+    import pytest
+
+    with pytest.raises(SystemExit):
+        authority.main(["wibble"])
