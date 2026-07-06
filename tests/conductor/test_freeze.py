@@ -137,3 +137,161 @@ def test_dir_target_leaves_product_code_editable(tmp_path):
     (tmp_path / "sub" / "a.py").write_text("def a():\n    return 42\n")
     res = freeze.verify(manifest, baseline, str(tmp_path))
     assert res["ok"] is True and res["tampered"] == []
+
+
+# ---------------------------------------------- assertions-source coverage (A9, Phase 4)
+
+
+import json  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+def _add_source(tmp_path, goal=True, specs=("fixture-spec",)):
+    d = tmp_path / "docs" / "specs"
+    d.mkdir(parents=True, exist_ok=True)
+    for name in specs:
+        (d / f"{name}.md").write_text(f"# {name}\n")
+        (d / f"{name}.md.assertions.md").write_text(f"# assertions for {name}\n")
+    if goal:
+        dot = tmp_path / ".conductor"
+        dot.mkdir(exist_ok=True)
+        (dot / "goal.md").write_text(f"Implement docs/specs/{specs[0]}.md until done\n")
+    return d / f"{specs[0]}.md.assertions.md"
+
+
+def test_freeze_records_and_verify_trips_on_assertions_source_change(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    src = _add_source(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    rel = "docs/specs/fixture-spec.md.assertions.md"
+    assert rel in doc.get("sources", {})
+
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True and res["tampered"] == []
+
+    src.write_text(src.read_text() + "- weakened after freeze\n")
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("assertions-source-changed" in t and rel in t for t in res["tampered"])
+
+
+def test_verify_trips_on_assertions_source_removed(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    src = _add_source(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    src.unlink()
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("assertions-source-removed" in t for t in res["tampered"])
+
+
+def test_old_format_baseline_without_sources_verifies_as_before(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    doc.pop("sources", None)  # pre-upgrade baseline shape
+    open(baseline, "w").write(json.dumps(doc))
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True and res["tampered"] == []
+
+
+def test_glob_fallback_single_match_used_when_no_goal(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert "docs/specs/fixture-spec.md.assertions.md" in doc.get("sources", {})
+
+
+def test_glob_fallback_multiple_matches_without_goal_fails_closed(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False, specs=("spec-a", "spec-b"))
+    with pytest.raises(Exception, match="ambiguous-assertions-source"):
+        freeze.record(manifest, baseline, str(tmp_path))
+
+
+def test_no_source_at_all_keeps_old_behavior(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert "sources" not in doc
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True
+
+
+def test_goal_naming_spec_wins_over_other_assertion_files(tmp_path):
+    # goal names spec-a; spec-b's assertions changing must NOT trip this run's gate
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=True, specs=("spec-a", "spec-b"))
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/spec-a.md.assertions.md"]
+    other = tmp_path / "docs" / "specs" / "spec-b.md.assertions.md"
+    other.write_text("changed\n")
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True
+
+
+def test_goal_named_spec_with_missing_assertions_source_fails_closed(tmp_path):
+    # codex review round 1: silently omitting the source reopens the integrity hole
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path)
+    (tmp_path / "docs" / "specs" / "fixture-spec.md.assertions.md").unlink()
+    with pytest.raises(Exception, match="missing-assertions-source"):
+        freeze.record(manifest, baseline, str(tmp_path))
+
+
+def test_goal_without_spec_path_fails_closed_never_globs(tmp_path):
+    # codex round 2: a stale/malformed goal must not silently freeze an unrelated
+    # spec's assertions via the glob fallback
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)  # one glob candidate exists
+    dot = tmp_path / ".conductor"
+    dot.mkdir(exist_ok=True)
+    (dot / "goal.md").write_text("Do the thing\n")  # no docs/specs path
+    with pytest.raises(Exception, match="assertions-source"):
+        freeze.record(manifest, baseline, str(tmp_path))
+
+
+def test_verify_fails_closed_when_goal_now_names_a_different_spec(tmp_path):
+    # codex round 3: a stale baseline for spec A must not stay green after the
+    # goal moves to spec B (whose assertions would be unfrozen)
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=True, specs=("spec-a", "spec-b"))
+    freeze.record(manifest, baseline, str(tmp_path))
+    (tmp_path / ".conductor" / "goal.md").write_text(
+        "Implement docs/specs/spec-b.md until done\n"
+    )
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("assertions-source" in t for t in res["tampered"])
+
+
+def test_verify_with_sources_and_unchanged_goal_stays_clean(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True and res["tampered"] == []
+
+
+def test_verify_fails_closed_when_goal_is_deleted_after_goal_derived_freeze(tmp_path):
+    # codex round 4: goal deletion must not fall open through the single-file glob
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    (tmp_path / ".conductor" / "goal.md").unlink()
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("assertions-source" in t for t in res["tampered"])
+
+
+def test_glob_derived_baseline_still_verifies_clean_without_goal(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)
+    freeze.record(manifest, baseline, str(tmp_path))
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True and res["tampered"] == []
