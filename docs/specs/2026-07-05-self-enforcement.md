@@ -22,35 +22,48 @@ running Tier-B driver, or the crontab of the run executing this spec — changes
 the owner updates the plugin after the run. Each phase is one PR into the run branch, gated by its
 assertions.
 
-## Phase 1 — `conductor resume-script grant`: make least-privilege a paste (review A-1, A-5, A-8)
+## Phase 1 — Session-mode-aware unattended authority (review A-1, A-3, A-5, A-8)
 
-**Spec:** Add a `grant` subcommand to `conductor/resume_script.py` (wired in `bin/conductor`) so an
-owner authorizes an unattended run without hand-authoring anything.
+**Owner decision (2026-07-06): inherit Claude Code's existing permission model — do NOT invent
+conductor-specific permission flags or tokens.** `/conductor:start` reads the permission posture of
+the session it was launched in and acts on it. Two cases:
 
-- `conductor resume-script grant --scoped --project <p> --worktree <w>` writes a starter scoped
-  allowlist file and the exact `CONDUCTOR_RESUME_CLAUDE_FLAGS` line into `<p>/.conductor/resume-env.sh`
-  that loads it, covering git/gh/pytest/ruff/pyright/conductor/docker. It is the default and the
-  recommended path. The generated allowlist MUST reject blanket wildcards (`Bash(*)`, `Bash(*:*)`).
-- `conductor resume-script grant --full` writes `CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"`
-  but ONLY when an explicit `--i-understand-standing-full-access` token (a required, self-documenting
-  flag — a friction speed-bump, not a secret) is also passed; without the token it refuses (non-zero)
-  and prints why.
-- Any `resume-env.sh` the command creates is `chmod 0600`. The generated driver refuses to source a
-  `resume-env.sh` that is group- or world-writable (fail loud, like `driver-unresolved`).
-- **How the owner reaches this decision (RECOMMENDED — open for owner confirmation):**
-  `/conductor:start` SURFACES the authority choice interactively in the owner's live session
-  (scoped is the default; full requires the confirm token) and invokes `grant` accordingly, so the
-  decision is on the documented path, not a command the owner must know to run. The headless
-  `/conductor:autodev` fires never prompt — authority is always granted at setup, ahead of the run.
-  This surfacing is agent-executed prose (interactive), so it is NOT a frozen assertion; the frozen
-  gate is the `grant` primitive below (A1). Alternatives considered: a standalone `grant` command
-  only (discoverability gap), or a `--full-auto` flag on `start` (bundles the dangerous choice into
-  setup) — both rejected in favor of surface-and-confirm.
+- **(A) The launching session is already in bypass / skip-permissions mode.** The unattended run
+  inherits full autonomy (the Tier-B driver fires with the same posture). Before proceeding, `start`
+  prints a **big, explicit warning** — a standing full-access agent will fire every heartbeat with
+  the owner's credentials (gh merge, push, docker, broad edits, subagents), surviving reboots, until
+  the gate is green — and requires the owner to **acknowledge to continue**. The acknowledgment is
+  the gate; there is no extra conductor flag.
 
-- [ ] `grant --scoped` writes both artifacts and names the loader flag
-- [ ] `grant --full` without the token refuses; with the token writes the bypass line
-- [ ] generated allowlist rejects blanket wildcards
-- [ ] created `resume-env.sh` is mode 0600; driver refuses a world-writable one
+- **(B) The launching session is in a less-privileged mode** (default ask-per-tool, or a scoped
+  allowlist). `start` runs a **dry-run** that enumerates, from the plan's recipe, the concrete
+  privileged operations each phase will perform (create branch, `git push`, `gh pr create`,
+  `conductor merge`, docker via `CONDUCTOR_MERGE_VERIFY`, file writes, subagents) and reports **which
+  of those the current mode would prompt for** — i.e. exactly which unattended steps would stall
+  without the owner present. It then offers a concrete choice with those examples in front of the
+  owner: (i) elevate to bypass (with the (A) warning), (ii) widen the session's own scoped allowlist
+  to cover the listed operations, or (iii) proceed knowing precisely which steps will require them.
+
+**Deliverable (the assertable core):** a `conductor authority preview` (a.k.a. `--dry-run`) that
+maps the recipe's privileged operations for a plan and prints the concrete per-phase intervention
+list. Detection of the launching session's posture and the interactive warning/choice are
+agent-executed (they run in the owner's live `start` session, which CAN prompt — the headless
+`/conductor:autodev` fires never prompt), so they are prose, not frozen assertions.
+
+Safety carried over regardless of posture: any `resume-env.sh` the tool writes (to carry the
+inherited flags / `CONDUCTOR_MERGE_VERIFY`) is `chmod 0600`, and the generated driver refuses to
+source a group- or world-writable `resume-env.sh` (fail loud, like `driver-unresolved`).
+
+> **Open implementation question (flagged, not resolved here):** can `/conductor:start` read its own
+> Claude Code session permission mode programmatically? If the harness exposes it, detection is
+> automatic; if not, `start` asks the owner once ("what posture should the unattended run use?") —
+> still on the documented path, still Claude-native. The dry-run (B) works either way, since it
+> enumerates from the recipe, not from the detected mode.
+
+- [ ] `authority preview` enumerates the recipe's privileged operations for a plan (branch, push, gh, merge, docker, subagents, writes)
+- [ ] a bypass-mode launching session triggers the warning + acknowledgment before the run proceeds unattended
+- [ ] a less-privileged session gets the concrete per-phase "these steps will be manual" report + the elevate / widen-allowlist / proceed choice
+- [ ] any `resume-env.sh` the tool writes is mode 0600; the driver refuses a world-writable one
 
 ## Phase 2 — README "Unattended authority" + canonical bypass spelling (review A-2, A-9)
 
@@ -114,37 +127,44 @@ a durable driver (crontab marker or scheduled_tasks.json) exists and tails the r
 
 ## Out of scope (follow-up)
 
-B-7 (run-infra digest guard), A-3 (a permission dry-run tick), and A-7 (disarm the bypass on run
-completion) are deferred to a later pass; noted so their omission is deliberate.
+B-7 (run-infra digest guard) and A-7 (disarm the bypass on run completion) are deferred to a later
+pass; noted so their omission is deliberate. (A-3, the permission dry-run, was pulled INTO Phase 1
+by the 2026-07-06 owner decision.)
 
 ## Expectations
 
 ### Success scenarios
 
-1. An operator authorizes a **least-privilege** unattended run with one `grant --scoped` command:
-   it produces a ready-to-use scoped allowlist and the exact env line that loads it, with no file
-   authored by hand.
-2. Turning on **full** unattended autonomy requires the operator to pass an explicit acknowledgment
-   token; the bare `grant --full` refuses and explains why.
-3. The **permission posture** of every unattended fire is visible in the resume log as a bare label
+1. The unattended run **inherits the launching session's permission posture** — conductor invents
+   no permission flags of its own. An operator already in bypass mode gets full auto; one in a
+   less-privileged mode is shown, concretely, which steps would need them.
+2. Before an unattended run proceeds with **full** autonomy, `/conductor:start` shows an explicit
+   warning of the standing-full-access blast radius and requires the owner to **acknowledge**; it
+   never starts unattended full-auto silently.
+3. In a **less-privileged** session, `start` shows a **dry-run** that names the concrete privileged
+   operations each phase will perform and which ones will require the owner, then offers a real
+   choice (elevate / widen allowlist / proceed-with-manual-steps).
+4. The **permission posture** of every unattended fire is visible in the resume log as a bare label
    (supervised / scoped / full-bypass).
-4. The unattended-authority decision is **discoverable from the README**, not only from
+5. The unattended-authority decision is **discoverable from the README**, not only from
    agent-facing skill files.
-5. A done-gate that could be weak or bypassable is caught **before it is frozen**: `gate lint`
+6. A done-gate that could be weak or bypassable is caught **before it is frozen**: `gate lint`
    rejects an unpinned manifest command and flags an assertion with no negative clause, and the
    freeze covers the human-authored `<spec>.assertions.md`.
-6. The run-branch name and the repo default branch each come from **one command** that both `start`
+7. The run-branch name and the repo default branch each come from **one command** that both `start`
    and `autodev` call, so the two skills cannot derive them differently.
-7. `driver status` tells the operator, on demand, whether the unattended run has a durable driver
+8. `driver status` tells the operator, on demand, whether the unattended run has a durable driver
    and whether recent fires failed.
 
 ### Failure scenarios (confidently wrong)
 
-1. `grant --scoped` emits an allowlist so permissive (a `Bash(*)`-style wildcard) that "scoped" is
-   full access wearing a safe label.
-2. `grant --scoped` emits an allowlist so tight the unattended fire stalls on a tool it needs — the
-   safe path fails the exact silent-stall way the design exists to prevent.
-3. `grant --full` writes the bypass flag without the acknowledgment token (the guard is cosmetic).
+1. The dry-run **under-reports** a privileged operation the recipe actually performs (e.g. omits the
+   docker call in `CONDUCTOR_MERGE_VERIFY`), so the owner elevates too little and the unattended fire
+   still stalls — the safe path fails the exact silent-stall way the design exists to prevent.
+2. `start` proceeds to unattended **full-auto without the warning + acknowledgment** — a standing
+   full-access agent is armed silently.
+3. `start` **misreads** the launching session's posture (treats a less-privileged session as bypass,
+   inheriting more authority than the owner has) — the run gets more power than the session granted.
 4. Posture logging prints the settings-file path or any secret instead of a bare label.
 5. `gate lint` passes a manifest command that can load an unfrozen `conftest.py` — the frozen-gate
    bypass it exists to catch.
@@ -158,7 +178,9 @@ completion) are deferred to a later pass; noted so their omission is deliberate.
 1. No phase changes **default behavior**: an operator who invokes none of the new commands still
    gets no permission bypass and the current merge/reconcile/gate semantics. Every addition is
    opt-in.
-2. `grant` must **never** enable full bypass without the explicit acknowledgment token.
+2. `start` must **never** begin an unattended run with full autonomy without an explicit owner
+   acknowledgment, and must **never** grant the unattended run MORE authority than the launching
+   session already had.
 3. A `resume-env.sh` the tool creates must **never** be group- or world-writable — it can carry the
    bypass flag and the `CONDUCTOR_MERGE_VERIFY` command that runs as shell.
 4. `gate lint` must be **fail-closed**: an unparseable or ambiguous manifest command counts as

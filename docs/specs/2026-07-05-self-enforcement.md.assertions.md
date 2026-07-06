@@ -5,8 +5,7 @@ each is RED until the phase that implements it lands.
 
 ## Encoded (load-bearing)
 
-- **A1 grant-full-requires-token** — security: standing full autonomy must never be one accidental flag.
-- **A2 scoped-rejects-wildcards** — security: "scoped" that contains a wildcard is full access in disguise.
+- **A1 authority-preview-lists-all-privileged-ops** — silent-stall: an omitted operation means the owner elevates too little and the unattended fire hangs.
 - **A3 resume-env-mode-0600** — security: the file carries the bypass flag + a shell-executed verify command.
 - **A4 driver-refuses-world-writable-env** — security: a writable env file is a privesc into the agent.
 - **A5 posture-label-logged-no-secret** — auditability + exposure: posture must be visible and must not leak the value.
@@ -18,24 +17,25 @@ each is RED until the phase that implements it lands.
 
 ## Deliberately not encoded
 
-- Success 4 (README discoverability) — a doc-presence grep; low blast radius, better as a review item than a frozen gate.
-- Failure 2 (scoped allowlist too tight → fire stalls) — needs a live headless `claude -p` to observe a stall; not unit-assertable, belongs to the A-3 dry-run follow-up (out of scope).
-- Must-not 1 (default behavior unchanged / no bypass baked) — already covered by the existing `test_render_never_bakes_a_permission_bypass`; no new assertion needed.
-- Must-not 5 (no phase touches the live run's `.conductor/`) — a process invariant about how the work is done, not a runtime property of the product; enforced by review, not a test.
+- Success 2/3 (the full-auto warning+acknowledgment; the less-privileged dry-run CHOICE) and posture
+  DETECTION — these run interactively in the owner's live `start` session (agent-executed prose),
+  not a pure function; the frozen gate is the dry-run's *content* (A1), not the interaction.
+- Failure 2/3 (start proceeds full-auto without acknowledgment; start misreads the session posture)
+  — both depend on live session-mode detection + an interactive gate, unprovable by a unit check;
+  they are the load-bearing interactive behaviors, verified by review, not frozen.
+- Success 5 (README discoverability) — a doc-presence grep; low blast radius, better as a review item.
+- Must-not 1 (default behavior unchanged / no bypass baked) — already covered by the existing
+  `test_render_never_bakes_a_permission_bypass`; no new assertion needed.
+- Must-not 5 (no phase touches the live run's `.conductor/`) — a process invariant about how the work
+  is done, not a runtime property of the product; enforced by review, not a test.
 
 ---
 
-## A1 — grant-full-requires-token
-- **Claim:** `conductor resume-script grant --full` writes `--dangerously-skip-permissions` into `resume-env.sh` **iff** `--i-understand-standing-full-access` is also passed.
-- **Setup:** a temp project/worktree with no existing `resume-env.sh`.
-- **Observation:** without the token → non-zero exit AND the file (if written at all) MUST NOT contain `--dangerously-skip-permissions`. With the token → zero exit AND the file MUST contain `--dangerously-skip-permissions`.
-- **Kind:** contract (pre: token presence; post: bypass written iff token).
-
-## A2 — scoped-rejects-wildcards
-- **Claim:** the allowlist `grant --scoped` generates contains no blanket wildcard entry.
-- **Setup:** a temp project/worktree; run `grant --scoped`.
-- **Observation:** the generated allowlist MUST contain the named scoped tools (git, gh, pytest) and MUST NOT contain any of `Bash(*)`, `Bash(*:*)`, or a bare `*` tool entry.
-- **Kind:** property (holds for every generated scoped allowlist).
+## A1 — authority-preview-lists-all-privileged-ops
+- **Claim:** `conductor authority preview` (the dry-run) names **every** privileged operation the recipe performs for a plan, so the owner can never elevate too little.
+- **Setup:** a representative plan with at least one gated phase and a `CONDUCTOR_MERGE_VERIFY` that invokes docker.
+- **Observation:** the preview output MUST contain each of: create-branch, `git push`, `gh pr` (create/merge), docker (from the verify command), subagent spawn, and file writes. It MUST NOT omit an operation the recipe actually runs — the dangerous failure is a missing entry, since an unlisted op is one the owner won't authorize and the fire will stall on.
+- **Kind:** property (holds across plans: the reported set covers the recipe's privileged surface).
 
 ## A3 — resume-env-mode-0600
 - **Claim:** any `resume-env.sh` created by `grant` has file mode `0600`.
