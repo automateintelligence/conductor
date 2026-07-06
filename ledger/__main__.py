@@ -181,7 +181,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "<project>/assertions/run/results.json)",
     )
     r.add_argument("--pr-merged", action="store_true", default=False)
-    r.add_argument("--commits", type=int, default=0, metavar="N")
+    r.add_argument("--commits", type=int, default=-1, metavar="N")  # -1 = not reported (fail-safe; see reconcile §2)
     r.add_argument("-R", type=int, default=3, metavar="N", help="Retry cap (default 3)")
     r.add_argument(
         "--now-ts", type=int, default=None, metavar="N", help="Current unix timestamp"

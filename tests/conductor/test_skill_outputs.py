@@ -12,6 +12,8 @@ def test_autodev_skill_contract():
         "assert run --level spec",
         "fresh subagent",
         "conductor merge-gate",
+        "conductor merge <pr>",
+        "no-progress-cap-exceeded",
         "handoff",
         "one phase",
         "crondelete",

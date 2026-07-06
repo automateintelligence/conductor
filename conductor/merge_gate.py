@@ -280,10 +280,14 @@ def _resolve_repo(run: Any = subprocess.run) -> str:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print("usage: conductor merge-gate <pr>", file=sys.stderr)
-        sys.exit(2)
-    pr_num = int(sys.argv[1])
+        sys.exit(0 if len(sys.argv) >= 2 else 2)
+    try:
+        pr_num = int(sys.argv[1])
+    except ValueError:
+        print(f"usage: conductor merge-gate <pr> — expected an integer, got {sys.argv[1]!r}", file=sys.stderr)
+        sys.exit(64)
     try:
         repo = _resolve_repo()
     except (subprocess.TimeoutExpired, RuntimeError) as exc:  # bounded + fail closed
