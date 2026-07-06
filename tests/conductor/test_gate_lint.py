@@ -179,3 +179,149 @@ def test_main_exit_codes_and_clean_output(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr()
     assert "unpinned" in (out.out + out.err).lower()
     assert TEST_REL in out.out + out.err
+
+
+# ------------------------------------------------- negative-clause rule (A7)
+
+
+POSITIVE_ONLY_BODY = """import subprocess
+
+
+def test_sample_behavior():
+    out = subprocess.run(["echo", "ok"], capture_output=True, text=True).stdout
+    assert "ok" in out
+"""
+
+
+def test_positive_only_file_is_flagged_no_negative(tmp_path):
+    proj = _mk_project(tmp_path, PINNED, body=POSITIVE_ONLY_BODY)
+    joined = "\n".join(_lint(proj))
+    assert "no negative" in joined.lower()
+    assert "test_sample.py" in joined
+
+
+def test_file_with_negative_clause_is_not_flagged(tmp_path):
+    proj = _mk_project(tmp_path, PINNED)  # GOOD_TEST_BODY has `not in`
+    joined = "\n".join(_lint(proj))
+    assert "no negative" not in joined.lower()
+    assert _lint(proj) == []
+
+
+def test_assertnot_method_call_counts_as_negative(tmp_path):
+    body = (
+        "def test_x(self=None):\n"
+        "    import unittest\n"
+        "    tc = unittest.TestCase()\n"
+        "    tc.assertNotIn('ERROR', 'ok')\n"
+    )
+    proj = _mk_project(tmp_path, PINNED, body=body)
+    joined = "\n".join(_lint(proj))
+    assert "no negative" not in joined.lower()
+
+
+def test_unary_not_counts_as_negative(tmp_path):
+    body = "def test_x():\n    assert not False\n    assert 'ok' in 'ok'\n"
+    proj = _mk_project(tmp_path, PINNED, body=body)
+    joined = "\n".join(_lint(proj))
+    assert "no negative" not in joined.lower()
+
+
+# ------------------------------------------------- trivially-true rule (A16)
+
+
+TRIVIAL_WITH_NEGATIVE = """import subprocess
+
+
+def test_sample_behavior():
+    out = subprocess.run(["echo", "ok"], capture_output=True, text=True).stdout
+    assert "ERROR" not in out
+    assert True
+"""
+
+
+def test_trivial_assert_true_is_flagged_even_with_negative_clause(tmp_path):
+    # rules are independent: the negative clause must not mask the tautology
+    proj = _mk_project(tmp_path, PINNED, body=TRIVIAL_WITH_NEGATIVE)
+    joined = "\n".join(_lint(proj))
+    assert "trivially-true" in joined.lower()
+    assert "test_sample.py" in joined
+    assert "no negative" not in joined.lower()
+
+
+def test_trivial_assert_one_and_bare_literal_are_flagged(tmp_path):
+    for i, stmt in enumerate(["assert 1", 'assert "yes"']):
+        body = f"def test_x():\n    assert 'ERROR' not in 'ok'\n    {stmt}\n"
+        proj = _mk_project(tmp_path / f"case-{i}", PINNED, body=body)
+        joined = "\n".join(_lint(proj))
+        assert "trivially-true" in joined.lower(), stmt
+
+
+def test_real_behavior_file_produces_no_trivial_finding(tmp_path):
+    proj = _mk_project(tmp_path, PINNED)
+    joined = "\n".join(_lint(proj))
+    assert "trivial" not in joined.lower()
+
+
+# ----------------------------------------------------------- fail-closed file rules
+
+
+def test_syntax_error_test_file_is_rejected_naming_it(tmp_path):
+    proj = _mk_project(tmp_path, PINNED, body="def test_x(:\n    assert ???\n")
+    findings = _lint(proj)
+    assert findings
+    assert any("test_sample.py" in f for f in findings)
+
+
+def test_missing_referenced_test_file_is_rejected(tmp_path):
+    proj = _mk_project(tmp_path, PINNED)
+    (proj / TEST_REL).unlink()
+    findings = _lint(proj)
+    assert findings
+    assert any(TEST_REL in f for f in findings)
+
+
+def test_directory_target_lints_collected_test_files(tmp_path):
+    cmd = (
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest "
+        "-p no:cacheprovider assertions/sample"
+    )
+    proj = _mk_project(tmp_path, cmd, body=POSITIVE_ONLY_BODY)
+    joined = "\n".join(_lint(proj))
+    assert "no negative" in joined.lower() and "test_sample.py" in joined
+
+
+# ------------------------------------------------- dispatch through bin/conductor
+
+
+def test_gate_lint_dispatch_through_bin_conductor(tmp_path):
+    import os
+    import subprocess
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    conductor = os.path.join(root, "bin", "conductor")
+    proj = _mk_project(tmp_path, PINNED)
+    env = dict(os.environ)
+    env["CONDUCTOR_HOME"] = str(proj)
+    proc = subprocess.run(
+        [conductor, "gate", "lint"],
+        cwd=str(proj),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "unpinned" not in (proc.stdout + proc.stderr).lower()
+
+    bad = _mk_project(tmp_path / "bad", f"pytest {TEST_REL}")
+    env["CONDUCTOR_HOME"] = str(bad)
+    proc = subprocess.run(
+        [conductor, "gate", "lint"],
+        cwd=str(bad),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode != 0
+    assert "unpinned" in (proc.stdout + proc.stderr).lower()

@@ -173,6 +173,10 @@ def verify(
 def main(argv: list | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else ""
+    if cmd == "lint":
+        from conductor import gate_lint
+
+        return gate_lint.main()
     if cmd == "freeze":
         print(f"[GATE] froze done-gate baseline -> {record()}")
         return 0
@@ -185,7 +189,7 @@ def main(argv: list | None = None) -> int:
         for t in res["tampered"]:
             print(f"[GATE] TAMPERED: {t}", file=sys.stderr)
         return 1
-    print("usage: conductor gate {freeze|verify}", file=sys.stderr)
+    print("usage: conductor gate {lint|freeze|verify}", file=sys.stderr)
     return 64
 
 

@@ -24,6 +24,8 @@ runner executes commands through a shell, so shell compounds/wrappers reopen the
 
 from __future__ import annotations
 
+import ast
+import glob
 import os
 import shlex
 import sys
@@ -141,6 +143,94 @@ def _check_command(raw: str, repo_root: str) -> tuple[list[str], list[str]]:
     return [], paths
 
 
+def _resolve_test_files(
+    path_tokens: list[str], repo_root: str
+) -> tuple[list[str], list[str]]:
+    """Resolve command path tokens to concrete .py files (the same token->path stance
+    as freeze._referenced_files). A referenced file that does not exist is a finding
+    (fail-closed). Returns (findings, files)."""
+    findings: list[str] = []
+    files: list[str] = []
+    for tok in path_tokens:
+        base = tok.split("::", 1)[0]
+        path = base if os.path.isabs(base) else os.path.join(repo_root, base)
+        if os.path.isfile(path):
+            files.append(path)
+        elif os.path.isdir(path):
+            files.extend(freeze._collect_test_files(path))
+        elif any(c in base for c in "*?["):
+            matches = [
+                fp
+                for fp in glob.glob(path, recursive=True)
+                if os.path.isfile(fp) and fp.endswith(".py")
+            ]
+            if not matches:
+                findings.append(f"missing test file (glob matched nothing): {tok}")
+            files.extend(matches)
+        else:
+            findings.append(f"missing test file: {tok}")
+    return findings, files
+
+
+def _is_negative_assert(node: ast.Assert) -> bool:
+    for sub in ast.walk(node.test):
+        if isinstance(sub, ast.Compare) and any(
+            isinstance(op, (ast.NotIn, ast.NotEq, ast.IsNot)) for op in sub.ops
+        ):
+            return True
+        if isinstance(sub, ast.UnaryOp) and isinstance(sub.op, ast.Not):
+            return True
+    return False
+
+
+def _has_negative_clause(tree: ast.AST) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert) and _is_negative_assert(node):
+            return True
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = (
+                func.attr
+                if isinstance(func, ast.Attribute)
+                else getattr(func, "id", "")
+            )
+            if str(name).lower().startswith("assertnot"):
+                return True
+    return False
+
+
+def _trivial_assert_lines(tree: ast.AST) -> list[int]:
+    """Lines of `assert <bare truthy constant>` — tautologies passing any product."""
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assert)
+        and isinstance(node.test, ast.Constant)
+        and bool(node.test.value)
+    ]
+
+
+def _lint_test_file(path: str, repo_root: str) -> list[str]:
+    """The two independent AST rules (missing-negative A7, trivially-true A16), plus
+    fail-closed rejection of an unreadable/unparseable file."""
+    rel = os.path.relpath(path, repo_root)
+    try:
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+    except SyntaxError as exc:
+        return [f"unparseable test file (SyntaxError): {rel}: line {exc.lineno}"]
+    except Exception as exc:
+        return [f"unreadable test file: {rel}: {exc}"]
+    findings: list[str] = []
+    base = os.path.basename(path)
+    if base != "conftest.py":  # a conftest is support code, not an assertion test
+        if not _has_negative_clause(tree):
+            findings.append(f"{rel}: no negative assertion clause")
+        for lineno in _trivial_assert_lines(tree):
+            findings.append(f"{rel}: trivially-true assertion at line {lineno}")
+    return findings
+
+
 def lint(manifest_path: str, repo_root: str) -> list[str]:
     """Lint every manifest entry; return findings (empty = clean). Fail-closed: an
     unloadable manifest is itself a finding, never a silent pass."""
@@ -149,12 +239,19 @@ def lint(manifest_path: str, repo_root: str) -> list[str]:
     except Exception as exc:
         return [f"manifest-unloadable: {exc}"]
     findings: list[str] = []
+    linted: dict[str, list[str]] = {}
     for entry in entries:
         aid = str(entry.get("id", "?"))
         raw = str(entry.get("command", "") or "")
-        cmd_findings, _paths = _check_command(raw, repo_root)
+        cmd_findings, path_tokens = _check_command(raw, repo_root)
         findings.extend(f"{aid}: {f}" for f in cmd_findings)
-    return findings
+        file_findings, files = _resolve_test_files(path_tokens, repo_root)
+        findings.extend(f"{aid}: {f}" for f in file_findings)
+        for fp in files:
+            if fp not in linted:
+                linted[fp] = _lint_test_file(fp, repo_root)
+            findings.extend(f"{aid}: {f}" for f in linted[fp])
+    return list(dict.fromkeys(findings))
 
 
 def main(argv: list | None = None) -> int:
