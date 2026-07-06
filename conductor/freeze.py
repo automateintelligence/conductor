@@ -114,9 +114,10 @@ class MissingAssertionsSource(RuntimeError):
     closed: freezing without the done-definition reopens the integrity hole."""
 
 
-def _assertions_source(repo_root: str) -> dict:
-    """{relpath: sha256} for the human-authored `<spec>.assertions.md` — the
-    done-DEFINITION, made tamper-evident alongside the manifest and test files.
+def _assertions_source(repo_root: str) -> tuple[dict, str]:
+    """({relpath: sha256}, via) for the human-authored `<spec>.assertions.md` —
+    the done-DEFINITION, made tamper-evident alongside the manifest and test
+    files. `via` is "goal", "glob", or "none" (how the source was discovered).
 
     Preferred, precise path: parse `<project>/.conductor/goal.md` for a
     `docs/specs/<name>.md` path and take its `.assertions.md` sibling; a goal
@@ -134,7 +135,7 @@ def _assertions_source(repo_root: str) -> dict:
             rel = m.group(0) + ".assertions.md"
             path = os.path.join(repo_root, rel)
             if os.path.isfile(path):
-                return {rel: _sha256_file(path)}
+                return {rel: _sha256_file(path)}, "goal"
             raise MissingAssertionsSource(
                 f"missing-assertions-source: the goal names "
                 f"{m.group(0)} but {rel} does not exist"
@@ -156,8 +157,8 @@ def _assertions_source(repo_root: str) -> dict:
         )
     if matches:
         rel = os.path.relpath(matches[0], repo_root)
-        return {rel: _sha256_file(matches[0])}
-    return {}
+        return {rel: _sha256_file(matches[0])}, "glob"
+    return {}, "none"
 
 
 def gate_state(manifest_path: str, repo_root: str) -> dict:
@@ -178,9 +179,10 @@ def record(
     """Snapshot the current gate to the baseline file (called at /conductor:start)."""
     state = gate_state(manifest_path, repo_root)
     doc: dict = {"version": 1, "ids": state}
-    sources = _assertions_source(repo_root)
+    sources, via = _assertions_source(repo_root)
     if sources:
         doc["sources"] = sources
+        doc["sources_via"] = via
     with open(baseline_path, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=2, sort_keys=True)
     return baseline_path
@@ -240,17 +242,27 @@ def verify(
     if base_sources:
         # bind the baseline to the CURRENT goal selection: a stale spec-A baseline
         # must not stay green after goal.md moves to spec B (whose assertions
-        # would be unfrozen). Old baselines without "sources" skip this entirely.
-        try:
-            current_sources = set(_assertions_source(repo_root))
-        except Exception as exc:  # ambiguous/missing now -> fail closed
-            current_sources = None
-            tampered.append(f"assertions-source-unresolvable: {exc}")
-        if current_sources is not None and current_sources != set(base_sources):
+        # would be unfrozen), nor may deleting goal.md fall open through the
+        # single-file glob path. Old baselines without "sources" skip this.
+        base_via = base_doc.get("sources_via")
+        goal_file = os.path.join(repo_root, ".conductor", "goal.md")
+        if base_via == "goal" and not os.path.isfile(goal_file):
             tampered.append(
-                "assertions-source-set-changed "
-                f"(recorded {sorted(base_sources)}, current {sorted(current_sources)})"
+                "assertions-source-unresolvable: .conductor/goal.md (which "
+                "selected the frozen assertions source) was removed"
             )
+        else:
+            try:
+                current_sources, _via = _assertions_source(repo_root)
+                current_set: set | None = set(current_sources)
+            except Exception as exc:  # ambiguous/missing now -> fail closed
+                current_set = None
+                tampered.append(f"assertions-source-unresolvable: {exc}")
+            if current_set is not None and current_set != set(base_sources):
+                tampered.append(
+                    "assertions-source-set-changed "
+                    f"(recorded {sorted(base_sources)}, current {sorted(current_set)})"
+                )
     return {"ok": not tampered, "tampered": tampered, "frozen": True}
 
 

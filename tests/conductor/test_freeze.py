@@ -276,3 +276,22 @@ def test_verify_with_sources_and_unchanged_goal_stays_clean(tmp_path):
     freeze.record(manifest, baseline, str(tmp_path))
     res = freeze.verify(manifest, baseline, str(tmp_path))
     assert res["ok"] is True and res["tampered"] == []
+
+
+def test_verify_fails_closed_when_goal_is_deleted_after_goal_derived_freeze(tmp_path):
+    # codex round 4: goal deletion must not fall open through the single-file glob
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    (tmp_path / ".conductor" / "goal.md").unlink()
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("assertions-source" in t for t in res["tampered"])
+
+
+def test_glob_derived_baseline_still_verifies_clean_without_goal(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)
+    freeze.record(manifest, baseline, str(tmp_path))
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True and res["tampered"] == []

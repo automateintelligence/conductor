@@ -221,17 +221,25 @@ def _has_negative_clause(tree: ast.AST) -> bool:
     return False
 
 
+def _static_truth(node: ast.expr) -> bool | None:
+    """Statically-known truthiness of a literal expression; None = unknown.
+    Covers constants, container literals, and `not <literal>` chains — so
+    `assert not False` / `assert not []` count as tautologies too."""
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return bool(node.elts)
+    if isinstance(node, ast.Dict):
+        return bool(node.keys)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        inner = _static_truth(node.operand)
+        return None if inner is None else not inner
+    return None
+
+
 def _is_trivially_true(test: ast.expr) -> bool:
-    """A bare truthy literal: `True`, `1`, a non-empty str/bytes, or a non-empty
-    container literal (`[1]`, `(1,)`, `{"x": 1}`, `{1}`) — tautologies that pass
-    any implementation."""
-    if isinstance(test, ast.Constant):
-        return bool(test.value)
-    if isinstance(test, (ast.List, ast.Tuple, ast.Set)):
-        return bool(test.elts)
-    if isinstance(test, ast.Dict):
-        return bool(test.keys)
-    return False
+    """A bare statically-true assertion — a tautology that passes any product."""
+    return _static_truth(test) is True
 
 
 def _trivial_assert_lines(tree: ast.AST) -> list[int]:

@@ -368,3 +368,26 @@ def test_attached_short_form_config_flags_are_rejected(tmp_path):
         proj = _mk_project(tmp_path / f"case-{i}", cmd)
         joined = "\n".join(_lint(proj))
         assert "unpinned" in joined.lower(), flag
+
+
+def test_statically_true_negation_is_flagged_trivially_true(tmp_path):
+    # codex round 4: `assert not False` proves nothing about the implementation
+    for i, stmt in enumerate(
+        ["assert not False", "assert not 0", "assert not ''", "assert not []"]
+    ):
+        body = f"def test_x():\n    {stmt}\n"
+        proj = _mk_project(tmp_path / f"case-{i}", PINNED, body=body)
+        joined = "\n".join(_lint(proj))
+        assert "trivially-true" in joined.lower(), stmt
+
+
+def test_negation_of_real_behavior_is_not_flagged_trivial(tmp_path):
+    body = (
+        "import subprocess\n\n\n"
+        "def test_x():\n"
+        "    out = subprocess.run(['echo', 'ok'], capture_output=True, text=True).stdout\n"
+        "    assert not out.startswith('ERROR')\n"
+        "    assert 'ok' in out\n"
+    )
+    proj = _mk_project(tmp_path, PINNED, body=body)
+    assert "trivial" not in "\n".join(_lint(proj)).lower()
