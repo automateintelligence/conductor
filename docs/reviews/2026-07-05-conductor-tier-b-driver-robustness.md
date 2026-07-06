@@ -6,8 +6,12 @@ reconcile paths in `/conductor:start` + `/conductor:autodev`).
 silently stalled for ~1 day and was recovered by hand on 2026-07-05.
 **Severity:** high for unattended runs — the failure is silent and indefinite; the run looks
 "resumable" but never progresses.
-**Status:** local stopgap applied on the affected machine; this doc proposes the upstream fix so
-the *generator* stops producing fragile drivers.
+**Status:** RESOLVED upstream in conductor **0.5.2**. The generator is now the tested
+`conductor resume-script write` (runtime bin resolution, fail-loud, owner env split into
+`resume-env.sh`), `/conductor:start` reconcile re-verifies + regenerates via `conductor
+resume-script verify`, and `conductor remote` replaces the hardcoded `origin` in the autodev
+prose. The original proposal (below) is kept as the rationale; the live-run stopgap is retained
+for the record.
 
 ---
 

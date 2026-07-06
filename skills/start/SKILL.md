@@ -132,10 +132,16 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      the single source of truth; a stale literal would override it.
    - **RECONCILE is verify-first: SKIP the driver only if it still verifies.** `conductor
      resume-script verify --project <main-root> --worktree <run-worktree> --script <path>` exits 0
-     when current; non-zero means the template changed or the installed driver rotted → regenerate
-     with `write` (this is how a resumed run self-heals after an upgrade). If verify reports
-     `owner-env inline` (an older driver with `export CONDUCTOR_MERGE_VERIFY` etc. baked in), FIRST
-     move those lines into `resume-env.sh`, THEN regenerate — never drop owner config silently.
+     when current; non-zero means the template changed or the installed driver is an older
+     pinned-path format → regenerate with `write` (this is how a resumed run self-heals after an
+     upgrade). If verify reports `owner-env inline` (an older driver with `export
+     CONDUCTOR_MERGE_VERIFY` etc. baked in), move those lines into `resume-env.sh` FIRST — `write`
+     refuses to overwrite inline owner env without `--force`, so it can't be dropped silently.
+   - **Surface a stalled driver — silence was the original defect.** On reconcile, tail
+     `<main-root>/.conductor/resume-autodev.log`; if recent fires show `driver-unresolved` or
+     `fire-end rc=` non-zero (the generated driver logs both), WARN the owner loudly — the run has
+     been failing to make headless progress. (The driver already fails loud per-fire; this makes a
+     repeated failure visible at the next owner check-in instead of accumulating unnoticed.)
    - add crontab entries carrying the LITERAL marker `# conductor-autodev <main-root>`, where
      `<main-root>` is `$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")` —
      the MAIN checkout root, which is IDENTICAL whether computed from the owner checkout or the

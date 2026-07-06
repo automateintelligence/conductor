@@ -62,7 +62,9 @@ def test_render_sources_owner_env_out_of_line():
     """Owner/machine config is sourced, never baked — so regeneration can't clobber it."""
     s = _render()
     assert ".conductor/resume-env.sh" in s
-    assert "CONDUCTOR_MERGE_VERIFY" in s  # named in the header so owners know where it goes
+    assert (
+        "CONDUCTOR_MERGE_VERIFY" in s
+    )  # named in the header so owners know where it goes
 
 
 def test_render_preserves_the_three_guards():
@@ -70,7 +72,9 @@ def test_render_preserves_the_three_guards():
     assert "flock -n 9" in s  # (c) one fire at a time
     assert "/proc/$pid/cwd" in s  # (a) no double-drive (cwd detection)
     assert "assert run --level spec" in s  # (b) done-gate-green no-op
-    assert 'CONDUCTOR_HOME="$WORKTREE"' in s  # resumes in the worktree, not owner checkout
+    assert (
+        'CONDUCTOR_HOME="$WORKTREE"' in s
+    )  # resumes in the worktree, not owner checkout
 
 
 def test_render_is_deterministic():
@@ -169,7 +173,9 @@ def test_cli_write_to_stdout(capsys):
 
 def test_cli_write_to_file_is_executable(tmp_path):
     out = tmp_path / "resume-autodev.sh"
-    rc = rs.main(["write", "--project", PROJECT, "--worktree", WORKTREE, "--out", str(out)])
+    rc = rs.main(
+        ["write", "--project", PROJECT, "--worktree", WORKTREE, "--out", str(out)]
+    )
     assert rc == 0
     assert out.read_text() == _render()
     assert os.stat(out).st_mode & stat.S_IXUSR  # chmod +x so cron can run it
@@ -178,6 +184,100 @@ def test_cli_write_to_file_is_executable(tmp_path):
 def test_cli_verify_exit_codes(tmp_path):
     out = tmp_path / "resume-autodev.sh"
     rs.main(["write", "--project", PROJECT, "--worktree", WORKTREE, "--out", str(out)])
-    assert rs.main(["verify", "--project", PROJECT, "--worktree", WORKTREE, "--script", str(out)]) == 0
+    assert (
+        rs.main(
+            [
+                "verify",
+                "--project",
+                PROJECT,
+                "--worktree",
+                WORKTREE,
+                "--script",
+                str(out),
+            ]
+        )
+        == 0
+    )
     out.write_text("#!/usr/bin/env bash\necho stale\n")
-    assert rs.main(["verify", "--project", PROJECT, "--worktree", WORKTREE, "--script", str(out)]) == 1
+    assert (
+        rs.main(
+            [
+                "verify",
+                "--project",
+                PROJECT,
+                "--worktree",
+                WORKTREE,
+                "--script",
+                str(out),
+            ]
+        )
+        == 1
+    )
+
+
+# ---- no-clobber guard: regeneration must never silently drop inline owner env ----
+
+
+def test_write_refuses_to_clobber_inline_owner_env(tmp_path, capsys):
+    """The exact P1 risk: mechanical 'verify fails -> write' must NOT overwrite a driver whose
+    owner baked CONDUCTOR_MERGE_VERIFY inline. Refuse (exit 2) with migration guidance."""
+    out = tmp_path / "resume-autodev.sh"
+    original = (
+        "#!/usr/bin/env bash\nexport CONDUCTOR_MERGE_VERIFY='cd backend && pytest -q'\n"
+    )
+    out.write_text(original)
+    rc = rs.main(
+        ["write", "--project", PROJECT, "--worktree", WORKTREE, "--out", str(out)]
+    )
+    assert rc == 2
+    assert out.read_text() == original  # untouched — owner env preserved
+    err = capsys.readouterr().err
+    assert (
+        "refusing to overwrite" in err
+        and "resume-env.sh" in err
+        and "CONDUCTOR_MERGE_VERIFY" in err
+    )
+
+
+def test_write_force_overwrites_after_migration(tmp_path):
+    out = tmp_path / "resume-autodev.sh"
+    out.write_text("#!/usr/bin/env bash\nexport CONDUCTOR_MERGE_VERIFY='x'\n")
+    rc = rs.main(
+        [
+            "write",
+            "--project",
+            PROJECT,
+            "--worktree",
+            WORKTREE,
+            "--out",
+            str(out),
+            "--force",
+        ]
+    )
+    assert rc == 0
+    assert out.read_text() == _render()
+
+
+def test_write_regenerates_clean_driver_without_force(tmp_path):
+    """The common self-heal case: a current/older driver with NO inline owner env (env lives in
+    resume-env.sh) regenerates freely."""
+    out = tmp_path / "resume-autodev.sh"
+    out.write_text("#!/usr/bin/env bash\n# old clean driver, no inline exports\n")
+    assert (
+        rs.main(
+            ["write", "--project", PROJECT, "--worktree", WORKTREE, "--out", str(out)]
+        )
+        == 0
+    )
+    assert out.read_text() == _render()
+
+
+def test_render_shell_escapes_paths():
+    """A worktree path with a space/quote must not break or inject into the emitted shell."""
+    nasty = "/home/u/pro j'x"
+    s = rs.render(PROJECT, nasty)
+    assert (bash := _which("bash")) is None or subprocess.run(
+        [bash, "-n"], input=s, text=True, capture_output=True
+    ).returncode == 0
+    # the raw unescaped literal must not appear as a bare assignment
+    assert 'WORKTREE="/home/u/pro j\'x"' not in s
