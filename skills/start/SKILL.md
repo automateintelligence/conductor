@@ -79,9 +79,10 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 5b. **RUN TOPOLOGY (0.5.0 default): phase PRs merge into a run branch, NEVER directly to the
    default branch.** The default branch belongs to the owner; the run gets an integration branch
    reviewed ONCE, by the owner, at the end.
-   - **Reconcile-first, EXACT name:** compute `conductor/run-<spec-slug>` from THIS spec's
-     filename, then `git ls-remote origin refs/heads/conductor/run-<spec-slug>` — exists → reuse;
-     absent → create off the default branch and push. NEVER bind by wildcard scan
+   - **Reconcile-first, EXACT name:** `RB="$(conductor run-branch name <spec>)"` — the
+     single-sourced resolver; never derive the slug in prose — then
+     `git ls-remote "$(conductor remote)" "refs/heads/$RB"` — exists → reuse; absent → create off
+     `$(conductor default-branch)` and push. NEVER bind by wildcard scan
      (`conductor/run-*`): with two active runs a scan grabs the wrong spec's branch.
    - **Stale-run cleanup first:** if `.conductor/run_branch` names a branch that no longer exists
      on the remote (the owner merged the final PR and deleted it — the run is over), remove the
