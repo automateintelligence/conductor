@@ -21,7 +21,10 @@ import re
 import subprocess
 import sys
 
+from conductor.paths import project_root
+
 _GH_TIMEOUT = float(os.environ.get("CONDUCTOR_GH_TIMEOUT", "60"))
+_GIT_TIMEOUT = 10.0  # local symbolic-ref lookup, no network — decoupled from _GH_TIMEOUT
 
 
 def run_branch_name(spec_path: str) -> str:
@@ -40,7 +43,11 @@ def run_branch_name(spec_path: str) -> str:
 
 
 def _gh_default() -> str | None:
-    """gh knows the server truth; time-bounded, any failure → None (next probe)."""
+    """gh knows the server truth; time-bounded, any failure → None (next probe).
+
+    Bound to `project_root()` (like `_git_default`) — gh resolves the repo from its cwd,
+    and the process cwd may be a DIFFERENT repo than `$CONDUCTOR_HOME`; both probes must
+    answer for the same project."""
     out = subprocess.run(
         [
             "gh",
@@ -54,6 +61,7 @@ def _gh_default() -> str | None:
         capture_output=True,
         text=True,
         timeout=_GH_TIMEOUT,
+        cwd=project_root(),
     )
     if out.returncode != 0:
         return None
@@ -70,13 +78,11 @@ def _git_default() -> str | None:
         remote = resolve() or "origin"
     except Exception:
         remote = "origin"
-    from conductor.paths import project_root
-
     out = subprocess.run(
         ["git", "-C", project_root(), "symbolic-ref", f"refs/remotes/{remote}/HEAD"],
         capture_output=True,
         text=True,
-        timeout=_GH_TIMEOUT,
+        timeout=_GIT_TIMEOUT,
     )
     if out.returncode != 0:
         return None

@@ -178,6 +178,36 @@ def test_default_branch_prefers_gh_answer(tmp_path, monkeypatch):
     assert branches.default_branch() == "develop"
 
 
+def test_gh_probe_answers_for_conductor_home_not_cwd(tmp_path, monkeypatch):
+    """Both probes must resolve the SAME repo: $CONDUCTOR_HOME, never the process cwd.
+
+    The stub gh answers from a per-repo marker file in its own cwd, so a gh probe left
+    bound to the process cwd would report the WRONG repo's default here."""
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    gh = stub_bin / "gh"
+    gh.write_text("#!/bin/sh\ncat .default-branch 2>/dev/null || exit 1\n")
+    os.chmod(gh, 0o755)
+    home_repo = _mk_repo(tmp_path, "home-repo", with_origin_head=False)
+    cwd_repo = _mk_repo(tmp_path, "cwd-repo", with_origin_head=False)
+    (home_repo / ".default-branch").write_text("home-default\n")
+    (cwd_repo / ".default-branch").write_text("cwd-default\n")
+    monkeypatch.setenv("PATH", f"{stub_bin}:{os.environ['PATH']}")
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home_repo))
+    monkeypatch.chdir(cwd_repo)
+    assert branches.default_branch() == "home-default"
+
+
+def test_git_probe_answers_for_conductor_home_not_cwd(tmp_path, monkeypatch):
+    stub_bin = _stub_gh(tmp_path)  # gh always fails -> the git probe decides
+    home_repo = _mk_repo(tmp_path, "home-repo2", with_origin_head=True)  # trunk
+    cwd_repo = _mk_repo(tmp_path, "cwd-repo2", with_origin_head=False)  # would say main
+    monkeypatch.setenv("PATH", f"{stub_bin}:{os.environ['PATH']}")
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home_repo))
+    monkeypatch.chdir(cwd_repo)
+    assert branches.default_branch() == "trunk"
+
+
 def test_default_branch_swallows_any_probe_exception(monkeypatch):
     def boom():
         raise RuntimeError("probe exploded")
