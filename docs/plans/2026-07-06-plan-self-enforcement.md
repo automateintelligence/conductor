@@ -233,7 +233,7 @@ resolution invariant, and the open implementation question about mode detection.
 - Test: frozen `assertions/self_enforcement/test_a15_readme_authority.py` (read first); no new
   unit test file needed — A15 is the doc contract.
 
-- [ ] **Task 2.1 — README "Unattended authority" subsection.** Add a subsection titled exactly
+- [x] **Task 2.1 — README "Unattended authority" subsection.** Add a subsection titled exactly
   **"Unattended authority"** inside README §3 ("### 3. Walk away" in "## Use"), within ~3000
   chars of the heading covering all three needles the frozen test checks: the model plainly
   stated — an unattended run **inherits the permission mode of the session you launch
@@ -246,7 +246,7 @@ resolution invariant, and the open implementation question about mode detection.
   world-writable one. Run the manifest command for `a15-readme-authority-no-grant-leftover` →
   the section test passes. Commit.
 
-- [ ] **Task 2.2 — one canonical bypass spelling across user-facing docs (review-verified — no
+- [x] **Task 2.2 — one canonical bypass spelling across user-facing docs (review-verified — no
   frozen assertion).** Canonical form: **`--dangerously-skip-permissions`** (it is what
   `CONDUCTOR_RESUME_CLAUDE_FLAGS` actually carries in the driver, `skills/start/SKILL.md:140`,
   and `recovery.md:55`). Rewrite `experiments/E5-end-to-end/recovery.md`'s Security note
@@ -256,7 +256,7 @@ resolution invariant, and the open implementation question about mode detection.
   The Python-side mode token `bypassPermissions` inside `conductor/authority.py` and its tests
   is a session-mode VALUE, not a doc spelling — leave it.
 
-- [ ] **Task 2.3 — no `grant` leftovers.** Verify no user-facing doc (README,
+- [x] **Task 2.3 — no `grant` leftovers.** Verify no user-facing doc (README,
   `experiments/E5-end-to-end/recovery.md`, `skills/*/SKILL.md`) contains `grant --scoped` or
   `grant --full` (the spec + its `.assertions.md` are exempt by construction). Run
   `pytest via the a15 manifest command` and the full quality gate. Commit.
