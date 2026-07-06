@@ -87,6 +87,9 @@ def test_assertions_to_tests_skill_contract():
         "no:cacheprovider",
         "self-contained",
         "<spec>.assertions.md",
+        "red-team",
+        "worse than none",
+        "exists-but-unused",
     ]:
         assert needle in body, needle
 
