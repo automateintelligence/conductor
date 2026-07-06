@@ -508,7 +508,7 @@ the marker is present with a clean recent log; with a durable driver but recent
 The marker's `<main-root>` is `dirname` of `git rev-parse --path-format=absolute
 --git-common-dir` — identical from the owner checkout and the run worktree.
 
-- [ ] **Task 6.1 — shared cron marker: `install-cron`/`uninstall-cron` (TDD; spec: "compute the
+- [x] **Task 6.1 — shared cron marker: `install-cron`/`uninstall-cron` (TDD; spec: "compute the
   marker once so start (install) and autodev step 3b (removal) share one implementation and
   cannot drift" — review-verified pairing, the marker computation itself is exercised by
   frozen A13/A14).** In `conductor/resume_script.py` add:
@@ -535,7 +535,7 @@ The marker's `<main-root>` is `dirname` of `git rev-parse --path-format=absolute
   machine's real crontab is NEVER touched. Assert install→uninstall round-trips to the
   original crontab, install is idempotent, and unrelated lines survive. Quality gate. Commit.
 
-- [ ] **Task 6.2 — `conductor driver status` (TDD).** Read `test_a13_driver_status_durable.py`
+- [x] **Task 6.2 — `conductor driver status` (TDD).** Read `test_a13_driver_status_durable.py`
   and `test_a14_driver_status_failed_fires.py` first. Create `conductor/driver.py`:
   `status(project) -> int` — compute `root = resume_script.main_root(project)`; durable =
   `resume_script.cron_marker(root)` appears in `crontab -l` output (rc≠0/empty = no crontab)
@@ -565,7 +565,7 @@ The marker's `<main-root>` is `dirname` of `git rev-parse --path-format=absolute
   commands for `a13-driver-status-nonzero-without-driver` and
   `a14-driver-status-flags-failed-fires` → PASS. Quality gate. Commit.
 
-- [ ] **Task 6.3 — skills own the wiring through the tested surface (review-verified — no frozen
+- [x] **Task 6.3 — skills own the wiring through the tested surface (review-verified — no frozen
   assertion).** `skills/start/SKILL.md` step 6: for an unattended run, replace the
   judgment-gated Tier-B installation ("if the response does NOT confirm persistence…") with
   the fail-closed default — always `conductor driver install` (script + crontab lines via
