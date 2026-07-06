@@ -92,7 +92,8 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      merge-gate's expected-base leg reads — a phase PR targeting anything else blocks with
      `base-mismatch`. On a fresh clone the file is missing: re-derive it from the ls-remote above
      (this step IS the re-derivation — reconcile-first).
-   - **Work in a WORKTREE:** `git worktree add ../<repo>-run-<spec-slug> conductor/run-<spec-slug>`
+   - **Work in a WORKTREE:** `git worktree add ../<repo>-run-<spec-slug> "$RB"` (the resolver's
+     name from above — never re-derive the slug for the branch argument)
      — the worker and the Tier-B watchdog operate in the worktree (`CONDUCTOR_HOME` = worktree
      root), so the owner's own checkout is never branch-switched or dirtied by fires. SKIP if it
      exists.
