@@ -6,7 +6,9 @@ branch" in prose, so the two skills could diverge (and did drift in review). Mir
 as a CLI verb the prose calls instead of re-deriving.
 
 `run_branch_name` is a pure deterministic function of the spec path: same spec → the
-byte-identical `conductor/run-<slug>`, different specs → different names. `default_branch`
+byte-identical `conductor/run-<slug>`, different spec STEMS → different names (the slug
+carries the filename's stem — the a11-pinned granularity — so two specs sharing a stem in
+different directories map to the same run branch; one run per spec stem). `default_branch`
 resolves the repo's real default (gh repo view, then the origin/HEAD symbolic ref) and
 fails OPEN to `main` — exit 0, NEVER an empty string, which would make a downstream
 `git fetch "$R" ""` operate on the wrong ref.
