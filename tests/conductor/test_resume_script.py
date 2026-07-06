@@ -3,6 +3,7 @@ silent-stall (generation-time-pinned bins that rot on upgrade)."""
 
 import os
 import re
+import shlex
 import stat
 import subprocess
 
@@ -722,3 +723,203 @@ def test_render_shell_escapes_paths():
     ).returncode == 0
     # the raw unescaped literal must not appear as a bare assignment
     assert 'WORKTREE="/home/u/pro j\'x"' not in s
+
+
+# ---- shared cron marker + install-cron/uninstall-cron (Phase 6, task 6.1) ----
+#
+# Every test here uses a STUB `crontab` executable prepended to PATH (state recorded in
+# a temp file) — the machine's real crontab is NEVER read or written.
+
+
+def _mk_git_project(tmp):
+    proj = tmp / "proj"
+    proj.mkdir()
+    subprocess.run(["git", "init", "-q", str(proj)], check=True, timeout=30)
+    common = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(proj),
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    ).stdout.strip()
+    return proj, os.path.dirname(common)
+
+
+def _stub_crontab(tmp, monkeypatch, initial=None):
+    """Stub `crontab` on PATH: `-l` prints the recorded state (exit 1 when absent, like a
+    user with no crontab); `-` records stdin as the new state. Returns the state file."""
+    stub_bin = tmp / "stub-bin"
+    stub_bin.mkdir()
+    state = tmp / "crontab-state"
+    stub = stub_bin / "crontab"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f'STATE="{state}"\n'
+        'case "${1:-}" in\n'
+        '  -l) [ -f "$STATE" ] || { echo "no crontab for user" >&2; exit 1; }; cat "$STATE" ;;\n'
+        '  -) cat > "$STATE" ;;\n'
+        "  *) exit 64 ;;\n"
+        "esac\n"
+    )
+    os.chmod(stub, 0o755)
+    if initial is not None:
+        state.write_text(initial)
+    monkeypatch.setenv("PATH", f"{stub_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    return state
+
+
+def test_main_root_is_dirname_of_git_common_dir(tmp_path):
+    proj, main_root = _mk_git_project(tmp_path)
+    assert rs.main_root(str(proj)) == main_root
+
+
+def test_main_root_identical_from_linked_worktree(tmp_path):
+    """The whole point of --git-common-dir over --show-toplevel: install (from the owner
+    checkout) and removal (from the run worktree) must compute the SAME root."""
+    proj, main_root = _mk_git_project(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(proj), "commit", "--allow-empty", "-q", "-m", "x"],
+        check=True,
+        timeout=30,
+        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+    )
+    wt = tmp_path / "wt"
+    subprocess.run(
+        ["git", "-C", str(proj), "worktree", "add", "-q", str(wt)],
+        check=True,
+        timeout=30,
+    )
+    assert rs.main_root(str(wt)) == rs.main_root(str(proj)) == main_root
+
+
+def test_cron_marker_is_the_literal_autodev_tag():
+    assert rs.cron_marker("/home/u/proj") == "# conductor-autodev /home/u/proj"
+
+
+def test_install_cron_appends_both_legs_with_marker(tmp_path, monkeypatch):
+    proj, main_root = _mk_git_project(tmp_path)
+    state = _stub_crontab(tmp_path, monkeypatch)
+    assert rs.main(["install-cron", "--project", str(proj)]) == 0
+    lines = state.read_text().splitlines()
+    marker = rs.cron_marker(main_root)
+    marked = [ln for ln in lines if marker in ln]
+    assert len(marked) == 2, lines
+    assert any(
+        ln.startswith("@reboot sleep 30 && ")
+        and f"{main_root}/.conductor/resume-autodev.sh" in ln
+        for ln in marked
+    ), lines
+    assert any(
+        ln.startswith("*/20 * * * * ")
+        and f"{main_root}/.conductor/resume-autodev.sh" in ln
+        for ln in marked
+    ), lines
+
+
+def test_install_cron_is_idempotent(tmp_path, monkeypatch):
+    proj, main_root = _mk_git_project(tmp_path)
+    state = _stub_crontab(tmp_path, monkeypatch)
+    assert rs.main(["install-cron", "--project", str(proj)]) == 0
+    first = state.read_text()
+    assert rs.main(["install-cron", "--project", str(proj)]) == 0
+    assert state.read_text() == first
+    marker = rs.cron_marker(main_root)
+    assert sum(marker in ln for ln in first.splitlines()) == 2
+
+
+def test_install_cron_preserves_unrelated_lines(tmp_path, monkeypatch):
+    proj, _ = _mk_git_project(tmp_path)
+    unrelated = "0 5 * * * /usr/local/bin/backup.sh\n# a comment the owner wrote\n"
+    state = _stub_crontab(tmp_path, monkeypatch, initial=unrelated)
+    assert rs.main(["install-cron", "--project", str(proj)]) == 0
+    body = state.read_text()
+    assert "0 5 * * * /usr/local/bin/backup.sh" in body
+    assert "# a comment the owner wrote" in body
+
+
+def test_install_then_uninstall_round_trips_to_original(tmp_path, monkeypatch):
+    """Removal matches install BECAUSE both derive cron_marker(main_root(...)) — one
+    implementation, no drift."""
+    proj, _ = _mk_git_project(tmp_path)
+    original = "0 5 * * * /usr/local/bin/backup.sh\n*/10 * * * * /opt/other/job\n"
+    state = _stub_crontab(tmp_path, monkeypatch, initial=original)
+    assert rs.main(["install-cron", "--project", str(proj)]) == 0
+    assert state.read_text() != original
+    assert rs.main(["uninstall-cron", "--project", str(proj)]) == 0
+    assert state.read_text() == original
+
+
+def test_uninstall_cron_only_removes_this_projects_marker(tmp_path, monkeypatch):
+    """grep -F -v -- semantics: ONLY lines carrying THIS project's exact marker go; another
+    project's conductor-autodev lines survive."""
+    proj, _ = _mk_git_project(tmp_path)
+    other = "*/20 * * * * /elsewhere/.conductor/resume-autodev.sh # conductor-autodev /elsewhere\n"
+    state = _stub_crontab(tmp_path, monkeypatch, initial=other)
+    assert rs.main(["install-cron", "--project", str(proj)]) == 0
+    assert rs.main(["uninstall-cron", "--project", str(proj)]) == 0
+    assert state.read_text() == other
+
+
+def test_uninstall_cron_with_no_crontab_is_a_clean_noop(tmp_path, monkeypatch):
+    """No crontab and nothing to remove = a TRUE no-op: exit 0, nothing written (the
+    'no crontab' state is not converted into an existing empty crontab)."""
+    proj, _ = _mk_git_project(tmp_path)
+    state = _stub_crontab(tmp_path, monkeypatch)  # no state file = no crontab
+    assert rs.main(["uninstall-cron", "--project", str(proj)]) == 0
+    assert not state.exists()
+
+
+def test_cron_read_failure_refuses_instead_of_wiping(tmp_path, monkeypatch):
+    """A `crontab -l` failure that is NOT 'no crontab for user' (spool unreadable, cron
+    misconfigured) must refuse loudly — treating it as empty would make the write-back
+    destroy every pre-existing job."""
+    proj, _ = _mk_git_project(tmp_path)
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    stub = stub_bin / "crontab"
+    written = tmp_path / "written"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'case "${1:-}" in\n'
+        '  -l) echo "crontab: /var/spool/cron: Permission denied" >&2; exit 1 ;;\n'
+        f'  -) cat > "{written}" ;;\n'
+        "esac\n"
+    )
+    os.chmod(stub, 0o755)
+    monkeypatch.setenv("PATH", f"{stub_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert rs.main(["install-cron", "--project", str(proj)]) == 1
+    assert not written.exists()  # never wrote a table built from a failed read
+
+
+def test_install_cron_quotes_a_root_with_spaces(tmp_path, monkeypatch):
+    """The cron COMMAND is shell-quoted (a space in the root must not word-split the
+    script path); the marker comment stays the literal unquoted fixed string."""
+    base = tmp_path / "has space"
+    base.mkdir()
+    proj, main_root = _mk_git_project(base)
+    state = _stub_crontab(tmp_path, monkeypatch)
+    assert rs.main(["install-cron", "--project", str(proj)]) == 0
+    marked = [
+        ln for ln in state.read_text().splitlines() if rs.cron_marker(main_root) in ln
+    ]
+    assert len(marked) == 2
+    quoted = shlex.quote(f"{main_root}/.conductor/resume-autodev.sh")
+    for ln in marked:
+        assert quoted in ln, ln
+        assert ln.endswith(rs.cron_marker(main_root)), ln
+
+
+def test_install_cron_on_a_non_repo_fails_with_a_named_reason(tmp_path, monkeypatch, capsys):
+    _stub_crontab(tmp_path, monkeypatch)
+    not_repo = tmp_path / "plain"
+    not_repo.mkdir()
+    assert rs.main(["install-cron", "--project", str(not_repo)]) == 1
+    assert "cannot resolve main root" in capsys.readouterr().err
