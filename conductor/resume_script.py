@@ -31,7 +31,7 @@ import sys
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and
 # `/conductor:start` reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 3
+TEMPLATE_VERSION = 4
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
@@ -144,7 +144,18 @@ done
 # full autonomy, CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions". The default here
 # is EMPTY (supervised only): a full-access agent firing every heartbeat is a standing security
 # posture, so the owner opts in explicitly, never the generator.
-printf '%s fire-start\\n' "$(ts)" >> "$LOG"
+# POSTURE VISIBILITY (audit, review A-4/A-6): label every fire with the permission posture
+# DERIVED from the owner's configured flags — never a constant, and never the raw flag value
+# or a settings path (the log must not leak them). Bypass wins when both flags appear: the
+# more privileged posture is the honest label. Patterns are space-anchored so a flag VALUE
+# that merely contains the substring (e.g. a settings path named x--dangerously-…) cannot
+# mislabel the fire; bypassPermissions catches the --permission-mode spelling of full bypass.
+POSTURE="supervised"
+case " ${{CONDUCTOR_RESUME_CLAUDE_FLAGS:-}} " in
+    *" --dangerously-skip-permissions"*|*"bypassPermissions"*) POSTURE="full-bypass" ;;
+    *" --settings"*)                                           POSTURE="scoped" ;;
+esac
+printf '%s fire-start posture=%s\\n' "$(ts)" "$POSTURE" >> "$LOG"
 # Re-parse the owner's flags with THEIR OWN quoting (a bare unquoted expansion would word-split
 # a quoted `--settings '/path with space'` into fragments). eval adds no new trust surface here:
 # resume-env.sh is already sourced — i.e. executed — owner-owned, 0600-guarded content.

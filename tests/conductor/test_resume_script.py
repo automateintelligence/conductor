@@ -86,10 +86,22 @@ def test_render_never_bakes_a_permission_bypass():
         if ln.strip().startswith("eval") and "${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}" in ln
     ]
     assert len(evals) == 1
-    # no bypass flag baked anywhere outside comments
+    # no bypass flag baked anywhere outside comments — the ONLY permitted non-comment
+    # occurrence is the posture-detection `case` match pattern (detection, not enablement).
+    # Exact whole-line equality: a tail appended to that line (e.g. `set -- <flag> "$@"`)
+    # would be enablement and must fail here.
+    detection_arm = (
+        '*" --dangerously-skip-permissions"*|*"bypassPermissions"*)'
+        ' POSTURE="full-bypass" ;;'
+    )
     for ln in s.splitlines():
-        if not ln.strip().startswith("#"):
-            assert "--dangerously-skip-permissions" not in ln
+        stripped = ln.strip()
+        if stripped.startswith("#"):
+            continue
+        if "--dangerously-skip-permissions" in ln or "bypassPermissions" in ln:
+            assert stripped == detection_arm, (
+                f"bypass flag outside the posture-detection case pattern: {ln!r}"
+            )
 
 
 def test_write_nudges_owner_about_unattended_permissions(tmp_path, capsys):
@@ -419,6 +431,121 @@ def test_driver_preserves_quoted_flag_values_with_spaces(tmp_path):
     # negative: the word-split fragments must not appear as argv entries
     assert "'/tmp/space" not in argv
     assert "path/settings.json'" not in argv
+
+
+# ---- posture visibility: fire-start carries a DERIVED posture label (Phase 3, A5) ----
+
+
+def _posture_lines(log):
+    return [ln for ln in log.splitlines() if "posture=" in ln]
+
+
+def _fire_with_env_line(tmp, name, env_line):
+    """One harness per case (fresh log): optionally write resume-env.sh (0600), fire,
+    return the log text."""
+    base = tmp / name
+    base.mkdir()
+    project, driver, home, _fired = _mk_env_harness(base)
+    if env_line is not None:
+        env_file = project / ".conductor" / "resume-env.sh"
+        env_file.write_text(env_line + "\n")
+        os.chmod(env_file, 0o600)
+    proc = _fire_driver(driver, home)
+    log_file = project / ".conductor" / "resume-autodev.log"
+    log = log_file.read_text() if log_file.is_file() else ""
+    # harness sanity: the stub fire must have happened, else the case proves nothing
+    assert "fire-start" in log, (name, proc.returncode, proc.stdout, proc.stderr, log)
+    return log
+
+
+def test_posture_label_derived_from_flags_three_inputs(tmp_path):
+    """Bypass flags -> full-bypass; --settings <path> -> scoped (path leaked nowhere);
+    empty -> supervised. Three pairwise-distinct labels prove the label is DERIVED,
+    never a constant."""
+    secret_settings = str(tmp_path / "scoped-secret-settings.json")
+
+    log_bypass = _fire_with_env_line(
+        tmp_path,
+        "bypass",
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"',
+    )
+    log_scoped = _fire_with_env_line(
+        tmp_path,
+        "scoped",
+        f'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings {secret_settings}"',
+    )
+    log_supervised = _fire_with_env_line(tmp_path, "supervised", None)
+
+    for log, label in (
+        (log_bypass, "posture=full-bypass"),
+        (log_scoped, "posture=scoped"),
+        (log_supervised, "posture=supervised"),
+    ):
+        lines = _posture_lines(log)
+        assert lines, f"no posture= line logged; expected {label}\n{log}"
+        assert any(label in ln for ln in lines), (label, lines)
+
+    # must-not: the posture line carries the BARE label — never the raw flag value
+    for ln in _posture_lines(log_bypass):
+        assert "--dangerously-skip-permissions" not in ln, ln
+    # must-not: the settings path appears NOWHERE in the whole log
+    assert secret_settings not in log_scoped, log_scoped
+    # scoped is a bare label, not full-bypass mislabeled
+    assert not any("posture=full-bypass" in ln for ln in _posture_lines(log_scoped))
+
+
+def test_posture_bypass_wins_when_both_flags_present(tmp_path):
+    """--dangerously-skip-permissions AND --settings together -> full-bypass (the more
+    privileged posture is the honest label)."""
+    log = _fire_with_env_line(
+        tmp_path,
+        "both",
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings /tmp/s.json --dangerously-skip-permissions"',
+    )
+    lines = _posture_lines(log)
+    assert any("posture=full-bypass" in ln for ln in lines), lines
+    assert not any("posture=scoped" in ln for ln in lines), lines
+
+
+def test_posture_recognizes_permission_mode_bypass_spelling(tmp_path):
+    """`--permission-mode bypassPermissions` is the other full-bypass spelling — labeling
+    it supervised would be exactly the audit misrepresentation A5 exists to prevent."""
+    log = _fire_with_env_line(
+        tmp_path,
+        "permmode",
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--permission-mode bypassPermissions"',
+    )
+    assert any("posture=full-bypass" in ln for ln in _posture_lines(log)), log
+
+
+def test_posture_not_fooled_by_flag_substring_inside_a_value(tmp_path):
+    """A settings PATH that merely contains the bypass substring must stay scoped — the
+    patterns are space-anchored, matching flag words, not arbitrary value substrings."""
+    log = _fire_with_env_line(
+        tmp_path,
+        "substr",
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings /tmp/x--dangerously-skip-permissions.json"',
+    )
+    lines = _posture_lines(log)
+    assert any("posture=scoped" in ln for ln in lines), lines
+    assert not any("posture=full-bypass" in ln for ln in lines), lines
+
+
+def test_render_posture_line_never_interpolates_raw_flags():
+    """Static must-not: the printf that logs the posture label must interpolate the derived
+    $POSTURE variable, never $CONDUCTOR_RESUME_CLAUDE_FLAGS (which would leak the raw flag
+    value or the settings path into the log)."""
+    s = _render()
+    posture_printfs = [
+        ln for ln in s.splitlines() if "printf" in ln and "posture=" in ln
+    ]
+    assert len(posture_printfs) == 1, posture_printfs
+    line = posture_printfs[0]
+    assert "CONDUCTOR_RESUME_CLAUDE_FLAGS" not in line, line
+    assert '"$POSTURE"' in line, line
+    # the label is DERIVED: a case statement maps flags -> label before the fire
+    assert 'POSTURE="supervised"' in s  # least-privileged default
+    assert s.index('POSTURE="supervised"') < s.index(line)
 
 
 def test_render_shell_escapes_paths():
