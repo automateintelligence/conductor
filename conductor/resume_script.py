@@ -144,23 +144,23 @@ done
 # full autonomy, CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions". The default here
 # is EMPTY (supervised only): a full-access agent firing every heartbeat is a standing security
 # posture, so the owner opts in explicitly, never the generator.
-# POSTURE VISIBILITY (audit, review A-4/A-6): label every fire with the permission posture
-# DERIVED from the owner's configured flags — never a constant, and never the raw flag value
-# or a settings path (the log must not leak them). Bypass wins when both flags appear: the
-# more privileged posture is the honest label. Patterns are space-anchored so a flag VALUE
-# that merely contains the substring (e.g. a settings path named x--dangerously-…) cannot
-# mislabel the fire; --permission-mode bypassPermissions is the other spelling of full bypass
-# (anchored to the flag+value shape so a path merely containing bypassPermissions stays honest).
-POSTURE="supervised"
-case " ${{CONDUCTOR_RESUME_CLAUDE_FLAGS:-}} " in
-    *" --dangerously-skip-permissions"*|*" --permission-mode bypassPermissions"*|*" --permission-mode=bypassPermissions"*) POSTURE="full-bypass" ;;
-    *" --settings"*) POSTURE="scoped" ;;
-esac
-printf '%s fire-start posture=%s\\n' "$(ts)" "$POSTURE" >> "$LOG"
 # Re-parse the owner's flags with THEIR OWN quoting (a bare unquoted expansion would word-split
 # a quoted `--settings '/path with space'` into fragments). eval adds no new trust surface here:
 # resume-env.sh is already sourced — i.e. executed — owner-owned, 0600-guarded content.
 eval "set -- ${{CONDUCTOR_RESUME_CLAUDE_FLAGS:-}}"
+# POSTURE VISIBILITY (audit, review A-4/A-6): label every fire with the permission posture
+# DERIVED from the SAME parsed argv the fire executes with — never a constant, never the raw
+# flag value or a settings path (the log must not leak them), and never a second divergent
+# parse (a quoted 'bypassPermissions' value must log what it executes). Bypass wins when both
+# appear: the more privileged posture is the honest label. Patterns are space-anchored so a
+# flag VALUE merely containing the substring (e.g. a path named x--dangerously-…) cannot
+# mislabel the fire; --permission-mode bypassPermissions is the other spelling of full bypass.
+POSTURE="supervised"
+case " $* " in
+    *" --dangerously-skip-permissions"*|*" --permission-mode bypassPermissions"*|*" --permission-mode=bypassPermissions"*) POSTURE="full-bypass" ;;
+    *" --settings"*) POSTURE="scoped" ;;
+esac
+printf '%s fire-start posture=%s\\n' "$(ts)" "$POSTURE" >> "$LOG"
 "$CLAUDE_BIN" -p "/conductor:autodev" "$@" >> "$LOG" 2>&1
 rc=$?
 printf '%s fire-end rc=%s\\n' "$(ts)" "$rc" >> "$LOG"
@@ -265,17 +265,22 @@ def _posture_decided(env_path: str) -> bool:
             lines = f.read().splitlines()
     except OSError:
         return False
+    # Shell semantics: the FINAL effective assignment wins — an early posture followed by a
+    # reassignment to "" (or an unset) is undecided at runtime and must still nudge.
+    final_value: str | None = None
     for ln in lines:
         try:
             words = shlex.split(ln, comments=True)
-        except ValueError:  # unbalanced quotes — malformed, fail toward nudging
+        except ValueError:  # unbalanced quotes — malformed, ignore the line
             continue
-        for word in words:
-            if word.startswith(f"{_FLAGS_VAR}=") and any(
-                tok in word for tok in _POSTURE_TOKENS
-            ):
-                return True
-    return False
+        for i, word in enumerate(words):
+            if word.startswith(f"{_FLAGS_VAR}="):
+                final_value = word[len(_FLAGS_VAR) + 1 :]
+            elif word == "unset" and _FLAGS_VAR in words[i + 1 :]:
+                final_value = None
+    if final_value is None:
+        return False
+    return any(tok in final_value for tok in _POSTURE_TOKENS)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -179,6 +179,28 @@ def test_write_nudge_ignores_commented_out_posture_lines(tmp_path, capsys):
     assert "unattended" in err
 
 
+@pytest.mark.parametrize(
+    "override_line",
+    [
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS=""',
+        "unset CONDUCTOR_RESUME_CLAUDE_FLAGS",
+    ],
+)
+def test_write_nudge_fires_when_later_override_clears_posture(
+    tmp_path, capsys, override_line
+):
+    """Shell semantics: the FINAL effective assignment wins. A posture followed by an
+    empty reassignment (or unset) is undecided at runtime — the nudge must still fire."""
+    env = tmp_path / "resume-env.sh"
+    env.write_text(
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings /tmp/settings.json"\n'
+        + override_line
+        + "\n"
+    )
+    err = _write_and_read_err(tmp_path, capsys)
+    assert "unattended" in err
+
+
 def test_write_nudge_ignores_comment_tail_on_empty_assignment(tmp_path, capsys):
     """An inline comment AFTER an empty active assignment is guidance, not a decision:
     `FLAGS="" # use --settings /path` must still nudge (the active value is empty)."""
@@ -606,6 +628,18 @@ def test_posture_not_fooled_by_flag_substring_inside_a_value(tmp_path):
     lines = _posture_lines(log)
     assert any("posture=scoped" in ln for ln in lines), lines
     assert not any("posture=full-bypass" in ln for ln in lines), lines
+
+
+def test_posture_derived_from_executed_argv_not_raw_string(tmp_path):
+    """The label is derived from the SAME parsed argv the fire executes with: a QUOTED
+    'bypassPermissions' value executes as full bypass and must log full-bypass, not
+    supervised (a divergent raw-string parse would misrepresent the audit trail)."""
+    log = _fire_with_env_line(
+        tmp_path,
+        "quotedbp",
+        "CONDUCTOR_RESUME_CLAUDE_FLAGS=\"--permission-mode 'bypassPermissions'\"",
+    )
+    assert any("posture=full-bypass" in ln for ln in _posture_lines(log)), log
 
 
 def test_posture_not_fooled_by_bypasspermissions_substring_in_a_path(tmp_path):
