@@ -71,10 +71,14 @@ step 3b's terminal crontab removal.
    repos — this rule and the base leg are the enforcement.)
    **3b.** Mark done, use **`CronList`** to find the driver cron, then
    **CronDelete** it, AND remove any Tier-B OS fallback — the crontab lines carrying the
-   literal marker plus their resume script:
-   `crontab -l | grep -F -v -- "# conductor-autodev $(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")" | crontab -`
-   (`grep -F` = fixed string; the MAIN-checkout-root path is identical from the run worktree and
-   the owner checkout — `--show-toplevel` is not — so install and removal always agree) — else the heartbeat keeps firing no-ops forever.
+   literal marker `# conductor-autodev <main-root>`:
+   `conductor resume-script uninstall-cron --project "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"`
+   — the tested equivalent of `crontab -l | grep -F -v -- "<marker>" | crontab -` (`grep -F` =
+   fixed string: drop exactly the lines containing the marker, byte-for-byte, no regex). The
+   marker's `<main-root>` is the MAIN-checkout-root path, identical from the run worktree and
+   the owner checkout — `--show-toplevel` is not — and `uninstall-cron` computes it with the
+   SAME implementation `install-cron` used, so install and removal always agree — else the
+   heartbeat keeps firing no-ops forever.
    This removal is the ONLY sanctioned mutation of run infrastructure. The final handoff names the leftover run worktree and `.conductor/run_branch` — they stay
    until the owner resolves the final PR; the next `/conductor:start` reconcile removes them
    once the run branch is gone from the remote. Final handoff, STOP.
