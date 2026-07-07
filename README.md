@@ -66,6 +66,7 @@ SETUP  (you run this once)
     └─ /conductor:start <spec>   ── the supervisor; idempotent, reconcile-first ───┐
          0. conductor preflight ........... does every conducted skill resolve? (fail-closed)
          1. /conductor:assertions-to-tests  reads <spec>.assertions.md → assertions/manifest.yaml + RED tests = DONE-GATE
+            conductor gate lint ............ fail-closed lint of the gate's own quality (unpinned/weak tests)
             conductor gate freeze .......... snapshot + commit the gate (FROZEN; worker can't weaken it)
          2. /superpowers:writing-plans .... plan.md (phases → tasks)        [only if no plan yet]
          3. /conductor:issue-sync ......... GitHub milestone + phase issues + task sub-issues + labels
@@ -264,12 +265,35 @@ The interval is just a **heartbeat**: `CronCreate` fires only while the session 
 never overlaps a running fire (it no-ops until the current phase finishes), and the interval need
 not match how long a phase takes. Two limits to know: the recurring cron **auto-expires after 7
 days** (re-run `/conductor:start` to continue), and an in-session cron **dies when the terminal
-closes**. For a run that survives reboots and closed terminals, install the **Tier-B OS
-watchdog**: a flock-guarded resume script firing `claude -p "/conductor:autodev"` (session-detect
-no-op while a terminal is live; exits once the gate is green) plus `@reboot` + heartbeat crontab
-lines tagged `# conductor-autodev <main-root>` (the main-checkout root, identical from the
-run worktree and the owner checkout) — spec in
+closes**. For a run that survives reboots and closed terminals, `start` installs the **Tier-B OS
+watchdog** as the fail-closed default for an unattended run — `conductor driver install`, never
+a judgment call about whether the in-session cron persisted: a flock-guarded resume script
+firing `claude -p "/conductor:autodev"` (session-detect no-op while a terminal is live; exits
+once the gate is green) plus `@reboot` + heartbeat crontab lines tagged
+`# conductor-autodev <main-root>` (the main-checkout root, identical from the run worktree and
+the owner checkout; the marker is computed by the CLI, and install/removal share one
+implementation, so they cannot drift). `conductor driver status` reports, on demand, whether a
+durable driver exists and whether recent fires failed — spec in
 [`experiments/E5-end-to-end/recovery.md`](experiments/E5-end-to-end/recovery.md).
+
+#### Unattended authority
+
+There is no conductor-specific permission command: an unattended run **inherits the
+permission mode of the session you launch `/conductor:start` in**. The permission decision
+is made once, at launch, on the same path you already use for every Claude session.
+
+- **Launch in bypass mode** (`claude --dangerously-skip-permissions`) and `start` warns you
+  about the standing blast radius — full access on every heartbeat, for the life of the run —
+  and requires you to acknowledge before it continues.
+- **Launch in a less-privileged mode** and `start` shows a dry-run (`conductor authority
+  preview`) naming the concrete privileged operations each phase performs (branch, push,
+  `gh pr`, merge, docker via `CONDUCTOR_MERGE_VERIFY`, subagents, file writes) and which of
+  them would need you. It then offers three ways forward: relaunch elevated, widen the
+  session allowlist, or proceed as-is knowing exactly which steps will wait for you.
+
+Safety floor either way: any `resume-env.sh` conductor writes (the Tier-B watchdog's env
+file) is mode `0600`, and the generated driver refuses to source one that is group- or
+world-writable.
 
 ### 4. Check in, resume, or stop
 
@@ -316,8 +340,14 @@ The `conductor` command (`bin/conductor`) fronts the Python modules.
 | `conductor ledger reconcile <issue#> [--tests-red] [--pr-merged] [--commits N] [-R N] [--now-ts N] [-L N]` | Apply the §7 reconcile rules (precedence git/tests > PR > label); the durable per-phase retry count is maintained by reconcile itself and escalates to `status:blocked` at the cap `R`; returns `{action, new_status}`. |
 | `conductor goal set <text...>` / `conductor goal get` | Record / read the durable goal (`.conductor/goal.md`). |
 | `conductor preflight` | Static availability gate: every conducted skill resolves, else exit 1. |
+| `conductor authority preview <plan.md>` | Dry-run of unattended authority: prints, per phase of the plan, every privileged operation an unattended fire performs (branch, push, gh pr, merge, docker via `CONDUCTOR_MERGE_VERIFY`, subagents, file writes), each marked owner-required unless the session pre-authorizes it. |
 | `conductor merge-gate <pr>` | Autonomous merge safety gate (see below); exit 0 ok, 1 blocked. |
-| `conductor gate {freeze\|verify}` | Freeze the done-gate at setup / verify it is unchanged. The runner enforces this — see [Why the worker can't cheat the gate](#why-the-worker-cant-cheat-the-gate). |
+| `conductor run-branch name <spec.md>` | Emit the canonical run branch for a spec — one line, `conductor/run-<slug>`, deterministic (same spec → byte-identical name; different spec stems → different names (same stem shares by design)). The single source `start` and `autodev` call instead of deriving the slug in prose. |
+| `conductor default-branch` | Emit the repo's default branch — one non-empty line, resolved via `gh repo view` then the `origin/HEAD` symbolic ref; any failure falls open to `main` (exit 0, never empty). |
+| `conductor driver install --worktree <path>` | Fail-closed Tier-B default for an unattended run: writes the resume script (through `resume-script write`, so its inline-owner-env no-clobber guard is respected) plus the marker-tagged `@reboot` + `*/20` crontab lines — never a durability judgment call. |
+| `conductor driver status` | The operator's health signal: exits non-zero unless a durable driver exists for the project (crontab marker or a matching scheduled task) AND the recent `resume-autodev.log` tail is clean; recent `driver-unresolved` / `fire-end rc=<non-zero>` lines are printed verbatim, never just counted. |
+| `conductor resume-script {install-cron\|uninstall-cron} --project <root>` | Add / remove exactly the `# conductor-autodev <main-root>`-tagged crontab lines. One shared marker implementation (`dirname` of `--git-common-dir`), idempotent install, `grep -F -v --` fixed-string removal semantics — install and removal cannot drift. |
+| `conductor gate {lint\|freeze\|verify}` | Lint the gate for mechanically-detectable weak-test patterns (unpinned commands, no negative clause, trivially-true asserts; fail-closed), then freeze it at setup / verify it is unchanged. Freeze also digests the `<spec>.assertions.md` source. The runner enforces this — see [Why the worker can't cheat the gate](#why-the-worker-cant-cheat-the-gate). |
 
 `conductor merge-gate` blocks a merge on any of: draft PR, merge state not `CLEAN`,
 mergeable not `MERGEABLE`, review decision `CHANGES_REQUESTED`, unresolved review threads,

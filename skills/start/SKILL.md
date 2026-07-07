@@ -37,6 +37,11 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    `start_probe.assertions_ready(expected_ids, "assertions/manifest.yaml", <assert-run --level spec
    exit>)` is True** — i.e. the manifest has one entry per `/spec-craft:executable-assertions` id
    AND the runner exit ∈ {0,1} (Codex #3). Otherwise (re)build it.
+   **Then LINT the gate:** run `conductor gate lint` — it fail-closes on the mechanically-detectable
+   weak-frozen-test patterns (an unpinned manifest command, a test file with no negative clause, a
+   trivially-true assertion). ANY finding blocks the run: fix the assertion tests via
+   `/conductor:assertions-to-tests` (or the manifest command form) until the lint is clean — NEVER
+   weaken or skip the lint. Only a clean lint proceeds to the freeze.
    **Then FREEZE the gate (§5):** `conductor gate freeze` records `assertions/.frozen` (commit it)
    so the worker cannot later weaken a check; the runner fail-closes (exit 6) if a frozen
    assertion or its test file changes. SKIP if `.frozen` exists and `conductor gate verify` is clean.
@@ -74,9 +79,10 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 5b. **RUN TOPOLOGY (0.5.0 default): phase PRs merge into a run branch, NEVER directly to the
    default branch.** The default branch belongs to the owner; the run gets an integration branch
    reviewed ONCE, by the owner, at the end.
-   - **Reconcile-first, EXACT name:** compute `conductor/run-<spec-slug>` from THIS spec's
-     filename, then `git ls-remote origin refs/heads/conductor/run-<spec-slug>` — exists → reuse;
-     absent → create off the default branch and push. NEVER bind by wildcard scan
+   - **Reconcile-first, EXACT name:** `RB="$(conductor run-branch name <spec>)"` — the
+     single-sourced resolver; never derive the slug in prose — then
+     `git ls-remote "$(conductor remote)" "refs/heads/$RB"` — exists → reuse; absent → create off
+     `$(conductor default-branch)` and push. NEVER bind by wildcard scan
      (`conductor/run-*`): with two active runs a scan grabs the wrong spec's branch.
    - **Stale-run cleanup first:** if `.conductor/run_branch` names a branch that no longer exists
      on the remote (the owner merged the final PR and deleted it — the run is over), remove the
@@ -86,7 +92,8 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      merge-gate's expected-base leg reads — a phase PR targeting anything else blocks with
      `base-mismatch`. On a fresh clone the file is missing: re-derive it from the ls-remote above
      (this step IS the re-derivation — reconcile-first).
-   - **Work in a WORKTREE:** `git worktree add ../<repo>-run-<spec-slug> conductor/run-<spec-slug>`
+   - **Work in a WORKTREE:** `git worktree add ../<repo>-run-<spec-slug> "$RB"` (the resolver's
+     name from above — never re-derive the slug for the branch argument)
      — the worker and the Tier-B watchdog operate in the worktree (`CONDUCTOR_HOME` = worktree
      root), so the owner's own checkout is never branch-switched or dirtied by fires. SKIP if it
      exists.
@@ -105,14 +112,20 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    **heartbeat**: `CronCreate` fires **only while the REPL is idle**, so a tick never overlaps a
    running fire — it no-ops until the current phase finishes, so the interval need not match phase
    duration.
-   **VERIFY durability — do not trust the flag.** Current CLI builds silently ignore
-   `durable: true`: the response says "Session-only (not written to disk…)" and no
-   `scheduled_tasks.json` appears (verified live 2026-07-02). If the response does NOT confirm
-   persistence, the loop dies with the terminal — for an unattended run, **install the Tier-B OS
-   fallback NOW; do not merely warn the user**:
-   - **GENERATE the resume driver mechanically — never hand-write it.** `conductor resume-script
-     write --project <main-root> --worktree <run-worktree> --out <main-root>/.conductor/resume-autodev.sh`
-     (`<main-root>` = the crontab-marker path below; `<run-worktree>` = step 5b's worktree). The
+   **Tier-B is the fail-closed DEFAULT for an unattended run — never a durability judgment
+   call.** Current CLI builds silently ignore `durable: true`: the response says "Session-only
+   (not written to disk…)" and no `scheduled_tasks.json` appears (verified live 2026-07-02). Do
+   NOT gate the OS fallback on judging that response — for an unattended run ALWAYS run
+   `conductor driver install --worktree <run-worktree>` (from the repo; project defaults to
+   `CONDUCTOR_HOME`/cwd), then `conductor driver status` to **verify durability** and surface
+   recent failed fires. `driver install` writes the resume script (via `conductor resume-script
+   write`, respecting its inline-owner-env no-clobber guard) AND the marker-tagged crontab lines
+   (via `install-cron`) in one tested step; `driver status` exits non-zero unless a durable
+   driver exists (crontab marker or a matching scheduled task) with a clean recent log tail.
+   - **The resume driver is GENERATED mechanically — never hand-write it.** (`conductor
+     resume-script write --project <main-root> --worktree <run-worktree> --out
+     <main-root>/.conductor/resume-autodev.sh` is exactly what `driver install` runs;
+     `<main-root>` = the crontab-marker path below; `<run-worktree>` = step 5b's worktree). The
      generated driver resolves the `claude` and `conductor` bins at RUN time (repairs cron's
      minimal PATH, then `command -v` with a stable-launcher fallback for claude and a
      newest-installed glob for conductor) and FAILS LOUD (`exit 3`, logs `driver-unresolved`) if
@@ -134,12 +147,40 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      -p` session can't answer permission prompts, so if the run worktree doesn't pre-authorize
      those, an unattended Tier-B fire **stalls on the first prompt** — a permission-flavored variant
      of the same silent-stall class. The driver fires with `${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}`
-     (default EMPTY = supervised only) — it never bakes a bypass. **Surface this to the owner and
-     let them choose** how the unattended run gets authority in `resume-env.sh`: (a) least-privilege
-     — point claude at a scoped `settings.json` allowlist (git/gh/pytest/ruff/pyright/conductor/docker);
-     or (b) full autonomy — `CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"`, and say
-     plainly that this is a **standing** posture (a full-access agent firing every heartbeat, not a
-     one-shot). Default (neither) = the run only progresses while a supervised session is open.
+     (default EMPTY = supervised only) — it never bakes a bypass. Conductor **inherits Claude
+     Code's permission model** — it invents NO permission flags or tokens of its own; the
+     unattended run never gets MORE authority than the session `/conductor:start` was launched in.
+     - **Detect the launching session's posture.** If the harness exposes the session's permission
+       mode, read it; if it cannot be read, ask the owner ONCE ("what posture should the
+       unattended run use?"). Either way resolve the answer with the
+       `conductor.authority.resolve_posture` semantics: only the exact mode `bypassPermissions` is
+       bypass; an unknown, unreadable, or ambiguous mode/answer is treated as **supervised**
+       (fail-closed — never assume bypass).
+     - **(A) Launched in bypass / skip-permissions mode:** print a BIG explicit warning — a
+       standing full-access agent will fire every heartbeat with the owner's credentials (gh
+       merge, push, docker, broad edits, subagents), surviving reboots, until the gate is green —
+       and require the owner to **acknowledge to continue**. The acknowledgment IS the gate; there
+       is no extra conductor flag. Never start unattended full-auto silently.
+     - **(B) Launched in a less-privileged mode (default ask-per-tool, plan, or a scoped
+       allowlist):** run `conductor authority preview <plan.md>` (the dry-run) and show the owner
+       the concrete per-phase privileged-operation list, annotated with **which ops the current
+       mode would prompt for**: if the session's allowlist can be introspected, mark each op
+       prompt/no-prompt; if promptability CANNOT be introspected, mark EVERY listed op as
+       owner-required/manual (fail-closed toward "will stall") — never show the list unannotated.
+       Then offer the real three-way choice: (i) **elevate to bypass** — the OWNER
+       relaunches/reconfigures the session itself in bypass mode (with the (A) warning); conductor
+       NEVER writes bypass flags into `resume-env.sh` from a less-privileged session; (ii) **widen
+       the session's own scoped allowlist** to cover the listed operations — least-privilege:
+       point claude at a scoped `settings.json` allowlist (git/gh/pytest/ruff/pyright/conductor/docker);
+       or (iii) **proceed** knowing exactly which steps will require them. Default (none chosen) =
+       the run only progresses while a supervised session is open.
+     - **Any `resume-env.sh` written on this path goes through
+       `conductor.authority.write_resume_env`** (0600 always, shell-safe quoting — the driver
+       refuses a group- or world-writable env file) — never a hand `printf > file`. For full
+       autonomy the owner-ACKNOWLEDGED value is
+       `CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"`, and say
+       plainly that this is a **standing** posture (a full-access agent firing every heartbeat, not a
+       one-shot).
    - **RECONCILE is verify-first: SKIP the driver only if it still verifies.** `conductor
      resume-script verify --project <main-root> --worktree <run-worktree> --script <path>` exits 0
      when current; non-zero means the template changed or the installed driver is an older
@@ -147,19 +188,25 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      upgrade). If verify reports `owner-env inline` (an older driver with `export
      CONDUCTOR_MERGE_VERIFY` etc. baked in), move those lines into `resume-env.sh` FIRST — `write`
      refuses to overwrite inline owner env without `--force`, so it can't be dropped silently.
-   - **Surface a stalled driver — silence was the original defect.** On reconcile, tail
-     `<main-root>/.conductor/resume-autodev.log`; if recent fires show `driver-unresolved` or
-     `fire-end rc=` non-zero (the generated driver logs both), WARN the owner loudly — the run has
-     been failing to make headless progress. (The driver already fails loud per-fire; this makes a
-     repeated failure visible at the next owner check-in instead of accumulating unnoticed.)
-   - add crontab entries carrying the LITERAL marker `# conductor-autodev <main-root>`, where
+   - **Surface a stalled driver — silence was the original defect.** On reconcile, run
+     `conductor driver status`: it exits non-zero when the durable driver is missing (printing
+     why, with the install command) or when recent fires in
+     `<main-root>/.conductor/resume-autodev.log` show `driver-unresolved` / `fire-end rc=`
+     non-zero (the generated driver logs both) — those offending log lines are NAMED verbatim.
+     On a non-zero status, WARN the owner loudly — the run has been failing to make
+     headless progress. (The driver already fails loud per-fire; the tested status command makes
+     a repeated failure visible at the next owner check-in instead of accumulating unnoticed.)
+   - the crontab entries carry the LITERAL marker `# conductor-autodev <main-root>`, where
      `<main-root>` is `$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")` —
      the MAIN checkout root, which is IDENTICAL whether computed from the owner checkout or the
      run worktree (`--show-toplevel` is NOT: it returns the worktree path there, so install and
-     removal would disagree). Removal greps for this exact fixed string. One `@reboot` line and
-     one periodic heartbeat (e.g. `*/20 * * * *`).
-   The marker tag is load-bearing: the autodev STOP branch removes exactly those lines when the
-   gate goes green (see `experiments/E5-end-to-end/recovery.md`).
+     removal would disagree). The marker is COMPUTED BY THE CLI — `conductor resume-script
+     install-cron` / `uninstall-cron` share the one implementation — never derived in prose.
+     Removal greps for this exact fixed string. One `@reboot` line and one periodic heartbeat
+     (`*/20 * * * *`).
+   The marker tag is load-bearing: the autodev STOP branch removes exactly those lines (via
+   `conductor resume-script uninstall-cron`) when the gate goes green (see
+   `experiments/E5-end-to-end/recovery.md`).
    **Tell the user one limit:** recurring in-session crons **auto-expire after 7 days** —
    re-invoke `/conductor:start` to extend a longer run (the Tier-B heartbeat does this itself).
    **Tell the user one gap:** when you resume from the owner's main checkout with a live session

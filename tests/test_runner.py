@@ -13,9 +13,16 @@ def _manifest(tmp_path, body):
 
 
 def _env(tmp_path, **extra):
+    # Hermetic isolation from the ambient repo: CONDUCTOR_HOME puts run state
+    # (results.json etc.) in tmp, and a NONEXISTENT freeze baseline turns the guard off
+    # (run.py's documented opt-in semantics) so the repo's live assertions/.frozen never
+    # fail-closes a fabricated tmp manifest as tampered. Both stay overridable via
+    # **extra — the freeze-guard tests below pass a real baseline to exercise tamper.
     return {
         **os.environ,
         "CONDUCTOR_MANIFEST": str(tmp_path / "manifest.yaml"),
+        "CONDUCTOR_HOME": str(tmp_path),
+        "CONDUCTOR_FREEZE_BASELINE": str(tmp_path / "no-baseline"),
         **extra,
     }
 

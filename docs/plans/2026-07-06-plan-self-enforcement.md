@@ -97,7 +97,7 @@ resolution invariant, and the open implementation question about mode detection.
   `env-unsafe` line to `resume-autodev.log`, exits non-zero, never reaches the fire; proceeds
   on 0600 (or no file).
 
-- [ ] **Task 1.1 — `conductor/authority.py`: the declared op set + posture resolver + env writer (TDD).**
+- [x] **Task 1.1 — `conductor/authority.py`: the declared op set + posture resolver + env writer (TDD).**
   Read `assertions/self_enforcement/test_a01_authority_preview.py`, `test_a02_posture_fail_closed.py`,
   `test_a03_resume_env_mode.py` first. Write failing unit tests in
   `tests/conductor/test_authority.py` covering: (a) the set covers all seven categories with
@@ -141,7 +141,7 @@ resolution invariant, and the open implementation question about mode detection.
   Run unit tests → PASS. `ruff check . && ruff format --check . && pyright . && pytest -q`.
   Commit.
 
-- [ ] **Task 1.2 — `conductor authority preview <plan.md>` (TDD).** `authority.py` gains
+- [x] **Task 1.2 — `conductor authority preview <plan.md>` (TDD).** `authority.py` gains
   `preview(plan_text: str) -> str` and `main(argv) -> int` handling `preview <plan.md>`.
   Parse phases with the existing plan dialect parser (`ledger.sync.parse_plan_md` /
   `_phase_heading` — do not write a second parser). For EACH phase, print the phase title and
@@ -163,7 +163,7 @@ resolution invariant, and the open implementation question about mode detection.
   `a1-authority-preview-covers-recipe-ops`, `a2-unknown-mode-resolves-least-privileged`,
   `a3-resume-env-mode-0600`. Quality gate. Commit.
 
-- [ ] **Task 1.3 — driver refuses a writable `resume-env.sh` (TDD).** Read
+- [x] **Task 1.3 — driver refuses a writable `resume-env.sh` (TDD).** Read
   `assertions/self_enforcement/test_a04_driver_refuses_writable_env.py` first — it executes the
   rendered driver for real with stub bins. In `conductor/resume_script.py::render`, immediately
   BEFORE the line that sources `resume-env.sh`, insert a permission guard; bump
@@ -192,7 +192,7 @@ resolution invariant, and the open implementation question about mode detection.
   still pass (no rot patterns, no baked bypass, sourcing still present). Run the manifest
   command for `a4-driver-refuses-writable-env` → PASS. Quality gate. Commit.
 
-- [ ] **Task 1.4 — `skills/start/SKILL.md`: interactive posture flow (review-verified — no frozen
+- [x] **Task 1.4 — `skills/start/SKILL.md`: interactive posture flow (review-verified — no frozen
   assertion; spec §Phase 1 cases (A) and (B)).** Extend step 6's UNATTENDED PERMISSIONS block:
   - **Detect the launching session's posture.** If the harness exposes the session permission
     mode, read it; if it cannot be read, ask the owner ONCE ("what posture should the
@@ -233,7 +233,7 @@ resolution invariant, and the open implementation question about mode detection.
 - Test: frozen `assertions/self_enforcement/test_a15_readme_authority.py` (read first); no new
   unit test file needed — A15 is the doc contract.
 
-- [ ] **Task 2.1 — README "Unattended authority" subsection.** Add a subsection titled exactly
+- [x] **Task 2.1 — README "Unattended authority" subsection.** Add a subsection titled exactly
   **"Unattended authority"** inside README §3 ("### 3. Walk away" in "## Use"), within ~3000
   chars of the heading covering all three needles the frozen test checks: the model plainly
   stated — an unattended run **inherits the permission mode of the session you launch
@@ -246,7 +246,7 @@ resolution invariant, and the open implementation question about mode detection.
   world-writable one. Run the manifest command for `a15-readme-authority-no-grant-leftover` →
   the section test passes. Commit.
 
-- [ ] **Task 2.2 — one canonical bypass spelling across user-facing docs (review-verified — no
+- [x] **Task 2.2 — one canonical bypass spelling across user-facing docs (review-verified — no
   frozen assertion).** Canonical form: **`--dangerously-skip-permissions`** (it is what
   `CONDUCTOR_RESUME_CLAUDE_FLAGS` actually carries in the driver, `skills/start/SKILL.md:140`,
   and `recovery.md:55`). Rewrite `experiments/E5-end-to-end/recovery.md`'s Security note
@@ -256,7 +256,7 @@ resolution invariant, and the open implementation question about mode detection.
   The Python-side mode token `bypassPermissions` inside `conductor/authority.py` and its tests
   is a session-mode VALUE, not a doc spelling — leave it.
 
-- [ ] **Task 2.3 — no `grant` leftovers.** Verify no user-facing doc (README,
+- [x] **Task 2.3 — no `grant` leftovers.** Verify no user-facing doc (README,
   `experiments/E5-end-to-end/recovery.md`, `skills/*/SKILL.md`) contains `grant --scoped` or
   `grant --full` (the spec + its `.assertions.md` are exempt by construction). Run
   `pytest via the a15 manifest command` and the full quality gate. Commit.
@@ -272,7 +272,7 @@ resolution invariant, and the open implementation question about mode detection.
   `_write`: split + regated nudge; `TEMPLATE_VERSION` bump to 4)
 - Test: `tests/conductor/test_resume_script.py` (extend)
 
-- [ ] **Task 3.1 — `posture=` label at fire-start (TDD).** Read
+- [x] **Task 3.1 — `posture=` label at fire-start (TDD).** Read
   `assertions/self_enforcement/test_a05_posture_label.py` first. In `render`, after the env
   file is sourced (Phase 1's guard) and before the fire, DERIVE the label from the configured
   flags — never a constant, and never echo the raw flag value or the settings path:
@@ -295,7 +295,7 @@ resolution invariant, and the open implementation question about mode detection.
   `a5-posture-label-reflects-flags` → PASS; re-run the a4 manifest command (same template) →
   still PASS. Quality gate. Commit.
 
-- [ ] **Task 3.2 — write-nudge split + regate (review-verified — no frozen assertion; spec:
+- [x] **Task 3.2 — write-nudge split + regate (review-verified — no frozen assertion; spec:
   "gated on 'permission posture undecided' rather than 'resume-env.sh absent'").** In
   `_write`, replace the `if not os.path.isfile(env_path):` nudge gate with a posture probe:
   read `resume-env.sh` if present; posture is DECIDED iff its `CONDUCTOR_RESUME_CLAUDE_FLAGS`
@@ -329,7 +329,7 @@ project's `assertions/manifest.yaml` (project = `CONDUCTOR_HOME`, already export
 `bin/conductor`), exit 0 clean / non-zero with one named finding per line. Fail-closed
 throughout: unparseable command → reject; unparseable (SyntaxError) test file → reject.
 
-- [ ] **Task 4.1 — `conductor/gate_lint.py`: pinned-command rule (TDD).** Read
+- [x] **Task 4.1 — `conductor/gate_lint.py`: pinned-command rule (TDD).** Read
   `assertions/self_enforcement/test_a06_gate_lint_unpinned.py` first. Write failing tests in
   `tests/conductor/test_gate_lint.py` (fixture projects in `tmp_path` with `CONDUCTOR_HOME`
   pointed at them, exactly like the frozen tests). Rule: load the manifest through the
@@ -349,7 +349,7 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
   path appears in output, and that `unpinned` never appears for a clean gate). Implement,
   PASS, quality gate, commit.
 
-- [ ] **Task 4.2 — negative-clause + trivially-true rules over the referenced test files (TDD).**
+- [x] **Task 4.2 — negative-clause + trivially-true rules over the referenced test files (TDD).**
   Read `test_a07_gate_lint_negative_clause.py` and `test_a16_gate_lint_trivial.py` first.
   Resolve each entry's referenced `.py` test files from its command tokens (same token→path
   resolution stance as `freeze._referenced_files`; a referenced file that does not exist →
@@ -371,7 +371,7 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
   `a6-gate-lint-fail-closed-on-unpinned`, `a7-gate-lint-flags-missing-negative`,
   `a16-gate-lint-flags-trivially-true` → PASS. Quality gate. Commit.
 
-- [ ] **Task 4.3 — freeze/verify covers `<spec>.assertions.md` (TDD).** Read
+- [x] **Task 4.3 — freeze/verify covers `<spec>.assertions.md` (TDD).** Read
   `test_a09_freeze_covers_assertions_source.py` first. In `freeze.py`: discover the
   human-authored assertions source — parse `<project>/.conductor/goal.md` for a
   `docs/specs/<name>.md` path and take its `.assertions.md` sibling (the preferred, precise
@@ -389,7 +389,7 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
   baseline stays clean. Run the manifest command for `a9-freeze-covers-assertions-source` →
   PASS. Quality gate. Commit.
 
-- [ ] **Task 4.4 — the `gate freeze` contract needle + `gate lint` in the start skill.** Read
+- [x] **Task 4.4 — the `gate freeze` contract needle + `gate lint` in the start skill.** Read
   `test_a08_freeze_needle.py` first: it requires an ACTIVE needle line inside
   `test_start_skill_contract` matching `^\s*["'](conductor )?gate freeze["'],?\s*$`. In
   `tests/conductor/test_skill_outputs.py::test_start_skill_contract`, add two needles to the
@@ -425,7 +425,7 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
   default (the frozen fixture uses `trunk`, so `echo main` hard-coding fails); resolution
   failure → exactly `main`, exit 0 (fail-open, NEVER empty).
 
-- [ ] **Task 5.1 — `conductor/branches.py` resolvers (TDD).** Read
+- [x] **Task 5.1 — `conductor/branches.py` resolvers (TDD).** Read
   `test_a10_default_branch.py` and `test_a11_run_branch_name.py` first. Failing unit tests in
   `tests/conductor/test_branches.py`, then implement:
 
@@ -458,7 +458,7 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
   `a10-default-branch-never-empty` and `a11-run-branch-name-deterministic` → PASS. Quality
   gate. Commit.
 
-- [ ] **Task 5.2 — skills call the resolvers (TDD against frozen A12).** Read
+- [x] **Task 5.2 — skills call the resolvers (TDD against frozen A12).** Read
   `test_a12_skills_call_resolvers.py` first. In `skills/start/SKILL.md` step 5b: replace
   "compute `conductor/run-<spec-slug>` from THIS spec's filename" with
   `RB="$(conductor run-branch name <spec>)"` then
@@ -474,7 +474,7 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
   `pytest tests/conductor/test_skill_outputs.py -v` and the manifest command for
   `a12-skills-call-the-resolvers` → PASS. Quality gate. Commit.
 
-- [ ] **Task 5.3 — merge-gate `topology-off:no-run_branch` line (review-verified — no frozen
+- [x] **Task 5.3 — merge-gate `topology-off:no-run_branch` line (review-verified — no frozen
   assertion; spec: "instead of silently disabling the base leg").** In
   `conductor/merge_gate.py`, where `_expected_base()` returns `None` because the
   `.conductor/run_branch` file is absent (and `CONDUCTOR_RUN_BRANCH` unset), emit one
@@ -508,7 +508,7 @@ the marker is present with a clean recent log; with a durable driver but recent
 The marker's `<main-root>` is `dirname` of `git rev-parse --path-format=absolute
 --git-common-dir` — identical from the owner checkout and the run worktree.
 
-- [ ] **Task 6.1 — shared cron marker: `install-cron`/`uninstall-cron` (TDD; spec: "compute the
+- [x] **Task 6.1 — shared cron marker: `install-cron`/`uninstall-cron` (TDD; spec: "compute the
   marker once so start (install) and autodev step 3b (removal) share one implementation and
   cannot drift" — review-verified pairing, the marker computation itself is exercised by
   frozen A13/A14).** In `conductor/resume_script.py` add:
@@ -535,7 +535,7 @@ The marker's `<main-root>` is `dirname` of `git rev-parse --path-format=absolute
   machine's real crontab is NEVER touched. Assert install→uninstall round-trips to the
   original crontab, install is idempotent, and unrelated lines survive. Quality gate. Commit.
 
-- [ ] **Task 6.2 — `conductor driver status` (TDD).** Read `test_a13_driver_status_durable.py`
+- [x] **Task 6.2 — `conductor driver status` (TDD).** Read `test_a13_driver_status_durable.py`
   and `test_a14_driver_status_failed_fires.py` first. Create `conductor/driver.py`:
   `status(project) -> int` — compute `root = resume_script.main_root(project)`; durable =
   `resume_script.cron_marker(root)` appears in `crontab -l` output (rc≠0/empty = no crontab)
@@ -565,7 +565,7 @@ The marker's `<main-root>` is `dirname` of `git rev-parse --path-format=absolute
   commands for `a13-driver-status-nonzero-without-driver` and
   `a14-driver-status-flags-failed-fires` → PASS. Quality gate. Commit.
 
-- [ ] **Task 6.3 — skills own the wiring through the tested surface (review-verified — no frozen
+- [x] **Task 6.3 — skills own the wiring through the tested surface (review-verified — no frozen
   assertion).** `skills/start/SKILL.md` step 6: for an unattended run, replace the
   judgment-gated Tier-B installation ("if the response does NOT confirm persistence…") with
   the fail-closed default — always `conductor driver install` (script + crontab lines via

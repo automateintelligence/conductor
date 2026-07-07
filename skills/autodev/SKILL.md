@@ -28,14 +28,16 @@ step 3b's terminal crontab removal.
 1. **RE-LOAD GOAL (fresh context).** Done only when `conductor assert run --level spec` exits 0.
    Re-read goal + paths from the durable handoff/ledger; trust git/issues, not memory. Read the
    run branch from `<project>/.conductor/run_branch`; file missing → recompute the EXACT name
-   `conductor/run-<spec-slug>` from the goal's spec path and check `git ls-remote "$(conductor
-   remote)" refs/heads/<that name>` — present → rewrite the file (fresh-clone reconcile); absent
+   with `RB="$(conductor run-branch name <goal spec path>)"` — the single-sourced resolver;
+   never derive the slug in prose — and check `git ls-remote "$(conductor
+   remote)" "refs/heads/$RB"` — present → rewrite the file (fresh-clone reconcile); absent
    while the goal says topology is configured → HALT and escalate (never fall back to a wildcard
    scan or to direct default-branch merges). **Resolve the remote with `conductor remote`, never
    assume `origin`** — it derives the remote from the repo URL (many repos use `github`), matching
    what `merge-gate` uses; a hardcoded `origin` fails the fetch/merge on those repos.
 1b. **KEEP THE RUN BRANCH CURRENT (every fire, before anything else builds).** On the run
-   branch, with `R="$(conductor remote)"`: `git fetch "$R" <default> && git merge "$R"/<default>`
+   branch, with `R="$(conductor remote)"` and `D="$(conductor default-branch)"` (the
+   single-sourced default-branch resolver): `git fetch "$R" "$D" && git merge "$R/$D"`
    (MERGE, never rebase — a
    shared integration branch's history is load-bearing; phase branches may rebase, the run
    branch never does). Conflicts get resolved NOW, by you, in this small increment — or
@@ -59,8 +61,9 @@ step 3b's terminal crontab removal.
    **All green AND no plans left** → the run is complete:
    **3a. OPEN THE FINAL OWNER PR (run topology only — skip when no run branch is configured).**
    Verify the run branch is not behind the default branch (step 1b just merged; re-check).
-   Generate the review packet — `conductor run-packet <run-branch> > /tmp/packet.md` — then
-   `gh pr create --base <default> --head <run-branch> --body-file /tmp/packet.md`, title
+   Generate the review packet — `conductor run-packet <run-branch> > /tmp/packet.md` — then,
+   with `D="$(conductor default-branch)"`,
+   `gh pr create --base "$D" --head <run-branch> --body-file /tmp/packet.md`, title
    "Conductor run complete: <spec-slug> — owner review", and assign the owner. **NEVER merge
    this PR — not with merge-gate ok, not with --admin, not at all.** It is the owner's single
    review point for the whole run; conductor's authority ends at opening it. (Where the repo
@@ -68,10 +71,14 @@ step 3b's terminal crontab removal.
    repos — this rule and the base leg are the enforcement.)
    **3b.** Mark done, use **`CronList`** to find the driver cron, then
    **CronDelete** it, AND remove any Tier-B OS fallback — the crontab lines carrying the
-   literal marker plus their resume script:
-   `crontab -l | grep -F -v -- "# conductor-autodev $(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")" | crontab -`
-   (`grep -F` = fixed string; the MAIN-checkout-root path is identical from the run worktree and
-   the owner checkout — `--show-toplevel` is not — so install and removal always agree) — else the heartbeat keeps firing no-ops forever.
+   literal marker `# conductor-autodev <main-root>`:
+   `conductor resume-script uninstall-cron --project "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"`
+   — the tested equivalent of `crontab -l | grep -F -v -- "<marker>" | crontab -` (`grep -F` =
+   fixed string: drop exactly the lines containing the marker, byte-for-byte, no regex). The
+   marker's `<main-root>` is the MAIN-checkout-root path, identical from the run worktree and
+   the owner checkout — `--show-toplevel` is not — and `uninstall-cron` computes it with the
+   SAME implementation `install-cron` used, so install and removal always agree — else the
+   heartbeat keeps firing no-ops forever.
    This removal is the ONLY sanctioned mutation of run infrastructure. The final handoff names the leftover run worktree and `.conductor/run_branch` — they stay
    until the owner resolves the final PR; the next `/conductor:start` reconcile removes them
    once the run branch is gone from the remote. Final handoff, STOP.

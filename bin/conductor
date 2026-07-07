@@ -28,13 +28,17 @@ case "${1:-}" in
       *) printf "usage:\n  conductor goal set <text...>\n  conductor goal get\n" >&2; exit 64 ;;
     esac
     ;;
+  authority) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.authority "$@" ;;
   preflight) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.preflight "$@" ;;
   plan-lint) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.plan_lint "$@" ;;
   merge) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.merge_cmd "$@" ;;
   merge-gate) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.merge_gate "$@" ;;
   run-packet) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.run_packet "$@" ;;
   resume-script) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.resume_script "$@" ;;
+  driver) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.driver "$@" ;;
   remote) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.remote "$@" ;;
+  run-branch) shift; [ "${1:-}" = "name" ] || { echo "usage: conductor run-branch name <spec.md>" >&2; exit 64; }; shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.branches name "$@" ;;
+  default-branch) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.branches default "$@" ;;
   gate) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.freeze "$@" ;;
-  *) printf "usage:\n  conductor assert run [--level spec|phase|task]\n  conductor ledger {generate <plan.json>|convert <plan.md>|align <plan.md> [--apply]|reconcile <issue#> [--from-gate|flags]|phase-done <issue#> [--plan plan.md] [--no-gate-check]}\n  conductor plan-lint <plan.md> [--spec <spec.md>]\n  conductor goal {set <text...>|get}\n  conductor preflight\n  conductor merge <pr>            (gate + merge, refuses base=default)\n  conductor merge-gate <pr>\n  conductor run-packet <run-branch> [--base main] [--milestone TITLE]\n  conductor resume-script {write|verify} --project <root> --worktree <path> [--out <path> [--force]|--script <path>]\n  conductor remote\n  conductor gate {freeze|verify}\n" >&2; exit 64 ;;
+  *) printf "usage:\n  conductor assert run [--level spec|phase|task]\n  conductor ledger {generate <plan.json>|convert <plan.md>|align <plan.md> [--apply]|reconcile <issue#> [--from-gate|flags]|phase-done <issue#> [--plan plan.md] [--no-gate-check]}\n  conductor plan-lint <plan.md> [--spec <spec.md>]\n  conductor authority preview <plan.md>\n  conductor goal {set <text...>|get}\n  conductor preflight\n  conductor merge <pr>            (gate + merge, refuses base=default)\n  conductor merge-gate <pr>\n  conductor run-packet <run-branch> [--base main] [--milestone TITLE]\n  conductor resume-script {write|verify} --project <root> --worktree <path> [--out <path> [--force]|--script <path>]\n  conductor resume-script {install-cron|uninstall-cron} --project <root>\n  conductor driver {install --worktree <path>|status}\n  conductor remote\n  conductor run-branch name <spec.md>\n  conductor default-branch\n  conductor gate {lint|freeze|verify}\n" >&2; exit 64 ;;
 esac
