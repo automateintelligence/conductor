@@ -186,6 +186,28 @@ def test_unresolved_frozen_gate(tmp_path, monkeypatch):
     assert paths.unresolved_frozen_gate(str(tmp_path)) is False
 
 
+def test_unresolved_frozen_gate_exempts_explicit_path_overrides(tmp_path, monkeypatch):
+    # codex P2: documented explicit overrides (CONDUCTOR_MANIFEST / CONDUCTOR_GATE_DIR) are
+    # deliberate gate selections — the ambient-dodge guard must stand down, not fail closed.
+    _clear_env(monkeypatch)
+    _write(
+        tmp_path, "assertions/alpha/.frozen", "{}\n"
+    )  # repo has a frozen per-spec gate
+    _write(tmp_path, ".conductor/run_branch", "conductor/run-other\n")  # ambient dodge
+    assert (
+        paths.unresolved_frozen_gate(str(tmp_path)) is True
+    )  # fires on ambient resolution
+    monkeypatch.setenv("CONDUCTOR_MANIFEST", str(tmp_path / "custom" / "manifest.yaml"))
+    assert (
+        paths.unresolved_frozen_gate(str(tmp_path)) is False
+    )  # explicit manifest -> exempt
+    monkeypatch.delenv("CONDUCTOR_MANIFEST", raising=False)
+    monkeypatch.setenv("CONDUCTOR_GATE_DIR", str(tmp_path / "custom"))
+    assert (
+        paths.unresolved_frozen_gate(str(tmp_path)) is False
+    )  # explicit gate dir -> exempt
+
+
 # --- manifest_path / baseline_path / run_dir ------------------------------------------
 
 
@@ -353,6 +375,14 @@ def test_gate_dir_cli_honors_gate_dir_override(tmp_path):
     override = _gate_dir(env)
     assert override.returncode == 0, override.stderr
     assert override.stdout.strip() == "/tmp/custom-gate"
+
+    # An already-set CONDUCTOR_GATE_SLUG must win over the spec-derived slug, matching
+    # paths.gate_dir() (codex P2) — else gate-dir writes one dir and lint/freeze read another.
+    env.pop("CONDUCTOR_GATE_DIR", None)
+    env["CONDUCTOR_GATE_SLUG"] = "explicitslug"
+    slug_case = _gate_dir(env)
+    assert slug_case.returncode == 0, slug_case.stderr
+    assert slug_case.stdout.strip() == "assertions/explicitslug"
 
 
 def test_corrupt_run_branch_cannot_bypass_a_frozen_namespaced_gate(tmp_path):

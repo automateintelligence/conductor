@@ -46,9 +46,14 @@ case "${1:-}" in
     # shared flat assertions/ slot. $CONDUCTOR_GATE_DIR overrides outright — MUST match
     # paths.gate_dir()/setup_gate_dir(), or setup would write one dir and the gate commands
     # read another.
+    # Mirror paths.gate_dir() precedence exactly: $CONDUCTOR_GATE_DIR > $CONDUCTOR_GATE_SLUG >
+    # the spec-derived slug. Diverging here would write the manifest to one dir while
+    # lint/freeze/run read another.
     [ -n "${1:-}" ] || { echo "usage: conductor gate-dir <spec.md>" >&2; exit 64; }
     if [ -n "${CONDUCTOR_GATE_DIR:-}" ]; then
       printf '%s\n' "$CONDUCTOR_GATE_DIR"
+    elif [ -n "${CONDUCTOR_GATE_SLUG:-}" ]; then
+      printf 'assertions/%s\n' "$CONDUCTOR_GATE_SLUG"
     else
       RB="$(PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 -m conductor.branches name "$1")" || exit $?
       printf 'assertions/%s\n' "${RB#conductor/run-}"

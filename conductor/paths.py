@@ -168,15 +168,33 @@ def has_namespaced_frozen_gate(repo_root: str | None = None) -> bool:
     return bool(glob.glob(os.path.join(root, "assertions", "*", ".frozen")))
 
 
+def _explicit_gate_override() -> bool:
+    """Any env that deliberately selects the gate location/baseline. Such a caller has chosen
+    the gate explicitly, so the ambient-dodge guard (`unresolved_frozen_gate`) must stand
+    down — it polices only ambient ``.conductor/run_branch`` / ``goal.md`` resolution."""
+    return any(
+        os.environ.get(v)
+        for v in (
+            "CONDUCTOR_GATE_SLUG",
+            "CONDUCTOR_GATE_DIR",
+            "CONDUCTOR_MANIFEST",
+            "CONDUCTOR_FREEZE_BASELINE",
+        )
+    )
+
+
 def unresolved_frozen_gate(repo_root: str | None = None) -> bool:
-    """True when this run resolves to an UNFROZEN gate while the repo holds frozen per-spec
-    gates and no explicit ``$CONDUCTOR_GATE_SLUG`` was given (§5, fail-closed) — i.e. an edited
-    ``.conductor/run_branch`` (stale/corrupt slug) or a PLANTED alternate ``assertions/<other>/
-    manifest.yaml`` is dodging a real frozen baseline. BOTH the done-gate runner (``assert
-    run``) and ``gate verify`` must fail closed on this — single-sourced here so they cannot
-    drift. An explicit slug is deliberate setup selection (a not-yet-frozen gate under build),
-    NOT this; a flat-legacy repo (no namespaced ``.frozen``) is never affected."""
-    if os.environ.get("CONDUCTOR_GATE_SLUG"):
+    """True when this run resolves — via AMBIENT metadata only — to an UNFROZEN gate while the
+    repo holds frozen per-spec gates (§5, fail-closed): an edited ``.conductor/run_branch``
+    (stale/corrupt slug) or a PLANTED alternate ``assertions/<other>/manifest.yaml`` dodging a
+    real frozen baseline. BOTH the done-gate runner (``assert run``) and ``gate verify`` must
+    fail closed on this — single-sourced here so they cannot drift.
+
+    Any EXPLICIT gate override (`$CONDUCTOR_GATE_SLUG` for setup, or the documented
+    `$CONDUCTOR_MANIFEST` / `$CONDUCTOR_GATE_DIR` / `$CONDUCTOR_FREEZE_BASELINE` for custom
+    jobs) is a deliberate selection and is exempt — the guard is for ambient resolution only.
+    A flat-legacy repo (no namespaced ``.frozen``) is never affected."""
+    if _explicit_gate_override():
         return False
     root = repo_root or project_root()
     if os.path.exists(baseline_path(root)):
