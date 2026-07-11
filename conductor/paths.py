@@ -115,12 +115,18 @@ def gate_dir(repo_root: str | None = None) -> str:
     """The directory holding THIS run's done-gate (manifest + baseline + results/).
 
     ``$CONDUCTOR_GATE_DIR`` wins outright. Else the per-spec ``assertions/<slug>/`` when a
-    slug resolves AND its ``manifest.yaml`` already exists there; otherwise the flat legacy
-    ``assertions/``. The existence gate is deliberate and fail-safe toward the legacy layout:
-    a repo with an in-place flat gate — or a stale ``.conductor/`` left by a finished run —
-    keeps reading its flat gate untouched. A fresh namespaced run's SETUP writes the manifest
-    into ``assertions/<slug>/`` first (via ``$CONDUCTOR_GATE_SLUG``), after which every read
-    resolves there."""
+    slug resolves AND that dir already holds a ``manifest.yaml`` OR a ``.frozen`` baseline;
+    otherwise the flat legacy ``assertions/``. The existence gate is deliberate and fail-safe
+    toward the legacy layout: a repo with an in-place flat gate — or a stale ``.conductor/``
+    left by a finished run whose slug has no dir — keeps reading its flat gate untouched. A
+    fresh namespaced run's SETUP writes the manifest into ``assertions/<slug>/`` first (via
+    ``$CONDUCTOR_GATE_SLUG``), after which every read resolves there.
+
+    Integrity (§5): the ``.frozen`` leg is load-bearing. Once a namespaced gate is FROZEN,
+    that dir owns the run even if its ``manifest.yaml`` is later deleted or renamed — the
+    resolver must NOT fall back to the flat gate, or a worker could shed a frozen baseline by
+    removing the manifest and have ``gate verify`` / ``assert run`` read a green flat slot.
+    Keeping the frozen dir makes the missing manifest fail closed under that baseline."""
     env = os.environ.get("CONDUCTOR_GATE_DIR")
     if env:
         return env
@@ -129,7 +135,9 @@ def gate_dir(repo_root: str | None = None) -> str:
     slug = gate_slug(root)
     if slug:
         nsdir = os.path.join(flat, slug)
-        if os.path.isfile(os.path.join(nsdir, "manifest.yaml")):
+        if os.path.isfile(os.path.join(nsdir, "manifest.yaml")) or os.path.isfile(
+            os.path.join(nsdir, ".frozen")
+        ):
             return nsdir
     return flat
 

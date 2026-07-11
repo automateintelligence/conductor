@@ -117,6 +117,16 @@ def test_gate_dir_uses_per_slug_once_manifest_exists(tmp_path, monkeypatch):
     assert paths.gate_dir(str(tmp_path)) == str(tmp_path / "assertions" / "alpha")
 
 
+def test_gate_dir_stays_namespaced_when_only_frozen_exists(tmp_path, monkeypatch):
+    # Integrity: once a namespaced gate is FROZEN, a missing/renamed manifest must NOT
+    # downgrade to the flat gate — the .frozen baseline keeps the dir so the missing manifest
+    # fails closed under it (codex P1).
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("CONDUCTOR_GATE_SLUG", "alpha")
+    _write(tmp_path, "assertions/alpha/.frozen", "{}\n")  # no manifest.yaml beside it
+    assert paths.gate_dir(str(tmp_path)) == str(tmp_path / "assertions" / "alpha")
+
+
 def test_setup_gate_dir_namespaces_before_manifest_exists(tmp_path, monkeypatch):
     # setup is what CREATES the manifest — it must point at the per-slug dir up front.
     _clear_env(monkeypatch)
@@ -238,6 +248,37 @@ def test_freeze_cli_writes_the_per_slug_baseline_not_flat(tmp_path):
     assert frozen.returncode == 0, frozen.stdout + frozen.stderr
     assert (proj / "assertions" / "alpha" / ".frozen").is_file()
     assert not (proj / "assertions" / ".frozen").exists()
+
+
+def test_deleting_namespaced_manifest_fails_closed_under_its_baseline(tmp_path):
+    # codex P1: after a namespaced gate is frozen, dropping its manifest must fail closed
+    # under assertions/<slug>/.frozen — NOT silently fall back to a (green) flat gate.
+    proj = tmp_path / "repo"
+    (proj / "docs" / "specs").mkdir(parents=True)
+    _build_per_slug_gate(proj, "alpha", "A")
+    # A green flat gate exists too; the resolver must not use it as an escape hatch.
+    (proj / "assertions" / "manifest.yaml").write_text(
+        'assertions:\n  - id: flat-ok\n    command: "true"\n    level: spec\n'
+    )
+    frozen = _conductor(proj, "alpha", "gate", "freeze")
+    assert frozen.returncode == 0, frozen.stdout + frozen.stderr
+    assert (proj / "assertions" / "alpha" / ".frozen").is_file()
+
+    # Tamper: remove the namespaced manifest while its frozen baseline remains.
+    (proj / "assertions" / "alpha" / "manifest.yaml").unlink()
+
+    v = _conductor(proj, "alpha", "gate", "verify")
+    assert v.returncode != 0, (
+        "gate verify fell back to the flat gate instead of failing closed:\n"
+        + v.stdout
+        + v.stderr
+    )
+    r = _conductor(proj, "alpha", "assert", "run", "--level", "spec")
+    assert r.returncode != 0, (
+        "assert run fell back to the flat gate instead of failing closed:\n"
+        + r.stdout
+        + r.stderr
+    )
 
 
 if __name__ == "__main__":
