@@ -15,6 +15,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from conductor import branches, paths
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -546,6 +548,308 @@ def test_freeze_binds_assertions_source_to_selected_spec(tmp_path):
     assert doc.get("sources_via") == "env"
     assert any("alpha.md.assertions.md" in k for k in doc.get("sources", {}))
     assert not any("beta" in k for k in doc.get("sources", {}))
+
+
+# --- resolve_gate: the exhaustive policy matrix ----------------------------------------
+#
+# ONE row per meaningful cell of (selection source x namespace build-state x frozen-state
+# elsewhere x flat layout). Each row pins the full GateResolution: directory, slug, source,
+# and the §5 fail_closed verdict. The adversarial rows (corrupt run_branch, planted manifest,
+# flat-frozen dodge) are folded in alongside the happy paths so the whole policy is covered
+# in one place instead of one review round at a time.
+#
+# Fields: (id, env, files, run_branch, goal, exp_source, exp_dir, exp_slug, exp_fail)
+#   env/exp_dir may use "{root}" -> str(tmp_path); a plain exp_dir is relative to root.
+#   files: manifest.yaml -> "assertions: []"; .frozen -> "{}".
+_MATRIX = [
+    # --- no selection: flat, unless a frozen gate elsewhere is being abandoned ---
+    ("none-empty", {}, [], None, None, "flat", "assertions", None, False),
+    (
+        "none-flat-frozen",
+        {},
+        ["assertions/manifest.yaml", "assertions/.frozen"],
+        None,
+        None,
+        "flat",
+        "assertions",
+        None,
+        False,
+    ),
+    (
+        "none-flat-manifest-only",
+        {},
+        ["assertions/manifest.yaml"],
+        None,
+        None,
+        "flat",
+        "assertions",
+        None,
+        False,
+    ),
+    (
+        "none-but-namespaced-frozen-exists",
+        {},
+        ["assertions/alpha/.frozen"],
+        None,
+        None,
+        "flat",
+        "assertions",
+        None,
+        True,
+    ),
+    # --- CONDUCTOR_GATE_DIR: explicit, exempt ---
+    (
+        "env-dir",
+        {"CONDUCTOR_GATE_DIR": "{root}/custom-gate"},
+        [],
+        None,
+        None,
+        "gate_dir_env",
+        "{root}/custom-gate",
+        None,
+        False,
+    ),
+    (
+        "env-dir-with-frozen-namespace",
+        {"CONDUCTOR_GATE_DIR": "{root}/custom-gate"},
+        ["assertions/alpha/.frozen"],
+        None,
+        None,
+        "gate_dir_env",
+        "{root}/custom-gate",
+        None,
+        False,
+    ),
+    # --- CONDUCTOR_GATE_SLUG: explicit, forced, no flat fallback, exempt ---
+    (
+        "env-slug-unbuilt",
+        {"CONDUCTOR_GATE_SLUG": "alpha"},
+        [],
+        None,
+        None,
+        "explicit_slug",
+        "assertions/alpha",
+        "alpha",
+        False,
+    ),
+    (
+        "env-slug-over-flat-frozen",
+        {"CONDUCTOR_GATE_SLUG": "alpha"},
+        ["assertions/manifest.yaml", "assertions/.frozen"],
+        None,
+        None,
+        "explicit_slug",
+        "assertions/alpha",
+        "alpha",
+        False,
+    ),
+    (
+        "env-slug-second-spec-setup",
+        {"CONDUCTOR_GATE_SLUG": "alpha"},
+        ["assertions/beta/.frozen"],
+        None,
+        None,
+        "explicit_slug",
+        "assertions/alpha",
+        "alpha",
+        False,
+    ),
+    # --- CONDUCTOR_MANIFEST / FREEZE_BASELINE: explicit path overrides, exempt ---
+    (
+        "env-manifest-exempt",
+        {"CONDUCTOR_MANIFEST": "{root}/custom/manifest.yaml"},
+        ["assertions/alpha/.frozen"],
+        None,
+        None,
+        "flat",
+        "assertions",
+        None,
+        False,
+    ),
+    (
+        "env-baseline-exempt",
+        {"CONDUCTOR_FREEZE_BASELINE": "{root}/b/.frozen"},
+        ["assertions/alpha/.frozen"],
+        "conductor/run-junk",
+        None,
+        "run_branch",
+        "assertions/junk",
+        "junk",
+        False,
+    ),
+    # --- ambient run_branch: build-state x frozen-state ---
+    (
+        "rb-unbuilt-no-frozen",
+        {},
+        [],
+        "conductor/run-alpha",
+        None,
+        "flat",
+        "assertions",
+        None,
+        False,
+    ),
+    (
+        "rb-manifest-only",
+        {},
+        ["assertions/alpha/manifest.yaml"],
+        "conductor/run-alpha",
+        None,
+        "run_branch",
+        "assertions/alpha",
+        "alpha",
+        False,
+    ),
+    (
+        "rb-frozen-only",
+        {},
+        ["assertions/alpha/.frozen"],
+        "conductor/run-alpha",
+        None,
+        "run_branch",
+        "assertions/alpha",
+        "alpha",
+        False,
+    ),
+    (
+        "rb-manifest-and-frozen",
+        {},
+        ["assertions/alpha/manifest.yaml", "assertions/alpha/.frozen"],
+        "conductor/run-alpha",
+        None,
+        "run_branch",
+        "assertions/alpha",
+        "alpha",
+        False,
+    ),
+    # --- adversarial: corrupt run_branch / planted manifest dodging a frozen gate ---
+    (
+        "rb-corrupt-vs-namespaced-frozen",
+        {},
+        ["assertions/alpha/.frozen"],
+        "conductor/run-junk",
+        None,
+        "run_branch",
+        "assertions/junk",
+        "junk",
+        True,
+    ),
+    (
+        "rb-planted-vs-namespaced-frozen",
+        {},
+        ["assertions/alpha/.frozen", "assertions/other/manifest.yaml"],
+        "conductor/run-other",
+        None,
+        "run_branch",
+        "assertions/other",
+        "other",
+        True,
+    ),
+    (
+        "rb-planted-vs-flat-frozen",
+        {},
+        [
+            "assertions/.frozen",
+            "assertions/manifest.yaml",
+            "assertions/other/manifest.yaml",
+        ],
+        "conductor/run-other",
+        None,
+        "run_branch",
+        "assertions/other",
+        "other",
+        True,
+    ),
+    (
+        "rb-corrupt-vs-flat-frozen-only",
+        {},
+        ["assertions/.frozen", "assertions/manifest.yaml"],
+        "conductor/run-junk",
+        None,
+        "flat",
+        "assertions",
+        None,
+        False,
+    ),
+    # --- ambient goal + precedence ---
+    (
+        "goal-built",
+        {},
+        ["assertions/beta/manifest.yaml"],
+        None,
+        "Implement docs/specs/beta.md until done",
+        "goal",
+        "assertions/beta",
+        "beta",
+        False,
+    ),
+    (
+        "run_branch-wins-over-goal",
+        {},
+        ["assertions/alpha/manifest.yaml"],
+        "conductor/run-alpha",
+        "Implement docs/specs/beta.md until done",
+        "run_branch",
+        "assertions/alpha",
+        "alpha",
+        False,
+    ),
+]
+
+
+def _subst(value, root):
+    return value.replace("{root}", str(root)) if "{root}" in value else value
+
+
+@pytest.mark.parametrize("row", _MATRIX, ids=[r[0] for r in _MATRIX])
+def test_resolve_gate_policy_matrix(tmp_path, monkeypatch, row):
+    _id, env, files, run_branch, goal, exp_source, exp_dir, exp_slug, exp_fail = row
+    _clear_env(monkeypatch)
+    for k, v in env.items():
+        monkeypatch.setenv(k, _subst(v, tmp_path))
+    for f in files:
+        _write(
+            tmp_path, f, "assertions: []\n" if f.endswith("manifest.yaml") else "{}\n"
+        )
+    if run_branch:
+        _write(tmp_path, ".conductor/run_branch", run_branch + "\n")
+    if goal:
+        _write(tmp_path, ".conductor/goal.md", goal + "\n")
+
+    g = paths.resolve_gate(str(tmp_path))
+
+    want_dir = _subst(exp_dir, tmp_path)
+    if "{root}" not in exp_dir and not os.path.isabs(exp_dir):
+        want_dir = str(tmp_path / exp_dir)
+    assert g.directory == want_dir, f"{_id}: directory -> {g}"
+    assert g.slug == exp_slug, f"{_id}: slug -> {g}"
+    assert g.source == exp_source, f"{_id}: source -> {g}"
+    assert (g.fail_closed is not None) is exp_fail, f"{_id}: fail_closed -> {g}"
+
+    # the derived paths are consistent with the resolution + honor explicit overrides
+    exp_manifest = env.get("CONDUCTOR_MANIFEST")
+    exp_manifest = (
+        _subst(exp_manifest, tmp_path)
+        if exp_manifest
+        else os.path.join(g.directory, "manifest.yaml")
+    )
+    exp_baseline = env.get("CONDUCTOR_FREEZE_BASELINE")
+    exp_baseline = (
+        _subst(exp_baseline, tmp_path)
+        if exp_baseline
+        else os.path.join(g.directory, ".frozen")
+    )
+    assert g.manifest == exp_manifest, f"{_id}: manifest -> {g}"
+    assert g.baseline == exp_baseline, f"{_id}: baseline -> {g}"
+    assert g.run_dir == os.path.join(os.path.dirname(g.manifest), "run"), (
+        f"{_id}: run_dir -> {g}"
+    )
+    # the thin wrappers agree with the one resolution
+    assert paths.gate_dir(str(tmp_path)) == g.directory
+    assert paths.manifest_path(str(tmp_path)) == g.manifest
+    assert paths.baseline_path(str(tmp_path)) == g.baseline
+    assert paths.run_dir(str(tmp_path)) == g.run_dir
+    assert paths.unresolved_frozen_gate(str(tmp_path)) is (g.fail_closed is not None)
 
 
 if __name__ == "__main__":

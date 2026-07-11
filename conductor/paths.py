@@ -14,6 +14,7 @@ import os
 import pathlib
 import re
 import subprocess
+from typing import NamedTuple
 
 
 def project_root() -> str:
@@ -94,134 +95,148 @@ def _goal_slug(root: str) -> str | None:
     return spec_slug(m.group(0)) if m else None
 
 
-def gate_slug(repo_root: str | None = None) -> str | None:
-    """The slug that namespaces this run's done-gate, or None for the flat legacy gate.
-
-    Discovered, in precedence order, from:
-      1. ``$CONDUCTOR_GATE_SLUG`` — the explicit SETUP-time override. ``run_branch`` and
-         ``goal.md`` are written AFTER ``/conductor:start`` builds+freezes the gate, so the
-         start skill exports this (derived from ``conductor run-branch name <spec>``) for
-         its build-time gate ops;
-      2. ``<root>/.conductor/run_branch`` — present at run time (autodev, the driver);
-      3. ``<root>/.conductor/goal.md``'s spec — fallback.
-    None present -> None -> the flat legacy ``assertions/`` gate."""
-    env = os.environ.get("CONDUCTOR_GATE_SLUG")
-    if env:
-        return env
-    root = repo_root or project_root()
-    return _run_branch_slug(root) or _goal_slug(root)
-
-
-def gate_dir(repo_root: str | None = None) -> str:
-    """The directory holding THIS run's done-gate (manifest + baseline + results/).
-
-    Resolution, in precedence order:
-      1. ``$CONDUCTOR_GATE_DIR`` — wins outright.
-      2. An EXPLICIT ``$CONDUCTOR_GATE_SLUG`` — ``assertions/<slug>/`` with NO flat fallback.
-         The env slug is a deliberate "this run is namespaced" signal (``/conductor:start``
-         exports it for the step-3 build/lint/freeze). Forcing the dir means a not-yet-written
-         or mis-written manifest FAILS CLOSED (runner exit 2 / verify unloadable) instead of
-         silently validating or freezing the legacy flat gate under a new spec.
-      3. An AMBIENT slug (from ``.conductor/run_branch`` or ``goal.md``) — ``assertions/<slug>/``
-         only once that dir holds a ``manifest.yaml`` OR a ``.frozen`` baseline; otherwise the
-         flat legacy ``assertions/``. This existence gate is fail-safe toward the legacy layout:
-         a repo with an in-place flat gate, or a stale ``.conductor/`` left by a finished run
-         whose slug has no dir, keeps reading its flat gate untouched.
-      4. No slug -> flat ``assertions/``.
-
-    Integrity (§5): the ``.frozen`` leg of (3) is load-bearing. Once a namespaced gate is
-    FROZEN, that dir owns the run even if its ``manifest.yaml`` is later deleted or renamed —
-    the resolver must NOT fall back to the flat gate, or a worker could shed a frozen baseline
-    by removing the manifest and have ``gate verify`` / ``assert run`` read a green flat slot.
-    Keeping the frozen dir makes the missing manifest fail closed under that baseline."""
-    env = os.environ.get("CONDUCTOR_GATE_DIR")
-    if env:
-        return env
-    root = repo_root or project_root()
-    flat = os.path.join(root, "assertions")
-    explicit = os.environ.get("CONDUCTOR_GATE_SLUG")
-    if explicit:
-        return os.path.join(flat, explicit)
-    slug = gate_slug(root)
-    if slug:
-        nsdir = os.path.join(flat, slug)
-        if os.path.isfile(os.path.join(nsdir, "manifest.yaml")) or os.path.isfile(
-            os.path.join(nsdir, ".frozen")
-        ):
-            return nsdir
-        # The ambient slug (from .conductor/run_branch / goal.md) resolves to an unbuilt dir.
-        # Falling back to the flat gate is safe ONLY when the repo has NOT adopted per-spec
-        # gates. If a frozen namespaced gate exists, stale/corrupt run metadata (an edited
-        # run_branch) must NOT silently abandon it for a — possibly green — flat slot: keep
-        # nsdir so the missing manifest fails closed (assert run exit 2). (codex P1)
-        if has_namespaced_frozen_gate(root):
-            return nsdir
-    return flat
+def _ambient_slug(root: str) -> tuple[str | None, str]:
+    """The slug from AMBIENT run metadata + how it was found: ``.conductor/run_branch`` first
+    (present at run time), then the spec named in ``.conductor/goal.md``. ``(None, "none")``
+    when neither resolves. Distinct from the explicit ``$CONDUCTOR_GATE_SLUG`` override."""
+    s = _run_branch_slug(root)
+    if s:
+        return s, "run_branch"
+    s = _goal_slug(root)
+    if s:
+        return s, "goal"
+    return None, "none"
 
 
 def has_namespaced_frozen_gate(repo_root: str | None = None) -> bool:
     """True if any ``assertions/<slug>/.frozen`` exists — the repo has FROZEN per-spec gates.
-    Once it has, an ambient slug that doesn't resolve to a built gate is stale/corrupt run
-    metadata and must fail closed rather than fall back to the flat gate. The flat baseline
-    ``assertions/.frozen`` is NOT namespaced (no subdir) and never counts here."""
+    The flat baseline ``assertions/.frozen`` is NOT namespaced (no subdir) and never counts
+    here (``resolve_gate`` checks the flat baseline separately)."""
     root = repo_root or project_root()
     return bool(glob.glob(os.path.join(root, "assertions", "*", ".frozen")))
 
 
-def _explicit_gate_override() -> bool:
-    """Any env that deliberately selects the gate location/baseline. Such a caller has chosen
-    the gate explicitly, so the ambient-dodge guard (`unresolved_frozen_gate`) must stand
-    down — it polices only ambient ``.conductor/run_branch`` / ``goal.md`` resolution."""
-    return any(
-        os.environ.get(v)
-        for v in (
-            "CONDUCTOR_GATE_SLUG",
-            "CONDUCTOR_GATE_DIR",
-            "CONDUCTOR_MANIFEST",
-            "CONDUCTOR_FREEZE_BASELINE",
+class GateResolution(NamedTuple):
+    """The fully-resolved done-gate location + integrity verdict for one run (see
+    ``resolve_gate``). ``fail_closed`` is None when the run may proceed, else the reason
+    ``assert run`` / ``gate verify`` must refuse."""
+
+    directory: str  # the gate dir (manifest + baseline + results live here)
+    manifest: str  # manifest.yaml path
+    baseline: str  # .frozen baseline path
+    run_dir: str  # results.json dir
+    slug: str | None  # the resolved slug (None = flat gate)
+    source: str  # how selected: gate_dir_env|explicit_slug|run_branch|goal|flat
+    fail_closed: str | None  # None = ok; else the §5 refuse reason
+
+
+def resolve_gate(repo_root: str | None = None) -> GateResolution:
+    """THE gate-resolution policy — the single decision function for WHERE this run's done-gate
+    lives and WHETHER it is dodging a frozen gate. ``gate_dir`` / ``manifest_path`` /
+    ``baseline_path`` / ``run_dir`` / ``unresolved_frozen_gate`` all delegate here, and the
+    runner + ``gate freeze|verify`` call it directly, so the policy cannot drift across callers.
+
+    DIRECTORY precedence (``source``):
+      1. ``$CONDUCTOR_GATE_DIR``  -> that dir                              (``gate_dir_env``)
+      2. ``$CONDUCTOR_GATE_SLUG`` -> ``assertions/<slug>``, FORCED         (``explicit_slug``)
+           A deliberate "this run is namespaced" signal (start exports it for the step-3
+           build/lint/freeze, before run_branch/goal exist). No flat fallback: a not-yet-written
+           or mis-written manifest fails closed rather than silently using the legacy flat gate.
+      3. AMBIENT slug (``.conductor/run_branch`` then ``goal.md``)         (``run_branch`` / ``goal``)
+           a. ``assertions/<slug>`` when it holds ``manifest.yaml`` OR ``.frozen`` (built/frozen)
+           b. ``assertions/<slug>`` (unbuilt) when ANY namespaced ``.frozen`` exists — so a
+              stale/corrupt slug fails closed instead of dodging to the flat gate
+           c. else flat ``assertions/`` (legacy fallback; repo hasn't adopted per-spec gates)
+      4. no slug -> flat ``assertions/``                                   (``flat``)
+
+    ``manifest`` = ``$CONDUCTOR_MANIFEST`` or ``<dir>/manifest.yaml``;
+    ``baseline`` = ``$CONDUCTOR_FREEZE_BASELINE`` or ``<dir>/.frozen``;
+    ``run_dir``  = ``<dir-of-manifest>/run``.
+
+    FAIL_CLOSED (§5 ambient-dodge guard) is set — and the runner + ``gate verify`` must refuse
+    — when NO explicit override was used, the resolved gate is UNFROZEN (its baseline is
+    absent), AND a frozen gate exists ELSEWHERE: a namespaced ``assertions/<slug>/.frozen`` OR
+    the legacy flat ``assertions/.frozen``. That is the signature of an edited ``run_branch`` or
+    a planted alternate manifest dodging a real frozen baseline. ANY explicit override
+    (slug / gate-dir / manifest / freeze-baseline) is a deliberate selection and is exempt; a
+    repo with no frozen gate at all is never affected."""
+    root = repo_root or project_root()
+    flat = os.path.join(root, "assertions")
+    env_dir = os.environ.get("CONDUCTOR_GATE_DIR")
+    env_slug = os.environ.get("CONDUCTOR_GATE_SLUG")
+    env_manifest = os.environ.get("CONDUCTOR_MANIFEST")
+    env_baseline = os.environ.get("CONDUCTOR_FREEZE_BASELINE")
+    explicit = bool(env_dir or env_slug or env_manifest or env_baseline)
+
+    if env_dir:  # (1)
+        directory, slug, source = env_dir, None, "gate_dir_env"
+    elif env_slug:  # (2) forced, no fallback
+        directory, slug, source = (
+            os.path.join(flat, env_slug),
+            env_slug,
+            "explicit_slug",
         )
+    else:
+        slug, source = _ambient_slug(root)  # (3) / (4)
+        if slug:
+            nsdir = os.path.join(flat, slug)
+            built = os.path.isfile(
+                os.path.join(nsdir, "manifest.yaml")
+            ) or os.path.isfile(os.path.join(nsdir, ".frozen"))
+            if built or has_namespaced_frozen_gate(root):  # (3a) / (3b)
+                directory = nsdir
+            else:  # (3c) legacy fallback
+                directory, slug, source = flat, None, "flat"
+        else:  # (4)
+            directory, source = flat, "flat"
+
+    manifest = env_manifest or os.path.join(directory, "manifest.yaml")
+    baseline = env_baseline or os.path.join(directory, ".frozen")
+    rundir = os.path.join(os.path.dirname(manifest), "run")
+
+    fail_closed = None
+    if not explicit and not os.path.exists(baseline):
+        flat_frozen = os.path.isfile(os.path.join(flat, ".frozen"))
+        if flat_frozen or has_namespaced_frozen_gate(root):
+            fail_closed = (
+                "run resolves to an unfrozen gate but a frozen gate exists — check "
+                ".conductor/run_branch or CONDUCTOR_GATE_SLUG"
+            )
+    return GateResolution(
+        directory, manifest, baseline, rundir, slug, source, fail_closed
     )
 
 
-def unresolved_frozen_gate(repo_root: str | None = None) -> bool:
-    """True when this run resolves — via AMBIENT metadata only — to an UNFROZEN gate while the
-    repo holds a frozen gate ELSEWHERE (§5, fail-closed): an edited ``.conductor/run_branch``
-    (stale/corrupt slug) or a PLANTED alternate ``assertions/<other>/manifest.yaml`` dodging a
-    real frozen baseline. BOTH the done-gate runner (``assert run``) and ``gate verify`` must
-    fail closed on this — single-sourced here so they cannot drift.
+def gate_slug(repo_root: str | None = None) -> str | None:
+    """The slug that names this run's gate, or None for the flat gate: ``$CONDUCTOR_GATE_SLUG``,
+    else the ambient ``.conductor/run_branch`` slug, else the ``goal.md`` spec's slug."""
+    env = os.environ.get("CONDUCTOR_GATE_SLUG")
+    if env:
+        return env
+    return _ambient_slug(repo_root or project_root())[0]
 
-    The frozen gate being dodged may be a namespaced ``assertions/<slug>/.frozen`` OR the
-    legacy flat ``assertions/.frozen``: a legacy flat-frozen repo must not be bypassed by
-    planting a namespaced manifest and pointing run_branch at it.
 
-    Any EXPLICIT gate override (`$CONDUCTOR_GATE_SLUG` for setup, or the documented
-    `$CONDUCTOR_MANIFEST` / `$CONDUCTOR_GATE_DIR` / `$CONDUCTOR_FREEZE_BASELINE` for custom
-    jobs) is a deliberate selection and is exempt — the guard is for ambient resolution only.
-    A repo with NO frozen gate at all is never affected."""
-    if _explicit_gate_override():
-        return False
-    root = repo_root or project_root()
-    if os.path.exists(baseline_path(root)):
-        return False  # the resolved gate is itself frozen — nothing is being dodged
-    flat_frozen = os.path.isfile(os.path.join(root, "assertions", ".frozen"))
-    return flat_frozen or has_namespaced_frozen_gate(root)
+def gate_dir(repo_root: str | None = None) -> str:
+    """The directory holding this run's done-gate. Thin wrapper over ``resolve_gate``."""
+    return resolve_gate(repo_root).directory
 
 
 def manifest_path(repo_root: str | None = None) -> str:
-    """The done-gate manifest: ``$CONDUCTOR_MANIFEST`` if set, else ``gate_dir()/manifest.yaml``."""
-    return os.environ.get("CONDUCTOR_MANIFEST") or os.path.join(
-        gate_dir(repo_root), "manifest.yaml"
-    )
+    """The done-gate manifest path. Thin wrapper over ``resolve_gate``."""
+    return resolve_gate(repo_root).manifest
 
 
 def baseline_path(repo_root: str | None = None) -> str:
-    """The freeze baseline: ``$CONDUCTOR_FREEZE_BASELINE`` if set, else ``gate_dir()/.frozen``."""
-    return os.environ.get("CONDUCTOR_FREEZE_BASELINE") or os.path.join(
-        gate_dir(repo_root), ".frozen"
-    )
+    """The freeze baseline path. Thin wrapper over ``resolve_gate``."""
+    return resolve_gate(repo_root).baseline
 
 
 def run_dir(repo_root: str | None = None) -> str:
-    """Where the runner writes ``results.json`` — beside the manifest, so a per-spec gate's
-    results never overwrite another spec's at a shared flat ``assertions/run/``."""
-    return os.path.join(os.path.dirname(manifest_path(repo_root)), "run")
+    """Where the runner writes ``results.json``. Thin wrapper over ``resolve_gate``."""
+    return resolve_gate(repo_root).run_dir
+
+
+def unresolved_frozen_gate(repo_root: str | None = None) -> bool:
+    """Whether this run is ambiently dodging a frozen gate (§5). Thin wrapper over
+    ``resolve_gate`` — True iff ``fail_closed`` is set."""
+    return resolve_gate(repo_root).fail_closed is not None

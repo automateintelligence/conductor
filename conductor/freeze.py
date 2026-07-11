@@ -20,12 +20,7 @@ import re
 import shlex
 import sys
 
-from conductor.paths import (
-    baseline_path,
-    manifest_path,
-    project_root,
-    unresolved_frozen_gate,
-)
+from conductor.paths import project_root, resolve_gate
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_ROOT = os.path.dirname(
@@ -296,33 +291,28 @@ def main(argv: list | None = None) -> int:
         from conductor import gate_lint
 
         return gate_lint.main()
-    # Per-spec gate (multi-spec safety): freeze/verify the manifest+baseline the resolver
-    # points at — assertions/<slug>/ for a namespaced run, else flat — instead of the
-    # hardcoded flat default. Each still honors its explicit CONDUCTOR_* override.
+    # Per-spec gate (multi-spec safety): freeze/verify the manifest+baseline resolve_gate()
+    # points at — assertions/<slug>/ for a namespaced run, else flat — with the same §5
+    # fail-closed verdict the done-gate runner uses (single-sourced in paths.resolve_gate).
     root = project_root()
+    gate = resolve_gate(root)
     if cmd == "freeze":
         try:
             print(
                 "[GATE] froze done-gate baseline -> "
-                + record(manifest_path(root), baseline_path(root), root)
+                + record(gate.manifest, gate.baseline, root)
             )
         except (AmbiguousAssertionsSource, MissingAssertionsSource) as exc:
             print(f"[GATE] {exc}", file=sys.stderr)
             return 1
         return 0
     if cmd == "verify":
-        # Fail closed if this run resolves to an UNFROZEN gate while the repo holds frozen
-        # per-spec gates and no explicit slug was given: an edited .conductor/run_branch or a
-        # planted alternate manifest must not read green by dodging the real namespaced
-        # baseline (codex P1). Same predicate the done-gate runner uses, single-sourced.
-        if unresolved_frozen_gate(root):
-            print(
-                "[GATE] TAMPERED: run resolves to an unfrozen gate but frozen per-spec "
-                "gates exist — check .conductor/run_branch or CONDUCTOR_GATE_SLUG",
-                file=sys.stderr,
-            )
+        # An edited .conductor/run_branch or a planted alternate manifest must not read green
+        # by dodging a real frozen baseline (§5) — resolve_gate() flags it, same as the runner.
+        if gate.fail_closed:
+            print(f"[GATE] TAMPERED: {gate.fail_closed}", file=sys.stderr)
             return 1
-        res = verify(manifest_path(root), baseline_path(root), root)
+        res = verify(gate.manifest, gate.baseline, root)
         if res["ok"]:
             note = "" if res["frozen"] else " (no baseline; gate not frozen)"
             print(f"[GATE] done-gate baseline intact{note}")
