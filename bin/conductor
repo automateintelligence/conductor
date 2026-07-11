@@ -43,10 +43,16 @@ case "${1:-}" in
     # The run's per-spec done-gate dir (assertions/<slug>), single-sourced with the run
     # branch: <slug> = `run-branch name` minus the conductor/run- prefix, so the gate dir
     # and the run branch never diverge. Setup writes the manifest+tests there instead of the
-    # shared flat assertions/ slot.
+    # shared flat assertions/ slot. $CONDUCTOR_GATE_DIR overrides outright — MUST match
+    # paths.gate_dir()/setup_gate_dir(), or setup would write one dir and the gate commands
+    # read another.
     [ -n "${1:-}" ] || { echo "usage: conductor gate-dir <spec.md>" >&2; exit 64; }
-    RB="$(PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 -m conductor.branches name "$1")" || exit $?
-    printf 'assertions/%s\n' "${RB#conductor/run-}"
+    if [ -n "${CONDUCTOR_GATE_DIR:-}" ]; then
+      printf '%s\n' "$CONDUCTOR_GATE_DIR"
+    else
+      RB="$(PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 -m conductor.branches name "$1")" || exit $?
+      printf 'assertions/%s\n' "${RB#conductor/run-}"
+    fi
     ;;
   gate) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.freeze "$@" ;;
   *) printf "usage:\n  conductor assert run [--level spec|phase|task]\n  conductor ledger {generate <plan.json>|convert <plan.md>|align <plan.md> [--apply]|reconcile <issue#> [--from-gate|flags]|phase-done <issue#> [--plan plan.md] [--no-gate-check]}\n  conductor plan-lint <plan.md> [--spec <spec.md>]\n  conductor authority preview <plan.md>\n  conductor goal {set <text...>|get}\n  conductor preflight\n  conductor merge <pr>            (gate + merge, refuses base=default)\n  conductor merge-gate <pr>\n  conductor run-packet <run-branch> [--base main] [--milestone TITLE]\n  conductor resume-script {write|verify} --project <root> --worktree <path> [--out <path> [--force]|--script <path>]\n  conductor resume-script {install-cron|uninstall-cron} --project <root>\n  conductor driver {install --worktree <path>|status}\n  conductor remote\n  conductor run-branch name <spec.md>\n  conductor default-branch\n  conductor gate-dir <spec.md>    (the run's per-spec gate dir: assertions/<slug>)\n  conductor gate {lint|freeze|verify}\n" >&2; exit 64 ;;

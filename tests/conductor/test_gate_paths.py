@@ -282,6 +282,35 @@ def test_deleting_namespaced_manifest_fails_closed_under_its_baseline(tmp_path):
     )
 
 
+def test_gate_dir_cli_honors_gate_dir_override(tmp_path):
+    # codex P2: the CLI verb must match paths.gate_dir() — $CONDUCTOR_GATE_DIR overrides
+    # outright, else assertions/<slug>. Divergence writes one dir and reads another.
+    env = dict(os.environ)
+    env["CONDUCTOR_HOME"] = str(tmp_path)
+    for k in ("CONDUCTOR_GATE_SLUG", "CONDUCTOR_MANIFEST", "CONDUCTOR_FREEZE_BASELINE"):
+        env.pop(k, None)
+
+    def _gate_dir(e):
+        return subprocess.run(
+            [CONDUCTOR, "gate-dir", "docs/specs/alpha.md"],
+            cwd=str(tmp_path),
+            env=e,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    env.pop("CONDUCTOR_GATE_DIR", None)
+    default = _gate_dir(env)
+    assert default.returncode == 0, default.stderr
+    assert default.stdout.strip() == "assertions/alpha"
+
+    env["CONDUCTOR_GATE_DIR"] = "/tmp/custom-gate"
+    override = _gate_dir(env)
+    assert override.returncode == 0, override.stderr
+    assert override.stdout.strip() == "/tmp/custom-gate"
+
+
 def test_freeze_binds_assertions_source_to_selected_spec(tmp_path):
     # codex P1: /conductor:start freezes at step 3, BEFORE the goal is recorded. In a repo
     # holding >1 docs/specs/*.assertions.md the glob is ambiguous; CONDUCTOR_ASSERTIONS_SOURCE
