@@ -1,6 +1,7 @@
 # Stage 0 scratch / transient
 experiments/**/run/
 assertions/run/
+assertions/**/run/
 *.log
 __pycache__/
 *.pyc

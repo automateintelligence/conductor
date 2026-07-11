@@ -20,7 +20,7 @@ import re
 import shlex
 import sys
 
-from conductor.paths import project_root
+from conductor.paths import project_root, resolve_gate
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_ROOT = os.path.dirname(
@@ -117,15 +117,33 @@ class MissingAssertionsSource(RuntimeError):
 def _assertions_source(repo_root: str) -> tuple[dict, str]:
     """({relpath: sha256}, via) for the human-authored `<spec>.assertions.md` —
     the done-DEFINITION, made tamper-evident alongside the manifest and test
-    files. `via` is "goal", "glob", or "none" (how the source was discovered).
+    files. `via` is "env", "goal", "glob", or "none" (how the source was discovered).
 
-    Preferred, precise path: parse `<project>/.conductor/goal.md` for a
+    Highest precedence: `$CONDUCTOR_ASSERTIONS_SOURCE` names THIS run's spec (its
+    `.md` — the `.assertions.md` sibling is taken — or the `.assertions.md` itself).
+    `/conductor:start` sets it for the step-3 freeze, which runs BEFORE the goal is
+    recorded: in a multi-spec repo the glob below would otherwise fail closed
+    (`ambiguous-assertions-source`) or a stale `goal.md` would bind the wrong spec.
+    Else, precise path: parse `<project>/.conductor/goal.md` for a
     `docs/specs/<name>.md` path and take its `.assertions.md` sibling; a goal
     whose named spec has no `.assertions.md` sibling — or that names no spec at
     all — fails closed. Glob `docs/specs/*.assertions.md` ONLY when no goal file
     exists: exactly one match -> use it; multiple -> fail closed (freezing every
     spec's assertions silently would let an edit to an UNRELATED spec's
     assertions break this run's gate); none -> no source entry (old behavior)."""
+    override = os.environ.get("CONDUCTOR_ASSERTIONS_SOURCE")
+    if override:
+        path = (
+            override if os.path.isabs(override) else os.path.join(repo_root, override)
+        )
+        if not path.endswith(".assertions.md"):
+            path += ".assertions.md"
+        if not os.path.isfile(path):
+            raise MissingAssertionsSource(
+                f"missing-assertions-source: CONDUCTOR_ASSERTIONS_SOURCE names "
+                f"{override} but {path} does not exist"
+            )
+        return {os.path.relpath(path, repo_root): _sha256_file(path)}, "env"
     goal_path = os.path.join(repo_root, ".conductor", "goal.md")
     if os.path.isfile(goal_path):
         with open(goal_path, encoding="utf-8") as f:
@@ -273,15 +291,29 @@ def main(argv: list | None = None) -> int:
         from conductor import gate_lint
 
         return gate_lint.main()
+    # Per-spec gate (multi-spec safety): freeze/verify the manifest+baseline resolve_gate()
+    # points at — assertions/<slug>/ for a namespaced run, else flat — with the same §5
+    # fail-closed verdict the done-gate runner uses (single-sourced in paths.resolve_gate).
+    root = project_root()
+    gate = resolve_gate(root)
+    # §5: refuse to freeze OR verify a gate this run is DODGING (repointed run metadata). An
+    # edited .conductor/run_branch or a planted alternate manifest must not read green — and
+    # freezing one would LAUNDER it into a valid baseline that later passes `assert run`.
+    if cmd in ("freeze", "verify") and gate.fail_closed:
+        print(f"[GATE] TAMPERED: {gate.fail_closed}", file=sys.stderr)
+        return 1
     if cmd == "freeze":
         try:
-            print(f"[GATE] froze done-gate baseline -> {record()}")
+            print(
+                "[GATE] froze done-gate baseline -> "
+                + record(gate.manifest, gate.baseline, root)
+            )
         except (AmbiguousAssertionsSource, MissingAssertionsSource) as exc:
             print(f"[GATE] {exc}", file=sys.stderr)
             return 1
         return 0
     if cmd == "verify":
-        res = verify()
+        res = verify(gate.manifest, gate.baseline, root)
         if res["ok"]:
             note = "" if res["frozen"] else " (no baseline; gate not frozen)"
             print(f"[GATE] done-gate baseline intact{note}")

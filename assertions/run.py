@@ -40,15 +40,20 @@ PLUGIN_ROOT = os.path.dirname(ASSERTIONS_DIR)
 if PLUGIN_ROOT not in sys.path:
     sys.path.insert(0, PLUGIN_ROOT)
 
-from conductor.paths import project_root  # noqa: E402  (needs PLUGIN_ROOT on sys.path first)
+from conductor.paths import (  # noqa: E402  (needs PLUGIN_ROOT on sys.path first)
+    project_root,
+    resolve_gate,
+)
 
 PROJECT = project_root()
-MANIFEST = os.environ.get(
-    "CONDUCTOR_MANIFEST", os.path.join(PROJECT, "assertions", "manifest.yaml")
-)
+# Per-spec gate (multi-spec safety): ONE resolve_gate() call decides the manifest, results
+# dir, baseline, and the §5 fail-closed verdict for this run — assertions/<slug>/ for a
+# namespaced run, else the flat legacy assertions/ (honoring explicit CONDUCTOR_* overrides).
+_GATE = resolve_gate(PROJECT)
+MANIFEST = _GATE.manifest
 OVERALL_TIMEOUT = float(os.environ.get("CONDUCTOR_OVERALL_TIMEOUT", "0"))  # 0 = none
 ISOLATE = os.environ.get("CONDUCTOR_ISOLATE", "") not in ("", "0")
-RUN_DIR = os.path.join(PROJECT, "assertions", "run")
+RUN_DIR = _GATE.run_dir
 RESULTS = os.path.join(RUN_DIR, "results.json")
 
 EXIT_OK = 0
@@ -192,6 +197,17 @@ def main() -> int:
         print("[GATE] FAIL: invalid command-line arguments")
         print("SUMMARY: gate NOT done (invalid arguments) -> exit 5")
         return EXIT_NO_MATCH
+
+    # §5 ambient-dodge guard FIRST — before loading the manifest, so a run_branch repointed to
+    # an unbuilt slug (or onto a DIFFERENT already-FROZEN gate) reports the TAMPER exit 6, not
+    # a manifest-missing 2, and agrees with `gate verify`. resolve_gate() is the single
+    # verdict shared with the freeze guard.
+    if _GATE.fail_closed:
+        write_results({})
+        print(f"[GATE] FAIL: {_GATE.fail_closed}")
+        print("SUMMARY: gate NOT done (repointed run metadata) -> exit 6")
+        return EXIT_TAMPERED
+
     try:
         assertions = load_assertions(MANIFEST)
     except ManifestMissing:
@@ -208,9 +224,7 @@ def main() -> int:
     # Done-gate integrity (§5): if /conductor:start froze a baseline, the manifest and the
     # test files its commands reference must be unchanged. Fail-closed, so the worker cannot
     # make a red gate green by weakening a check instead of satisfying it.
-    _baseline = os.environ.get(
-        "CONDUCTOR_FREEZE_BASELINE", os.path.join(PROJECT, "assertions", ".frozen")
-    )
+    _baseline = _GATE.baseline
     if os.path.exists(_baseline):
         if PLUGIN_ROOT not in sys.path:
             sys.path.insert(0, PLUGIN_ROOT)
