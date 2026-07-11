@@ -49,14 +49,18 @@ case "${1:-}" in
     # Mirror paths.gate_dir() precedence exactly: $CONDUCTOR_GATE_DIR > $CONDUCTOR_GATE_SLUG >
     # the spec-derived slug. Diverging here would write the manifest to one dir while
     # lint/freeze/run read another.
+    # Print the PROJECT-ROOTED path paths.gate_dir() resolves (absolute, under $PROJECT =
+    # $CONDUCTOR_HOME/git-root), NOT a cwd-relative one — the CLI may be invoked from outside
+    # the project root, and a cwd-relative path would write the manifest somewhere the gate
+    # commands never read.
     [ -n "${1:-}" ] || { echo "usage: conductor gate-dir <spec.md>" >&2; exit 64; }
     if [ -n "${CONDUCTOR_GATE_DIR:-}" ]; then
       printf '%s\n' "$CONDUCTOR_GATE_DIR"
     elif [ -n "${CONDUCTOR_GATE_SLUG:-}" ]; then
-      printf 'assertions/%s\n' "$CONDUCTOR_GATE_SLUG"
+      printf '%s/assertions/%s\n' "$PROJECT" "$CONDUCTOR_GATE_SLUG"
     else
       RB="$(PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 -m conductor.branches name "$1")" || exit $?
-      printf 'assertions/%s\n' "${RB#conductor/run-}"
+      printf '%s/assertions/%s\n' "$PROJECT" "${RB#conductor/run-}"
     fi
     ;;
   gate) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.freeze "$@" ;;

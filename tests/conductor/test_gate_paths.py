@@ -392,18 +392,24 @@ def test_deleting_namespaced_manifest_fails_closed_under_its_baseline(tmp_path):
     )
 
 
-def test_gate_dir_cli_honors_gate_dir_override(tmp_path):
-    # codex P2: the CLI verb must match paths.gate_dir() — $CONDUCTOR_GATE_DIR overrides
-    # outright, else assertions/<slug>. Divergence writes one dir and reads another.
+def test_gate_dir_cli_matches_resolver_from_any_cwd(tmp_path):
+    # codex P2: the CLI verb must print the PROJECT-ROOTED path paths.gate_dir() resolves —
+    # $CONDUCTOR_GATE_DIR verbatim, else $CONDUCTOR_HOME/assertions/<slug> — even when invoked
+    # from OUTSIDE the project root (CONDUCTOR_HOME != cwd). A cwd-relative path would write
+    # the manifest where lint/freeze/run never read it.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    elsewhere = tmp_path / "elsewhere"  # invoke from a DIFFERENT cwd than the project
+    elsewhere.mkdir()
     env = dict(os.environ)
-    env["CONDUCTOR_HOME"] = str(tmp_path)
+    env["CONDUCTOR_HOME"] = str(proj)
     for k in ("CONDUCTOR_GATE_SLUG", "CONDUCTOR_MANIFEST", "CONDUCTOR_FREEZE_BASELINE"):
         env.pop(k, None)
 
     def _gate_dir(e):
         return subprocess.run(
             [CONDUCTOR, "gate-dir", "docs/specs/alpha.md"],
-            cwd=str(tmp_path),
+            cwd=str(elsewhere),
             env=e,
             capture_output=True,
             text=True,
@@ -413,20 +419,19 @@ def test_gate_dir_cli_honors_gate_dir_override(tmp_path):
     env.pop("CONDUCTOR_GATE_DIR", None)
     default = _gate_dir(env)
     assert default.returncode == 0, default.stderr
-    assert default.stdout.strip() == "assertions/alpha"
+    assert default.stdout.strip() == str(proj / "assertions" / "alpha")
 
     env["CONDUCTOR_GATE_DIR"] = "/tmp/custom-gate"
     override = _gate_dir(env)
     assert override.returncode == 0, override.stderr
     assert override.stdout.strip() == "/tmp/custom-gate"
 
-    # An already-set CONDUCTOR_GATE_SLUG must win over the spec-derived slug, matching
-    # paths.gate_dir() (codex P2) — else gate-dir writes one dir and lint/freeze read another.
+    # An already-set CONDUCTOR_GATE_SLUG must win over the spec-derived slug, project-rooted.
     env.pop("CONDUCTOR_GATE_DIR", None)
     env["CONDUCTOR_GATE_SLUG"] = "explicitslug"
     slug_case = _gate_dir(env)
     assert slug_case.returncode == 0, slug_case.stderr
-    assert slug_case.stdout.strip() == "assertions/explicitslug"
+    assert slug_case.stdout.strip() == str(proj / "assertions" / "explicitslug")
 
 
 def test_corrupt_run_branch_cannot_bypass_a_frozen_namespaced_gate(tmp_path):
