@@ -296,6 +296,12 @@ def main(argv: list | None = None) -> int:
     # fail-closed verdict the done-gate runner uses (single-sourced in paths.resolve_gate).
     root = project_root()
     gate = resolve_gate(root)
+    # §5: refuse to freeze OR verify a gate this run is DODGING (repointed run metadata). An
+    # edited .conductor/run_branch or a planted alternate manifest must not read green — and
+    # freezing one would LAUNDER it into a valid baseline that later passes `assert run`.
+    if cmd in ("freeze", "verify") and gate.fail_closed:
+        print(f"[GATE] TAMPERED: {gate.fail_closed}", file=sys.stderr)
+        return 1
     if cmd == "freeze":
         try:
             print(
@@ -307,11 +313,6 @@ def main(argv: list | None = None) -> int:
             return 1
         return 0
     if cmd == "verify":
-        # An edited .conductor/run_branch or a planted alternate manifest must not read green
-        # by dodging a real frozen baseline (§5) — resolve_gate() flags it, same as the runner.
-        if gate.fail_closed:
-            print(f"[GATE] TAMPERED: {gate.fail_closed}", file=sys.stderr)
-            return 1
         res = verify(gate.manifest, gate.baseline, root)
         if res["ok"]:
             note = "" if res["frozen"] else " (no baseline; gate not frozen)"

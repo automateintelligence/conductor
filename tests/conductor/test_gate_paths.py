@@ -170,6 +170,27 @@ def test_corrupt_ambient_slug_fails_closed_when_repo_has_frozen_gate(
     assert paths.gate_dir(str(tmp_path)) == str(tmp_path / "assertions" / "junk")
 
 
+def test_run_branch_slug_rejects_unsafe_path_component(tmp_path, monkeypatch):
+    # codex P2: .conductor/run_branch is worker-editable and its suffix is now a filesystem
+    # component. A suffix with separators / .. must be rejected, never joined into a gate path.
+    _clear_env(monkeypatch)
+    for bad in (
+        "conductor/run-../../evil",
+        "conductor/run-a/b",
+        "conductor/run-..",
+        "conductor/run-.lock",
+    ):
+        _write(tmp_path, ".conductor/run_branch", bad + "\n")
+        assert paths._run_branch_slug(str(tmp_path)) is None, bad
+        assert paths.gate_slug(str(tmp_path)) is None, bad
+        g = paths.resolve_gate(str(tmp_path))
+        assert g.directory == str(tmp_path / "assertions"), bad  # flat, never traversed
+    _write(
+        tmp_path, ".conductor/run_branch", "conductor/run-good-1.2\n"
+    )  # a safe one still works
+    assert paths._run_branch_slug(str(tmp_path)) == "good-1.2"
+
+
 def test_unresolved_frozen_gate(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     assert (
@@ -444,14 +465,22 @@ def test_corrupt_run_branch_cannot_bypass_a_frozen_namespaced_gate(tmp_path):
 
     (proj / ".conductor" / "run_branch").write_text("conductor/run-junk\n")
 
+    # assert run reports the TAMPER exit 6 (guard runs before manifest loading), not a
+    # manifest-missing 2 — and agrees with gate verify.
     r = _ambient("assert", "run", "--level", "spec")
-    assert r.returncode != 0, (
+    assert r.returncode == 6, (
         "assert run dodged onto the flat gate:\n" + r.stdout + r.stderr
     )
     v = _ambient("gate", "verify")
     assert v.returncode != 0, (
         "gate verify read green by dodging the frozen gate:\n" + v.stdout + v.stderr
     )
+    # gate freeze must REFUSE too — freezing the dodged (junk) selection would launder it.
+    f = _ambient("gate", "freeze")
+    assert f.returncode != 0, (
+        "gate freeze laundered a dodged gate:\n" + f.stdout + f.stderr
+    )
+    assert not (proj / "assertions" / "junk" / ".frozen").exists()
 
 
 def test_repointed_frozen_alternate_fails_closed_in_assert_run(tmp_path):
@@ -805,6 +834,19 @@ _MATRIX = [
         "assertions/other",
         "other",
         True,
+    ),
+    (
+        # a malformed/edited run_branch suffix that is not a safe path component (path
+        # separators / ..) is rejected -> no slug -> flat; never joined into a gate path.
+        "run_branch-path-traversal-rejected",
+        {},
+        [],
+        "conductor/run-../../evil",
+        None,
+        "flat",
+        "assertions",
+        None,
+        False,
     ),
     (
         "rb-corrupt-vs-flat-frozen-only",

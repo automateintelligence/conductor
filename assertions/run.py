@@ -197,6 +197,17 @@ def main() -> int:
         print("[GATE] FAIL: invalid command-line arguments")
         print("SUMMARY: gate NOT done (invalid arguments) -> exit 5")
         return EXIT_NO_MATCH
+
+    # §5 ambient-dodge guard FIRST — before loading the manifest, so a run_branch repointed to
+    # an unbuilt slug (or onto a DIFFERENT already-FROZEN gate) reports the TAMPER exit 6, not
+    # a manifest-missing 2, and agrees with `gate verify`. resolve_gate() is the single
+    # verdict shared with the freeze guard.
+    if _GATE.fail_closed:
+        write_results({})
+        print(f"[GATE] FAIL: {_GATE.fail_closed}")
+        print("SUMMARY: gate NOT done (repointed run metadata) -> exit 6")
+        return EXIT_TAMPERED
+
     try:
         assertions = load_assertions(MANIFEST)
     except ManifestMissing:
@@ -209,15 +220,6 @@ def main() -> int:
         print(f"[GATE] FAIL: manifest unparseable: {exc}")
         print("SUMMARY: gate NOT done (manifest unparseable) -> exit 3")
         return EXIT_BAD_MANIFEST
-
-    # §5 ambient-dodge guard FIRST — before the baseline branch, so a run_branch repointed
-    # onto a DIFFERENT already-FROZEN gate (whose baseline exists) is refused too, not just a
-    # planted UNFROZEN one. resolve_gate() is the single verdict, shared with `gate verify`.
-    if _GATE.fail_closed:
-        write_results({})
-        print(f"[GATE] FAIL: {_GATE.fail_closed}")
-        print("SUMMARY: gate NOT done (repointed run metadata) -> exit 6")
-        return EXIT_TAMPERED
 
     # Done-gate integrity (§5): if /conductor:start froze a baseline, the manifest and the
     # test files its commands reference must be unchanged. Fail-closed, so the worker cannot

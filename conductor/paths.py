@@ -64,10 +64,22 @@ def spec_slug(spec_path: str) -> str:
     return slug
 
 
+_SAFE_SLUG = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
+
+
+def _safe_slug(s: str) -> bool:
+    """Whether ``s`` is safe to use as the ``assertions/<slug>`` filesystem component: a single
+    ref-safe segment (what ``spec_slug`` guarantees), with no path separators and no ``..``. An
+    edited ``.conductor/run_branch`` — now a path component — that doesn't qualify (e.g.
+    ``conductor/run-../../outside``) is rejected so it cannot traverse out of the gate dir."""
+    return bool(_SAFE_SLUG.match(s)) and ".." not in s and not s.endswith(".lock")
+
+
 def _run_branch_slug(root: str) -> str | None:
     """The slug from ``<root>/.conductor/run_branch`` (``conductor/run-<slug>``), else None.
     Present at RUN time (start writes it during topology setup) and equal, by construction,
-    to ``spec_slug(<spec>)``."""
+    to ``spec_slug(<spec>)``. A malformed/edited suffix that is not a safe path component is
+    rejected (None) rather than joined into a gate path."""
     prefix = "conductor/run-"
     try:
         with open(
@@ -76,11 +88,10 @@ def _run_branch_slug(root: str) -> str | None:
             name = f.read().strip()
     except OSError:
         return None
-    return (
-        name[len(prefix) :]
-        if name.startswith(prefix) and len(name) > len(prefix)
-        else None
-    )
+    if not (name.startswith(prefix) and len(name) > len(prefix)):
+        return None
+    suffix = name[len(prefix) :]
+    return suffix if _safe_slug(suffix) else None
 
 
 def _goal_slug(root: str) -> str | None:
