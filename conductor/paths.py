@@ -114,24 +114,33 @@ def gate_slug(repo_root: str | None = None) -> str | None:
 def gate_dir(repo_root: str | None = None) -> str:
     """The directory holding THIS run's done-gate (manifest + baseline + results/).
 
-    ``$CONDUCTOR_GATE_DIR`` wins outright. Else the per-spec ``assertions/<slug>/`` when a
-    slug resolves AND that dir already holds a ``manifest.yaml`` OR a ``.frozen`` baseline;
-    otherwise the flat legacy ``assertions/``. The existence gate is deliberate and fail-safe
-    toward the legacy layout: a repo with an in-place flat gate — or a stale ``.conductor/``
-    left by a finished run whose slug has no dir — keeps reading its flat gate untouched. A
-    fresh namespaced run's SETUP writes the manifest into ``assertions/<slug>/`` first (via
-    ``$CONDUCTOR_GATE_SLUG``), after which every read resolves there.
+    Resolution, in precedence order:
+      1. ``$CONDUCTOR_GATE_DIR`` — wins outright.
+      2. An EXPLICIT ``$CONDUCTOR_GATE_SLUG`` — ``assertions/<slug>/`` with NO flat fallback.
+         The env slug is a deliberate "this run is namespaced" signal (``/conductor:start``
+         exports it for the step-3 build/lint/freeze). Forcing the dir means a not-yet-written
+         or mis-written manifest FAILS CLOSED (runner exit 2 / verify unloadable) instead of
+         silently validating or freezing the legacy flat gate under a new spec.
+      3. An AMBIENT slug (from ``.conductor/run_branch`` or ``goal.md``) — ``assertions/<slug>/``
+         only once that dir holds a ``manifest.yaml`` OR a ``.frozen`` baseline; otherwise the
+         flat legacy ``assertions/``. This existence gate is fail-safe toward the legacy layout:
+         a repo with an in-place flat gate, or a stale ``.conductor/`` left by a finished run
+         whose slug has no dir, keeps reading its flat gate untouched.
+      4. No slug -> flat ``assertions/``.
 
-    Integrity (§5): the ``.frozen`` leg is load-bearing. Once a namespaced gate is FROZEN,
-    that dir owns the run even if its ``manifest.yaml`` is later deleted or renamed — the
-    resolver must NOT fall back to the flat gate, or a worker could shed a frozen baseline by
-    removing the manifest and have ``gate verify`` / ``assert run`` read a green flat slot.
+    Integrity (§5): the ``.frozen`` leg of (3) is load-bearing. Once a namespaced gate is
+    FROZEN, that dir owns the run even if its ``manifest.yaml`` is later deleted or renamed —
+    the resolver must NOT fall back to the flat gate, or a worker could shed a frozen baseline
+    by removing the manifest and have ``gate verify`` / ``assert run`` read a green flat slot.
     Keeping the frozen dir makes the missing manifest fail closed under that baseline."""
     env = os.environ.get("CONDUCTOR_GATE_DIR")
     if env:
         return env
     root = repo_root or project_root()
     flat = os.path.join(root, "assertions")
+    explicit = os.environ.get("CONDUCTOR_GATE_SLUG")
+    if explicit:
+        return os.path.join(flat, explicit)
     slug = gate_slug(root)
     if slug:
         nsdir = os.path.join(flat, slug)
@@ -140,19 +149,6 @@ def gate_dir(repo_root: str | None = None) -> str:
         ):
             return nsdir
     return flat
-
-
-def setup_gate_dir(repo_root: str | None = None) -> str:
-    """Where a run being SET UP should build its gate: the per-spec ``assertions/<slug>/``
-    when a slug resolves, else flat ``assertions/``. Unlike ``gate_dir`` this does NOT wait
-    for the manifest to exist — setup is what creates it. ``$CONDUCTOR_GATE_DIR`` still wins."""
-    env = os.environ.get("CONDUCTOR_GATE_DIR")
-    if env:
-        return env
-    root = repo_root or project_root()
-    flat = os.path.join(root, "assertions")
-    slug = gate_slug(root)
-    return os.path.join(flat, slug) if slug else flat
 
 
 def manifest_path(repo_root: str | None = None) -> str:

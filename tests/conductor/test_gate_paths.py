@@ -85,7 +85,7 @@ def test_gate_slug_env_overrides_files(tmp_path, monkeypatch):
     assert paths.gate_slug(str(tmp_path)) == "fromenv"
 
 
-# --- gate_dir vs setup_gate_dir: read prefers built per-slug; setup always namespaces ----
+# --- gate_dir: explicit slug forces namespaced; ambient slug falls back until built -------
 
 
 def _clear_env(monkeypatch):
@@ -103,36 +103,39 @@ def test_gate_dir_flat_when_no_slug(tmp_path, monkeypatch):
     assert paths.gate_dir(str(tmp_path)) == str(tmp_path / "assertions")
 
 
-def test_gate_dir_falls_back_to_flat_until_per_slug_gate_built(tmp_path, monkeypatch):
-    # A slug resolves but the per-slug manifest is not there yet (e.g. a stale .conductor/
-    # left by a finished run, or before setup writes it): the flat legacy gate is used.
+def test_explicit_slug_forces_namespaced_no_flat_fallback(tmp_path, monkeypatch):
+    # codex P2: an explicit CONDUCTOR_GATE_SLUG (start's "this run is namespaced" signal)
+    # forces assertions/<slug>/ even before its manifest exists and even with a legacy flat
+    # manifest present — so setup can't silently freeze/validate the old flat gate.
     _clear_env(monkeypatch)
+    _write(tmp_path, "assertions/manifest.yaml", "assertions: []\n")  # legacy flat gate
     monkeypatch.setenv("CONDUCTOR_GATE_SLUG", "alpha")
+    assert paths.gate_dir(str(tmp_path)) == str(tmp_path / "assertions" / "alpha")
+
+
+def test_ambient_slug_falls_back_to_flat_until_built(tmp_path, monkeypatch):
+    # An AMBIENT slug (.conductor/run_branch, not the explicit env) with no per-slug gate yet
+    # keeps the flat legacy gate — protects an in-place flat gate and a stale .conductor/.
+    _clear_env(monkeypatch)
+    _write(tmp_path, ".conductor/run_branch", "conductor/run-alpha\n")
     assert paths.gate_dir(str(tmp_path)) == str(tmp_path / "assertions")
 
 
-def test_gate_dir_uses_per_slug_once_manifest_exists(tmp_path, monkeypatch):
+def test_ambient_slug_uses_namespaced_once_manifest_exists(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
-    monkeypatch.setenv("CONDUCTOR_GATE_SLUG", "alpha")
+    _write(tmp_path, ".conductor/run_branch", "conductor/run-alpha\n")
     _write(tmp_path, "assertions/alpha/manifest.yaml", "assertions: []\n")
     assert paths.gate_dir(str(tmp_path)) == str(tmp_path / "assertions" / "alpha")
 
 
-def test_gate_dir_stays_namespaced_when_only_frozen_exists(tmp_path, monkeypatch):
-    # Integrity: once a namespaced gate is FROZEN, a missing/renamed manifest must NOT
+def test_ambient_slug_stays_namespaced_when_only_frozen_exists(tmp_path, monkeypatch):
+    # Integrity (codex P1): once a namespaced gate is FROZEN, deleting its manifest must NOT
     # downgrade to the flat gate — the .frozen baseline keeps the dir so the missing manifest
-    # fails closed under it (codex P1).
+    # fails closed under it. Exercised on the ambient (run-time) path.
     _clear_env(monkeypatch)
-    monkeypatch.setenv("CONDUCTOR_GATE_SLUG", "alpha")
-    _write(tmp_path, "assertions/alpha/.frozen", "{}\n")  # no manifest.yaml beside it
+    _write(tmp_path, ".conductor/run_branch", "conductor/run-alpha\n")
+    _write(tmp_path, "assertions/alpha/.frozen", "{}\n")  # frozen, manifest gone
     assert paths.gate_dir(str(tmp_path)) == str(tmp_path / "assertions" / "alpha")
-
-
-def test_setup_gate_dir_namespaces_before_manifest_exists(tmp_path, monkeypatch):
-    # setup is what CREATES the manifest — it must point at the per-slug dir up front.
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("CONDUCTOR_GATE_SLUG", "alpha")
-    assert paths.setup_gate_dir(str(tmp_path)) == str(tmp_path / "assertions" / "alpha")
 
 
 def test_gate_dir_env_override_wins(tmp_path, monkeypatch):
