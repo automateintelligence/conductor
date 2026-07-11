@@ -186,6 +186,27 @@ def test_unresolved_frozen_gate(tmp_path, monkeypatch):
     assert paths.unresolved_frozen_gate(str(tmp_path)) is False
 
 
+def test_ambient_switch_away_from_flat_frozen_gate_fails_closed(tmp_path, monkeypatch):
+    # codex P2: a LEGACY flat-frozen repo (assertions/.frozen) must not be bypassed by planting
+    # a namespaced manifest + ambient run_branch — resolving to the unfrozen namespace while the
+    # flat baseline exists is dodging it, even though no namespaced .frozen exists.
+    _clear_env(monkeypatch)
+    _write(tmp_path, "assertions/.frozen", "{}\n")  # legacy flat frozen gate
+    _write(tmp_path, "assertions/manifest.yaml", "assertions: []\n")
+    _write(
+        tmp_path, "assertions/other/manifest.yaml", "assertions: []\n"
+    )  # planted namespace
+    _write(tmp_path, ".conductor/run_branch", "conductor/run-other\n")
+    # gate_dir resolves to the planted (unfrozen) namespace...
+    assert paths.gate_dir(str(tmp_path)) == str(tmp_path / "assertions" / "other")
+    # ...but the guard flags it, because the flat frozen gate is being dodged.
+    assert paths.unresolved_frozen_gate(str(tmp_path)) is True
+    # selecting the flat gate directly (no ambient namespace) is fine — its baseline exists.
+    (tmp_path / "assertions" / "other" / "manifest.yaml").unlink()
+    (tmp_path / ".conductor" / "run_branch").unlink()
+    assert paths.unresolved_frozen_gate(str(tmp_path)) is False
+
+
 def test_unresolved_frozen_gate_exempts_explicit_path_overrides(tmp_path, monkeypatch):
     # codex P2: documented explicit overrides (CONDUCTOR_MANIFEST / CONDUCTOR_GATE_DIR) are
     # deliberate gate selections — the ambient-dodge guard must stand down, not fail closed.

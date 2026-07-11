@@ -185,21 +185,26 @@ def _explicit_gate_override() -> bool:
 
 def unresolved_frozen_gate(repo_root: str | None = None) -> bool:
     """True when this run resolves — via AMBIENT metadata only — to an UNFROZEN gate while the
-    repo holds frozen per-spec gates (§5, fail-closed): an edited ``.conductor/run_branch``
+    repo holds a frozen gate ELSEWHERE (§5, fail-closed): an edited ``.conductor/run_branch``
     (stale/corrupt slug) or a PLANTED alternate ``assertions/<other>/manifest.yaml`` dodging a
     real frozen baseline. BOTH the done-gate runner (``assert run``) and ``gate verify`` must
     fail closed on this — single-sourced here so they cannot drift.
 
+    The frozen gate being dodged may be a namespaced ``assertions/<slug>/.frozen`` OR the
+    legacy flat ``assertions/.frozen``: a legacy flat-frozen repo must not be bypassed by
+    planting a namespaced manifest and pointing run_branch at it.
+
     Any EXPLICIT gate override (`$CONDUCTOR_GATE_SLUG` for setup, or the documented
     `$CONDUCTOR_MANIFEST` / `$CONDUCTOR_GATE_DIR` / `$CONDUCTOR_FREEZE_BASELINE` for custom
     jobs) is a deliberate selection and is exempt — the guard is for ambient resolution only.
-    A flat-legacy repo (no namespaced ``.frozen``) is never affected."""
+    A repo with NO frozen gate at all is never affected."""
     if _explicit_gate_override():
         return False
     root = repo_root or project_root()
     if os.path.exists(baseline_path(root)):
-        return False
-    return has_namespaced_frozen_gate(root)
+        return False  # the resolved gate is itself frozen — nothing is being dodged
+    flat_frozen = os.path.isfile(os.path.join(root, "assertions", ".frozen"))
+    return flat_frozen or has_namespaced_frozen_gate(root)
 
 
 def manifest_path(repo_root: str | None = None) -> str:
