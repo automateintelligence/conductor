@@ -117,15 +117,33 @@ class MissingAssertionsSource(RuntimeError):
 def _assertions_source(repo_root: str) -> tuple[dict, str]:
     """({relpath: sha256}, via) for the human-authored `<spec>.assertions.md` —
     the done-DEFINITION, made tamper-evident alongside the manifest and test
-    files. `via` is "goal", "glob", or "none" (how the source was discovered).
+    files. `via` is "env", "goal", "glob", or "none" (how the source was discovered).
 
-    Preferred, precise path: parse `<project>/.conductor/goal.md` for a
+    Highest precedence: `$CONDUCTOR_ASSERTIONS_SOURCE` names THIS run's spec (its
+    `.md` — the `.assertions.md` sibling is taken — or the `.assertions.md` itself).
+    `/conductor:start` sets it for the step-3 freeze, which runs BEFORE the goal is
+    recorded: in a multi-spec repo the glob below would otherwise fail closed
+    (`ambiguous-assertions-source`) or a stale `goal.md` would bind the wrong spec.
+    Else, precise path: parse `<project>/.conductor/goal.md` for a
     `docs/specs/<name>.md` path and take its `.assertions.md` sibling; a goal
     whose named spec has no `.assertions.md` sibling — or that names no spec at
     all — fails closed. Glob `docs/specs/*.assertions.md` ONLY when no goal file
     exists: exactly one match -> use it; multiple -> fail closed (freezing every
     spec's assertions silently would let an edit to an UNRELATED spec's
     assertions break this run's gate); none -> no source entry (old behavior)."""
+    override = os.environ.get("CONDUCTOR_ASSERTIONS_SOURCE")
+    if override:
+        path = (
+            override if os.path.isabs(override) else os.path.join(repo_root, override)
+        )
+        if not path.endswith(".assertions.md"):
+            path += ".assertions.md"
+        if not os.path.isfile(path):
+            raise MissingAssertionsSource(
+                f"missing-assertions-source: CONDUCTOR_ASSERTIONS_SOURCE names "
+                f"{override} but {path} does not exist"
+            )
+        return {os.path.relpath(path, repo_root): _sha256_file(path)}, "env"
     goal_path = os.path.join(repo_root, ".conductor", "goal.md")
     if os.path.isfile(goal_path):
         with open(goal_path, encoding="utf-8") as f:

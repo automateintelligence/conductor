@@ -15,9 +15,12 @@ test and one manifest entry, traceable by `id`. **Use `/superpowers:test-driven-
 > gate dir — `GATE_DIR="$(conductor gate-dir <spec>)"` → `assertions/<slug>/` (single-sourced with
 > the run branch; `<slug>` = the run-branch slug). Namespacing keeps sibling specs conducted in
 > other worktrees from contending for the one flat `assertions/` slot at the shared merge base.
-> Write the manifest at `$GATE_DIR/manifest.yaml` and the tests under `$GATE_DIR/tests/`. `/conductor:start`
-> exports `CONDUCTOR_GATE_SLUG` so `conductor gate lint|freeze` and `assert run` resolve the same dir.
-> (Invoked standalone with no run set up yet, `conductor gate-dir <spec>` still names the dir.)
+> Write the manifest at `$GATE_DIR/manifest.yaml` and the tests under `$GATE_DIR/tests/`, then
+> **export `CONDUCTOR_GATE_SLUG="$(basename "$GATE_DIR")"`** before step 5 so your own
+> `conductor assert run` verification resolves the manifest you just wrote — not the flat
+> `assertions/` slot. When `/conductor:start` drives this it exports the slug (and
+> `CONDUCTOR_ASSERTIONS_SOURCE`) already; invoked standalone with no run set up yet, `conductor
+> gate-dir <spec>` still names the dir and you export the slug yourself.
 
 For each assertion spec:
 

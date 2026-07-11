@@ -37,10 +37,13 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    point the user at `/spec-craft:expectations` then `/spec-craft:executable-assertions` (or, with
    `--auto-assert`, launch them — which writes `<spec>.assertions.md`).
 3. **Resolve the per-spec gate dir FIRST:** `GATE_DIR="$(conductor gate-dir <spec>)"` (→
-   `assertions/<slug>/`) and export `CONDUCTOR_GATE_SLUG="$(basename "$GATE_DIR")"` for this whole
-   step, so the build, lint, freeze, and probe all target the run's own gate instead of the flat
-   `assertions/` slot (goal.md / run_branch, which carry the slug at run time, are not written until
-   steps 5b/6). **Implement assertions as runnable tests** via `/conductor:assertions-to-tests`
+   `assertions/<slug>/`), then export both `CONDUCTOR_GATE_SLUG="$(basename "$GATE_DIR")"` AND
+   `CONDUCTOR_ASSERTIONS_SOURCE="<spec>"` for this whole step. The slug points the build, lint,
+   freeze, and probe at the run's own gate instead of the flat `assertions/` slot; the assertions
+   source **binds the freeze to THIS spec's `<spec>.assertions.md`** — freeze runs here, BEFORE the
+   goal/run_branch that carry the selection at run time are written (steps 5b/6), so without it a
+   repo holding another spec's `docs/specs/*.assertions.md` freezes ambiguously or against the wrong
+   source. **Implement assertions as runnable tests** via `/conductor:assertions-to-tests`
    (it writes `$GATE_DIR/manifest.yaml` + `$GATE_DIR/tests/`). **SKIP only if
    `start_probe.assertions_ready(expected_ids, "$GATE_DIR/manifest.yaml", <assert-run --level spec
    exit>)` is True** — i.e. the manifest has one entry per `/spec-craft:executable-assertions` id

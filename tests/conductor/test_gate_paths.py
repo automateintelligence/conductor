@@ -8,6 +8,7 @@ keeping the flat legacy gate — and a stale ``.conductor/`` — working untouch
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -279,6 +280,59 @@ def test_deleting_namespaced_manifest_fails_closed_under_its_baseline(tmp_path):
         + r.stdout
         + r.stderr
     )
+
+
+def test_freeze_binds_assertions_source_to_selected_spec(tmp_path):
+    # codex P1: /conductor:start freezes at step 3, BEFORE the goal is recorded. In a repo
+    # holding >1 docs/specs/*.assertions.md the glob is ambiguous; CONDUCTOR_ASSERTIONS_SOURCE
+    # binds the freeze to THIS spec's source instead of failing / freezing the wrong one.
+    proj = tmp_path / "repo"
+    specs = proj / "docs" / "specs"
+    specs.mkdir(parents=True)
+    (specs / "alpha.md.assertions.md").write_text(
+        "# A\n\n## alpha-ok\n- **Claim:** holds\n"
+    )
+    (specs / "beta.md.assertions.md").write_text(
+        "# B\n\n## beta-ok\n- **Claim:** holds\n"
+    )
+    _build_per_slug_gate(proj, "alpha", "A")  # writes .conductor/run_branch = run-alpha
+
+    env = dict(os.environ)
+    env["CONDUCTOR_HOME"] = str(proj)
+    env["CONDUCTOR_GATE_SLUG"] = "alpha"
+    for k in (
+        "CONDUCTOR_MANIFEST",
+        "CONDUCTOR_FREEZE_BASELINE",
+        "CONDUCTOR_GATE_DIR",
+        "CONDUCTOR_ASSERTIONS_SOURCE",
+    ):
+        env.pop(k, None)
+
+    def _freeze(e):
+        return subprocess.run(
+            [CONDUCTOR, "gate", "freeze"],
+            cwd=str(proj),
+            env=e,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    # No goal yet + two candidate sources -> ambiguous, fail closed.
+    amb = _freeze(env)
+    assert amb.returncode != 0
+    assert "ambiguous" in (amb.stdout + amb.stderr).lower(), amb.stdout + amb.stderr
+
+    # Bind to THIS spec -> clean freeze against alpha's source only.
+    env["CONDUCTOR_ASSERTIONS_SOURCE"] = "docs/specs/alpha.md"
+    ok = _freeze(env)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    frozen = proj / "assertions" / "alpha" / ".frozen"
+    assert frozen.is_file()
+    doc = json.loads(frozen.read_text())
+    assert doc.get("sources_via") == "env"
+    assert any("alpha.md.assertions.md" in k for k in doc.get("sources", {}))
+    assert not any("beta" in k for k in doc.get("sources", {}))
 
 
 if __name__ == "__main__":
