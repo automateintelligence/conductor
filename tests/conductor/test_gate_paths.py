@@ -771,7 +771,7 @@ _MATRIX = [
         None,
         False,
     ),
-    # --- ambient goal + precedence ---
+    # --- ambient goal + run_branch<->goal agreement (§5 clause ii) ---
     (
         "goal-built",
         {},
@@ -784,7 +784,20 @@ _MATRIX = [
         False,
     ),
     (
-        "run_branch-wins-over-goal",
+        "run_branch-and-goal-agree",
+        {},
+        ["assertions/beta/manifest.yaml"],
+        "conductor/run-beta",
+        "Implement docs/specs/beta.md until done",
+        "run_branch",
+        "assertions/beta",
+        "beta",
+        False,
+    ),
+    (
+        # disagreement alone is not §5: with nothing frozen there is no frozen gate to dodge,
+        # so clause (ii) — which only guards a FROZEN resolved gate — does not fire.
+        "run_branch-goal-disagree-but-unfrozen-ok",
         {},
         ["assertions/alpha/manifest.yaml"],
         "conductor/run-alpha",
@@ -793,6 +806,22 @@ _MATRIX = [
         "assertions/alpha",
         "alpha",
         False,
+    ),
+    (
+        "run_branch-repointed-to-frozen-alternate",
+        {},
+        [
+            "assertions/alpha/manifest.yaml",
+            "assertions/alpha/.frozen",
+            "assertions/other/manifest.yaml",
+            "assertions/other/.frozen",
+        ],
+        "conductor/run-other",
+        "Implement docs/specs/alpha.md until done",
+        "run_branch",
+        "assertions/other",
+        "other",
+        True,
     ),
 ]
 

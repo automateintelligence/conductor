@@ -154,12 +154,18 @@ def resolve_gate(repo_root: str | None = None) -> GateResolution:
     ``run_dir``  = ``<dir-of-manifest>/run``.
 
     FAIL_CLOSED (§5 ambient-dodge guard) is set — and the runner + ``gate verify`` must refuse
-    — when NO explicit override was used, the resolved gate is UNFROZEN (its baseline is
-    absent), AND a frozen gate exists ELSEWHERE: a namespaced ``assertions/<slug>/.frozen`` OR
-    the legacy flat ``assertions/.frozen``. That is the signature of an edited ``run_branch`` or
-    a planted alternate manifest dodging a real frozen baseline. ANY explicit override
-    (slug / gate-dir / manifest / freeze-baseline) is a deliberate selection and is exempt; a
-    repo with no frozen gate at all is never affected."""
+    — on either signature of repointed ambient run metadata dodging a real frozen baseline
+    (ANY explicit override — slug / gate-dir / manifest / freeze-baseline — is a deliberate
+    selection and is exempt):
+      (i)  the resolved gate is UNFROZEN (baseline absent) while a frozen gate exists
+           ELSEWHERE — a namespaced ``assertions/<slug>/.frozen`` OR the flat ``assertions/
+           .frozen`` (an edited ``run_branch`` or a planted unfrozen manifest); or
+      (ii) the ``run_branch`` slug and the ``goal.md`` spec DISAGREE — ``run_branch`` was
+           repointed onto a DIFFERENT (possibly already-green, frozen) gate than the one this
+           run declared. ``/conductor:start`` writes the two together, so at run time they
+           agree; a mismatch is repointed metadata.
+    A repo with no frozen gate at all, and a run whose run_branch/goal.md agree, is never
+    affected."""
     root = repo_root or project_root()
     flat = os.path.join(root, "assertions")
     env_dir = os.environ.get("CONDUCTOR_GATE_DIR")
@@ -195,13 +201,27 @@ def resolve_gate(repo_root: str | None = None) -> GateResolution:
     rundir = os.path.join(os.path.dirname(manifest), "run")
 
     fail_closed = None
-    if not explicit and not os.path.exists(baseline):
-        flat_frozen = os.path.isfile(os.path.join(flat, ".frozen"))
-        if flat_frozen or has_namespaced_frozen_gate(root):
-            fail_closed = (
-                "run resolves to an unfrozen gate but a frozen gate exists — check "
-                ".conductor/run_branch or CONDUCTOR_GATE_SLUG"
-            )
+    if not explicit:
+        if not os.path.exists(baseline):
+            # (i) dodge onto an UNFROZEN gate while a frozen gate exists elsewhere.
+            flat_frozen = os.path.isfile(os.path.join(flat, ".frozen"))
+            if flat_frozen or has_namespaced_frozen_gate(root):
+                fail_closed = (
+                    "run resolves to an unfrozen gate but a frozen gate exists — check "
+                    ".conductor/run_branch or CONDUCTOR_GATE_SLUG"
+                )
+        elif source == "run_branch":
+            # (ii) dodge onto a DIFFERENT, already-FROZEN gate by repointing run_branch:
+            # run_branch and goal.md are two independent declarations of the run's spec, and
+            # /conductor:start writes them together. If goal.md names a DIFFERENT spec, the
+            # run_branch was repointed to validate an alternate baseline (e.g. another spec's
+            # green gate) instead of this run's — fail closed (§5).
+            goal = _goal_slug(root)
+            if goal is not None and goal != slug:
+                fail_closed = (
+                    f".conductor/run_branch names {slug!r} but goal.md names {goal!r} — "
+                    "repointed run metadata; check .conductor/run_branch"
+                )
     return GateResolution(
         directory, manifest, baseline, rundir, slug, source, fail_closed
     )
