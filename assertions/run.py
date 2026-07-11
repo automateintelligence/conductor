@@ -210,6 +210,15 @@ def main() -> int:
         print("SUMMARY: gate NOT done (manifest unparseable) -> exit 3")
         return EXIT_BAD_MANIFEST
 
+    # §5 ambient-dodge guard FIRST — before the baseline branch, so a run_branch repointed
+    # onto a DIFFERENT already-FROZEN gate (whose baseline exists) is refused too, not just a
+    # planted UNFROZEN one. resolve_gate() is the single verdict, shared with `gate verify`.
+    if _GATE.fail_closed:
+        write_results({})
+        print(f"[GATE] FAIL: {_GATE.fail_closed}")
+        print("SUMMARY: gate NOT done (repointed run metadata) -> exit 6")
+        return EXIT_TAMPERED
+
     # Done-gate integrity (§5): if /conductor:start froze a baseline, the manifest and the
     # test files its commands reference must be unchanged. Fail-closed, so the worker cannot
     # make a red gate green by weakening a check instead of satisfying it.
@@ -228,15 +237,6 @@ def main() -> int:
             print("[GATE] FAIL: done-gate tampered — " + "; ".join(fr["tampered"]))
             print("SUMMARY: gate NOT done (done-gate tampered) -> exit 6")
             return EXIT_TAMPERED
-    elif _GATE.fail_closed:
-        # No baseline at the resolved gate, but the repo holds a frozen gate elsewhere and no
-        # explicit slug was given: an edited .conductor/run_branch or a PLANTED unfrozen
-        # assertions/<other>/manifest.yaml must not report DONE by dodging a real frozen
-        # baseline (§5). The verdict is resolve_gate()'s — shared with `gate verify`.
-        write_results({})
-        print(f"[GATE] FAIL: {_GATE.fail_closed}")
-        print("SUMMARY: gate NOT done (unfrozen alternate gate) -> exit 6")
-        return EXIT_TAMPERED
     if args.level:
         assertions = [
             a for a in assertions if str(a.get("level", "spec")) == args.level

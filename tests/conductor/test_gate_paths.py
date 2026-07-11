@@ -454,6 +454,52 @@ def test_corrupt_run_branch_cannot_bypass_a_frozen_namespaced_gate(tmp_path):
     )
 
 
+def test_repointed_frozen_alternate_fails_closed_in_assert_run(tmp_path):
+    # final codex P1: `assert run` must refuse a run_branch repointed to a DIFFERENT, already
+    # FROZEN gate (clause ii) even though that alternate baseline EXISTS — the fail_closed
+    # verdict is checked BEFORE the baseline branch, same as `gate verify`. Reachable with a
+    # sources-less (pre-upgrade) .frozen that the _assertions_source check would let slide.
+    proj = tmp_path / "repo"
+    (proj / "docs" / "specs").mkdir(parents=True)
+    other = proj / "assertions" / "other"
+    other.mkdir(parents=True)
+    (other / "manifest.yaml").write_text(
+        'assertions:\n  - id: green\n    command: "true"\n    level: spec\n'
+    )
+    (other / ".frozen").write_text(
+        '{"version": 1, "ids": {}}\n'
+    )  # sources-less baseline
+    dot = proj / ".conductor"
+    dot.mkdir()
+    (dot / "goal.md").write_text(
+        "Implement docs/specs/alpha.md until done\n"
+    )  # declares alpha
+    (dot / "run_branch").write_text(
+        "conductor/run-other\n"
+    )  # ...but repointed to other
+
+    env = dict(os.environ)
+    env["CONDUCTOR_HOME"] = str(proj)
+    for k in (
+        "CONDUCTOR_GATE_SLUG",
+        "CONDUCTOR_MANIFEST",
+        "CONDUCTOR_FREEZE_BASELINE",
+        "CONDUCTOR_GATE_DIR",
+    ):
+        env.pop(k, None)
+    r = subprocess.run(
+        [CONDUCTOR, "assert", "run", "--level", "spec"],
+        cwd=str(proj),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert r.returncode == 6, (
+        "assert run validated a repointed frozen alternate:\n" + r.stdout + r.stderr
+    )
+
+
 def test_planted_unfrozen_alternate_manifest_cannot_report_done(tmp_path):
     # codex P1: freeze alpha, then plant a trivially-green UNFROZEN assertions/other/
     # manifest.yaml and point run_branch at it. `assert run` must fail closed (exit 6), not
