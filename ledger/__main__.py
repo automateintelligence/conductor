@@ -9,7 +9,7 @@ import subprocess
 import sys
 from typing import Any
 
-from conductor.paths import project_root
+from conductor.paths import run_dir
 from ledger import align as _align
 from ledger import gate_link
 from ledger import gh as _gh
@@ -46,7 +46,9 @@ def cmd_convert(args: argparse.Namespace) -> None:
 
 
 def _default_results_path() -> str:
-    return os.path.join(project_root(), "assertions", "run", "results.json")
+    # Per-spec gate (multi-spec safety): read results beside the resolved manifest —
+    # assertions/<slug>/run/ for a namespaced run, else the flat legacy assertions/run/.
+    return os.path.join(run_dir(), "results.json")
 
 
 def _tests_red_from_gate(
@@ -170,18 +172,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--from-gate",
         action="store_true",
         default=False,
-        help="Derive tests-red from assertions/run/results.json via the issue's "
+        help="Derive tests-red from the run's results.json via the issue's "
         "conductor-assertions marker, instead of trusting the caller's flag",
     )
     r.add_argument(
         "--results",
         default=None,
         metavar="PATH",
-        help="results.json path (with --from-gate; default: "
-        "<project>/assertions/run/results.json)",
+        help="results.json path (with --from-gate; default: the run's "
+        "gate dir, e.g. assertions[/<slug>]/run/results.json)",
     )
     r.add_argument("--pr-merged", action="store_true", default=False)
-    r.add_argument("--commits", type=int, default=-1, metavar="N")  # -1 = not reported (fail-safe; see reconcile §2)
+    r.add_argument(
+        "--commits", type=int, default=-1, metavar="N"
+    )  # -1 = not reported (fail-safe; see reconcile §2)
     r.add_argument("-R", type=int, default=3, metavar="N", help="Retry cap (default 3)")
     r.add_argument(
         "--now-ts", type=int, default=None, metavar="N", help="Current unix timestamp"
@@ -220,7 +224,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--results",
         default=None,
         metavar="PATH",
-        help="results.json path (default: <project>/assertions/run/results.json)",
+        help="results.json path (default: the run's gate dir, e.g. "
+        "assertions[/<slug>]/run/results.json)",
     )
     pd.add_argument("--no-gate-check", action="store_true", default=False)
     pd.set_defaults(func=cmd_phase_done)

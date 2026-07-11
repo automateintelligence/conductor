@@ -16,9 +16,12 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 > state and the done-gate live in the PROJECT** — the git repo you invoke conductor from. **Run
 > `/conductor:start` from the project root** (or set `CONDUCTOR_HOME=<project>`); the CLI resolves
 > the project as the git repo of the current directory and writes `.conductor/` (goal, handoff),
-> `assertions/manifest.yaml`, `assertions/.frozen`, and the RED tests **there**, git-committed with
-> your project — never into the plugin cache. `conductor gate freeze` / `assert run` then operate on
-> the project gate automatically; no `CONDUCTOR_MANIFEST` plumbing is needed when you run from the root.
+> the run's **per-spec** `assertions/<slug>/manifest.yaml`, `assertions/<slug>/.frozen`, and the RED
+> tests **there**, git-committed with your project — never into the plugin cache. The gate is
+> namespaced per spec (`<slug>` = `conductor gate-dir <spec>`) so specs conducted in sibling
+> worktrees never contend for the one flat `assertions/` slot at the shared merge base; step 3
+> exports `CONDUCTOR_GATE_SLUG` so `conductor gate freeze|lint` and `assert run` resolve that dir
+> during setup, before the goal/run-branch that carry the slug at run time are written.
 
 0. **PREFLIGHT (`conductor preflight`).** Confirm every conducted command resolves (Codex #1):
    `/spec-craft:*`, `/superpowers:*`, and environment-provided `/code-review`, `/codex`,
@@ -33,8 +36,13 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    re-run `/spec-craft:executable-assertions` over it** (that clobbers the edits). Absent → STOP and
    point the user at `/spec-craft:expectations` then `/spec-craft:executable-assertions` (or, with
    `--auto-assert`, launch them — which writes `<spec>.assertions.md`).
-3. **Implement assertions as runnable tests** via `/conductor:assertions-to-tests`. **SKIP only if
-   `start_probe.assertions_ready(expected_ids, "assertions/manifest.yaml", <assert-run --level spec
+3. **Resolve the per-spec gate dir FIRST:** `GATE_DIR="$(conductor gate-dir <spec>)"` (→
+   `assertions/<slug>/`) and export `CONDUCTOR_GATE_SLUG="$(basename "$GATE_DIR")"` for this whole
+   step, so the build, lint, freeze, and probe all target the run's own gate instead of the flat
+   `assertions/` slot (goal.md / run_branch, which carry the slug at run time, are not written until
+   steps 5b/6). **Implement assertions as runnable tests** via `/conductor:assertions-to-tests`
+   (it writes `$GATE_DIR/manifest.yaml` + `$GATE_DIR/tests/`). **SKIP only if
+   `start_probe.assertions_ready(expected_ids, "$GATE_DIR/manifest.yaml", <assert-run --level spec
    exit>)` is True** — i.e. the manifest has one entry per `/spec-craft:executable-assertions` id
    AND the runner exit ∈ {0,1} (Codex #3). Otherwise (re)build it.
    **Then LINT the gate:** run `conductor gate lint` — it fail-closes on the mechanically-detectable
@@ -42,7 +50,7 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    trivially-true assertion). ANY finding blocks the run: fix the assertion tests via
    `/conductor:assertions-to-tests` (or the manifest command form) until the lint is clean — NEVER
    weaken or skip the lint. Only a clean lint proceeds to the freeze.
-   **Then FREEZE the gate (§5):** `conductor gate freeze` records `assertions/.frozen` (commit it)
+   **Then FREEZE the gate (§5):** `conductor gate freeze` records `$GATE_DIR/.frozen` (commit it)
    so the worker cannot later weaken a check; the runner fail-closes (exit 6) if a frozen
    assertion or its test file changes. SKIP if `.frozen` exists and `conductor gate verify` is clean.
 4. **Plan exists?** No → `/superpowers:writing-plans` (or spec-kit) in a fresh subagent — and

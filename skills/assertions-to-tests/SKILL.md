@@ -1,6 +1,6 @@
 ---
 name: assertions-to-tests
-description: Use after /spec-craft:executable-assertions to turn each 4-part assertion spec into one runnable test wired into assertions/manifest.yaml by id, via /superpowers:test-driven-development. Establishes the machine-checked done-gate; does not implement product behavior.
+description: Use after /spec-craft:executable-assertions to turn each 4-part assertion spec into one runnable test wired into the run's gate manifest by id, via /superpowers:test-driven-development. Establishes the machine-checked done-gate; does not implement product behavior.
 ---
 
 # /conductor:assertions-to-tests
@@ -10,6 +10,14 @@ Input: the 4-part assertion specs (claim / setup / observation / kind) from
 the spec). **Read them from that file** — it is the source of truth and may have been hand-edited
 after generation, so use it as-is; do not regenerate. For **each** spec, produce exactly one runnable
 test and one manifest entry, traceable by `id`. **Use `/superpowers:test-driven-development`** for the test.
+
+> **The gate is per-spec.** The manifest, tests, and `.frozen` for THIS run live under the run's
+> gate dir — `GATE_DIR="$(conductor gate-dir <spec>)"` → `assertions/<slug>/` (single-sourced with
+> the run branch; `<slug>` = the run-branch slug). Namespacing keeps sibling specs conducted in
+> other worktrees from contending for the one flat `assertions/` slot at the shared merge base.
+> Write the manifest at `$GATE_DIR/manifest.yaml` and the tests under `$GATE_DIR/tests/`. `/conductor:start`
+> exports `CONDUCTOR_GATE_SLUG` so `conductor gate lint|freeze` and `assert run` resolve the same dir.
+> (Invoked standalone with no run set up yet, `conductor gate-dir <spec>` still names the dir.)
 
 For each assertion spec:
 
@@ -40,11 +48,12 @@ For each assertion spec:
      contain the forbidden token (e.g. the spec that documents a removal), or it can never pass.
    If a hole can't be closed mechanically, say so and mark that assertion for human review rather than
    freezing a check that reads green on a fake.
-4. **Wire it into `assertions/manifest.yaml` with a PINNED, STANDALONE command:**
+4. **Wire it into the run's gate manifest (`$GATE_DIR/manifest.yaml`) with a PINNED, STANDALONE
+   command** whose test path is repo-relative (so it resolves under the per-spec gate dir):**
    ```yaml
      - id: <id>
        claim: "<one-sentence Boolean claim>"
-       command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider <path/to/test>"
+       command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/<slug>/tests/<test>.py"
        setup: ""
        teardown: ""
        timeout: 30
@@ -60,10 +69,12 @@ For each assertion spec:
 5. **Verify the gate sees it RED:** `conductor assert run --level spec` lists the new id as
    `[FAIL]`. The spec is "done" exactly when every spec-level assertion goes green (§5.1, §7).
 
-**Where it lives:** the manifest is the **project's** `assertions/manifest.yaml` at the project root
-(conductor resolves the project as the git repo of cwd — run from the project root), and the tests
-live in the project too, referenced by the manifest command. Both are git-committed with the
-project, never written into the plugin cache.
+**Where it lives:** the manifest is the run's **per-spec** `assertions/<slug>/manifest.yaml` in the
+**project** (conductor resolves the project as the git repo of cwd — run from the project root;
+`<slug>` from `conductor gate-dir <spec>`), and the tests live under `assertions/<slug>/tests/` in the
+project too, referenced by the manifest command. Both are git-committed with the project, never
+written into the plugin cache. A run with no slug resolved falls back to the flat legacy
+`assertions/manifest.yaml`.
 
 **Scope:** one test per assertion spec; do not implement product behavior. `level` is the gate
 tier (assigned here); `kind` is the assertion form (from the spec) — never conflate them.

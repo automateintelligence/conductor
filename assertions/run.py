@@ -40,15 +40,21 @@ PLUGIN_ROOT = os.path.dirname(ASSERTIONS_DIR)
 if PLUGIN_ROOT not in sys.path:
     sys.path.insert(0, PLUGIN_ROOT)
 
-from conductor.paths import project_root  # noqa: E402  (needs PLUGIN_ROOT on sys.path first)
+from conductor.paths import (  # noqa: E402  (needs PLUGIN_ROOT on sys.path first)
+    baseline_path,
+    manifest_path,
+    project_root,
+    run_dir,
+)
 
 PROJECT = project_root()
-MANIFEST = os.environ.get(
-    "CONDUCTOR_MANIFEST", os.path.join(PROJECT, "assertions", "manifest.yaml")
-)
+# Per-spec gate (multi-spec safety): manifest_path/run_dir/baseline_path resolve to
+# assertions/<slug>/ when a run's slug resolves and its gate is built there, else the flat
+# legacy assertions/. Each still honors its explicit CONDUCTOR_* override.
+MANIFEST = manifest_path(PROJECT)
 OVERALL_TIMEOUT = float(os.environ.get("CONDUCTOR_OVERALL_TIMEOUT", "0"))  # 0 = none
 ISOLATE = os.environ.get("CONDUCTOR_ISOLATE", "") not in ("", "0")
-RUN_DIR = os.path.join(PROJECT, "assertions", "run")
+RUN_DIR = run_dir(PROJECT)
 RESULTS = os.path.join(RUN_DIR, "results.json")
 
 EXIT_OK = 0
@@ -208,9 +214,7 @@ def main() -> int:
     # Done-gate integrity (§5): if /conductor:start froze a baseline, the manifest and the
     # test files its commands reference must be unchanged. Fail-closed, so the worker cannot
     # make a red gate green by weakening a check instead of satisfying it.
-    _baseline = os.environ.get(
-        "CONDUCTOR_FREEZE_BASELINE", os.path.join(PROJECT, "assertions", ".frozen")
-    )
+    _baseline = baseline_path(PROJECT)
     if os.path.exists(_baseline):
         if PLUGIN_ROOT not in sys.path:
             sys.path.insert(0, PLUGIN_ROOT)

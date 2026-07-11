@@ -8,7 +8,10 @@ location. Kept in one module so those callers cannot diverge.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import pathlib
+import re
 import subprocess
 
 
@@ -31,3 +34,134 @@ def project_root() -> str:
     except Exception:
         pass
     return os.getcwd()
+
+
+# --- Per-spec done-gate location (multi-spec safety) -----------------------------------
+#
+# The done-gate (manifest.yaml, .frozen, tests, run/results.json) is a TRACKED path. Left
+# flat at ``assertions/`` it is a single per-repo slot: two specs conducted in sibling
+# worktrees each rebuild that one slot on their own branch and contend for it at the shared
+# base — whichever merges last defines ``assertions/`` on the default branch and drops the
+# other's frozen gate. Namespacing the gate at ``assertions/<slug>/`` lets sibling specs
+# coexist. ``spec_slug`` is the single source of that slug (``branches.run_branch_name``
+# reuses it) so the gate dir and the run branch never diverge.
+
+
+def spec_slug(spec_path: str) -> str:
+    """Deterministic ref-safe slug for a spec path — the SINGLE source shared by the run
+    branch (``conductor/run-<slug>``) and the per-spec gate dir (``assertions/<slug>/``).
+
+    Slug = the spec filename's stem, lowercased, non-``[a-z0-9._-]`` runs collapsed to one
+    hyphen, dot runs to one dot, stripped of leading/trailing ``-``/``.``. A stem that
+    strips to nothing, cannot start with an alphanumeric, or would end in ``.lock`` (all
+    git-ref-invalid) falls back to a deterministic ``spec-<sha256[:8]>`` of the full path."""
+    stem = pathlib.PurePath(spec_path).stem.lower()
+    slug = re.sub(r"\.{2,}", ".", re.sub(r"[^a-z0-9._-]+", "-", stem)).strip("-.")
+    if not slug or not re.match(r"[a-z0-9]", slug) or slug.endswith(".lock"):
+        slug = "spec-" + hashlib.sha256(spec_path.encode()).hexdigest()[:8]
+    return slug
+
+
+def _run_branch_slug(root: str) -> str | None:
+    """The slug from ``<root>/.conductor/run_branch`` (``conductor/run-<slug>``), else None.
+    Present at RUN time (start writes it during topology setup) and equal, by construction,
+    to ``spec_slug(<spec>)``."""
+    prefix = "conductor/run-"
+    try:
+        with open(
+            os.path.join(root, ".conductor", "run_branch"), encoding="utf-8"
+        ) as f:
+            name = f.read().strip()
+    except OSError:
+        return None
+    return (
+        name[len(prefix) :]
+        if name.startswith(prefix) and len(name) > len(prefix)
+        else None
+    )
+
+
+def _goal_slug(root: str) -> str | None:
+    """The slug of the ``docs/specs/<name>.md`` named in ``<root>/.conductor/goal.md``, else
+    None. Fallback source when ``run_branch`` is absent."""
+    try:
+        with open(os.path.join(root, ".conductor", "goal.md"), encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+    m = re.search(r"docs/specs/[^\s`'\"]+?\.md", text)
+    return spec_slug(m.group(0)) if m else None
+
+
+def gate_slug(repo_root: str | None = None) -> str | None:
+    """The slug that namespaces this run's done-gate, or None for the flat legacy gate.
+
+    Discovered, in precedence order, from:
+      1. ``$CONDUCTOR_GATE_SLUG`` — the explicit SETUP-time override. ``run_branch`` and
+         ``goal.md`` are written AFTER ``/conductor:start`` builds+freezes the gate, so the
+         start skill exports this (derived from ``conductor run-branch name <spec>``) for
+         its build-time gate ops;
+      2. ``<root>/.conductor/run_branch`` — present at run time (autodev, the driver);
+      3. ``<root>/.conductor/goal.md``'s spec — fallback.
+    None present -> None -> the flat legacy ``assertions/`` gate."""
+    env = os.environ.get("CONDUCTOR_GATE_SLUG")
+    if env:
+        return env
+    root = repo_root or project_root()
+    return _run_branch_slug(root) or _goal_slug(root)
+
+
+def gate_dir(repo_root: str | None = None) -> str:
+    """The directory holding THIS run's done-gate (manifest + baseline + results/).
+
+    ``$CONDUCTOR_GATE_DIR`` wins outright. Else the per-spec ``assertions/<slug>/`` when a
+    slug resolves AND its ``manifest.yaml`` already exists there; otherwise the flat legacy
+    ``assertions/``. The existence gate is deliberate and fail-safe toward the legacy layout:
+    a repo with an in-place flat gate — or a stale ``.conductor/`` left by a finished run —
+    keeps reading its flat gate untouched. A fresh namespaced run's SETUP writes the manifest
+    into ``assertions/<slug>/`` first (via ``$CONDUCTOR_GATE_SLUG``), after which every read
+    resolves there."""
+    env = os.environ.get("CONDUCTOR_GATE_DIR")
+    if env:
+        return env
+    root = repo_root or project_root()
+    flat = os.path.join(root, "assertions")
+    slug = gate_slug(root)
+    if slug:
+        nsdir = os.path.join(flat, slug)
+        if os.path.isfile(os.path.join(nsdir, "manifest.yaml")):
+            return nsdir
+    return flat
+
+
+def setup_gate_dir(repo_root: str | None = None) -> str:
+    """Where a run being SET UP should build its gate: the per-spec ``assertions/<slug>/``
+    when a slug resolves, else flat ``assertions/``. Unlike ``gate_dir`` this does NOT wait
+    for the manifest to exist — setup is what creates it. ``$CONDUCTOR_GATE_DIR`` still wins."""
+    env = os.environ.get("CONDUCTOR_GATE_DIR")
+    if env:
+        return env
+    root = repo_root or project_root()
+    flat = os.path.join(root, "assertions")
+    slug = gate_slug(root)
+    return os.path.join(flat, slug) if slug else flat
+
+
+def manifest_path(repo_root: str | None = None) -> str:
+    """The done-gate manifest: ``$CONDUCTOR_MANIFEST`` if set, else ``gate_dir()/manifest.yaml``."""
+    return os.environ.get("CONDUCTOR_MANIFEST") or os.path.join(
+        gate_dir(repo_root), "manifest.yaml"
+    )
+
+
+def baseline_path(repo_root: str | None = None) -> str:
+    """The freeze baseline: ``$CONDUCTOR_FREEZE_BASELINE`` if set, else ``gate_dir()/.frozen``."""
+    return os.environ.get("CONDUCTOR_FREEZE_BASELINE") or os.path.join(
+        gate_dir(repo_root), ".frozen"
+    )
+
+
+def run_dir(repo_root: str | None = None) -> str:
+    """Where the runner writes ``results.json`` — beside the manifest, so a per-spec gate's
+    results never overwrite another spec's at a shared flat ``assertions/run/``."""
+    return os.path.join(os.path.dirname(manifest_path(repo_root)), "run")

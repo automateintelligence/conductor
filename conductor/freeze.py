@@ -20,7 +20,7 @@ import re
 import shlex
 import sys
 
-from conductor.paths import project_root
+from conductor.paths import baseline_path, manifest_path, project_root
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_ROOT = os.path.dirname(
@@ -273,15 +273,22 @@ def main(argv: list | None = None) -> int:
         from conductor import gate_lint
 
         return gate_lint.main()
+    # Per-spec gate (multi-spec safety): freeze/verify the manifest+baseline the resolver
+    # points at — assertions/<slug>/ for a namespaced run, else flat — instead of the
+    # hardcoded flat default. Each still honors its explicit CONDUCTOR_* override.
+    root = project_root()
     if cmd == "freeze":
         try:
-            print(f"[GATE] froze done-gate baseline -> {record()}")
+            print(
+                "[GATE] froze done-gate baseline -> "
+                + record(manifest_path(root), baseline_path(root), root)
+            )
         except (AmbiguousAssertionsSource, MissingAssertionsSource) as exc:
             print(f"[GATE] {exc}", file=sys.stderr)
             return 1
         return 0
     if cmd == "verify":
-        res = verify()
+        res = verify(manifest_path(root), baseline_path(root), root)
         if res["ok"]:
             note = "" if res["frozen"] else " (no baseline; gate not frozen)"
             print(f"[GATE] done-gate baseline intact{note}")

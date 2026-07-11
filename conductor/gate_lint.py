@@ -31,7 +31,7 @@ import shlex
 import sys
 
 from conductor import freeze
-from conductor.paths import project_root
+from conductor.paths import manifest_path, project_root
 
 # Env assignments a pinned command may carry. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 is
 # REQUIRED; the rest are harmless determinism knobs. Anything else is rejected.
@@ -296,7 +296,9 @@ def lint(manifest_path: str, repo_root: str) -> list[str]:
 
 def main(argv: list | None = None) -> int:
     repo_root = project_root()
-    manifest = os.path.join(repo_root, "assertions", "manifest.yaml")
+    # Per-spec gate (multi-spec safety): lint the manifest the resolver points at —
+    # assertions/<slug>/ for a namespaced run, else the flat legacy assertions/.
+    manifest = manifest_path(repo_root)
     findings = lint(manifest, repo_root)
     if findings:
         for f in findings:

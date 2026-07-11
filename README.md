@@ -65,7 +65,7 @@ SETUP  (you run this once)
     │
     └─ /conductor:start <spec>   ── the supervisor; idempotent, reconcile-first ───┐
          0. conductor preflight ........... does every conducted skill resolve? (fail-closed)
-         1. /conductor:assertions-to-tests  reads <spec>.assertions.md → assertions/manifest.yaml + RED tests = DONE-GATE
+         1. /conductor:assertions-to-tests  reads <spec>.assertions.md → assertions/<slug>/manifest.yaml + RED tests = DONE-GATE
             conductor gate lint ............ fail-closed lint of the gate's own quality (unpinned/weak tests)
             conductor gate freeze .......... snapshot + commit the gate (FROZEN; worker can't weaken it)
          2. /superpowers:writing-plans .... plan.md (phases → tasks)        [only if no plan yet]
@@ -355,6 +355,17 @@ or the verify command (default `pytest -q`) failing when re-run against the real
 `refs/pull/<pr>/merge` ref. Env: `CONDUCTOR_REPO`, `CONDUCTOR_MERGE_VERIFY`. The runner
 honors `CONDUCTOR_MANIFEST`, `CONDUCTOR_OVERALL_TIMEOUT`, `CONDUCTOR_ISOLATE`.
 
+**Per-spec done-gate (multiple specs, one repo).** The gate (manifest, `.frozen`, tests,
+`run/results.json`) is a git-tracked path. Left flat at `assertions/` it is a single per-repo
+slot: two specs conducted in sibling worktrees each rebuild it on their own branch and contend
+for it at the shared base — whichever merges last defines `assertions/` on the default branch and
+drops the other's frozen gate. Since 0.8.0 the gate is namespaced per spec at `assertions/<slug>/`,
+where `<slug> = conductor gate-dir <spec>` — the same slug as the run branch (`conductor/run-<slug>`),
+so sibling specs coexist. The slug is resolved (setup → run time) from `$CONDUCTOR_GATE_SLUG`, then
+`.conductor/run_branch`, then the goal's spec; `$CONDUCTOR_GATE_DIR` overrides the dir outright, and
+a run with no slug falls back to the flat legacy `assertions/` gate. The runner, `conductor gate
+{lint,freeze,verify}`, and the ledger's `--from-gate` all resolve the same per-spec paths.
+
 The lease operations (`claim`, `eligible`, `release`, `read_lease`, `renew_lease`,
 `lease_is_stale`) are a Python API in `ledger/claim.py`, used by the skills. They are not
 CLI subcommands.
@@ -367,7 +378,7 @@ CLI subcommands.
 |---|---|---|
 | `/conductor:start` | you, once | Supervisor. Preflight, build the done-gate, plan, sync issues, set the goal, start the cron. Idempotent / reconcile-first. |
 | `/conductor:autodev` | the cron `/loop` | Worker. One fire = one phase: reconcile, gate, claim, execute in a fresh subagent, merge through the gate, handoff, exit. Self-stops when done. |
-| `/conductor:assertions-to-tests` | `/conductor:start` (and the plan flow) | Turns each 4-part assertion spec into one runnable test wired into `assertions/manifest.yaml` by id. Builds the done-gate; does not implement product behavior. |
+| `/conductor:assertions-to-tests` | `/conductor:start` (and the plan flow) | Turns each 4-part assertion spec into one runnable test wired into the run's per-spec `assertions/<slug>/manifest.yaml` by id. Builds the done-gate; does not implement product behavior. |
 | `/conductor:issue-sync` | `/conductor:start` and `/conductor:autodev` | Headless GitHub issue hierarchy: generate / convert / reconcile. Never prompts. |
 
 ---
@@ -377,7 +388,8 @@ CLI subcommands.
 | Path | Responsibility |
 |---|---|
 | `assertions/run.py` | The done-gate runner. Per-assertion + overall timeouts, isolation, fail-closed. |
-| `assertions/manifest.yaml` | The assertions (id, command, level, kind, timeouts). |
+| `assertions/<slug>/manifest.yaml` | The run's per-spec assertions (id, command, level, kind, timeouts); flat `assertions/manifest.yaml` is the legacy fallback. |
+| `conductor/paths.py` | Single source for `project_root` and the per-spec gate resolvers (`spec_slug`, `gate_slug`, `gate_dir`, `manifest_path`, `baseline_path`, `run_dir`). |
 | `bin/conductor` | CLI dispatcher over the Python modules. |
 | `ledger/` | GitHub-issue ledger: `gh` wrappers, claim/lease, §7 reconcile, plan→issues sync. |
 | `conductor/preflight.py` | Conducted-stack availability gate. |

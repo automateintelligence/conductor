@@ -16,33 +16,25 @@ fails OPEN to `main` — exit 0, NEVER an empty string, which would make a downs
 
 from __future__ import annotations
 
-import hashlib
 import os
-import pathlib
-import re
 import subprocess
 import sys
 
-from conductor.paths import project_root
+from conductor.paths import project_root, spec_slug
 
 _GH_TIMEOUT = float(os.environ.get("CONDUCTOR_GH_TIMEOUT", "60"))
-_GIT_TIMEOUT = 10.0  # local symbolic-ref lookup, no network — decoupled from _GH_TIMEOUT
+_GIT_TIMEOUT = (
+    10.0  # local symbolic-ref lookup, no network — decoupled from _GH_TIMEOUT
+)
 
 
 def run_branch_name(spec_path: str) -> str:
     """The canonical run branch for a spec: `conductor/run-<slug>`, deterministic.
 
-    Slug = the spec filename's stem, lowercased, non-`[a-z0-9._-]` runs collapsed to one
-    hyphen, then stripped of leading/trailing `-`/`.` so the result is a valid ref segment
-    matching `[a-z0-9][a-z0-9._-]*`. Dot runs collapse to one dot (git rejects `..` inside a
-    ref). A stem that strips to nothing, can't start with an alphanumeric, or would end the
-    ref component in `.lock` (also git-rejected) falls back to a deterministic
-    `spec-<sha256[:8]>` of the full path — still unique per spec, never an invalid ref."""
-    stem = pathlib.PurePath(spec_path).stem.lower()
-    slug = re.sub(r"\.{2,}", ".", re.sub(r"[^a-z0-9._-]+", "-", stem)).strip("-.")
-    if not slug or not re.match(r"[a-z0-9]", slug) or slug.endswith(".lock"):
-        slug = "spec-" + hashlib.sha256(spec_path.encode()).hexdigest()[:8]
-    return f"conductor/run-{slug}"
+    The slug is `conductor.paths.spec_slug` — the SINGLE source shared with the per-spec
+    done-gate dir (`assertions/<slug>/`), so the run branch and the gate dir never diverge.
+    Same spec -> byte-identical name; different spec stems -> different names."""
+    return f"conductor/run-{spec_slug(spec_path)}"
 
 
 def _gh_default() -> str | None:

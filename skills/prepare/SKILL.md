@@ -19,13 +19,16 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
 > **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
 > below); installed plugins are not on `PATH`. Run from the project root.
 
-0. **INVENTORY.** Locate: the spec (with `## Expectations`), `<spec>.assertions.md`,
-   `assertions/manifest.yaml` + `assertions/.frozen`, the plan(s) under `docs/plans/`, and the
-   GitHub milestone/phase issues. Report found/missing.
+0. **INVENTORY.** Locate: the spec (with `## Expectations`), `<spec>.assertions.md`, the run's
+   done-gate — the per-spec `assertions/<slug>/manifest.yaml` + `.frozen` (`<slug>` =
+   `conductor gate-dir <spec>`), falling back to a flat legacy `assertions/manifest.yaml` +
+   `assertions/.frozen` — the plan(s) under `docs/plans/`, and the GitHub milestone/phase issues.
+   Report found/missing.
    - Spec or `<spec>.assertions.md` missing → STOP: point the owner at
      `/spec-craft:expectations` then `/spec-craft:executable-assertions` (prepare aligns
      artifacts; it does not invent the definition of done).
-   - Manifest/`.frozen` missing → note it; `/conductor:start` step 3 builds those.
+   - Manifest/`.frozen` missing → note it; `/conductor:start` step 3 builds those under the
+     per-spec gate dir.
 1. **GATE INTEGRITY.** Manifest `id`s must map 1:1 onto the `<spec>.assertions.md` ids —
    extras and gaps are REPORTED, never silently reconciled (adding assertions is
    `/conductor:assertions-to-tests`; removing them is an owner decision). `.frozen` present →
