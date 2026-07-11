@@ -168,6 +168,24 @@ def test_corrupt_ambient_slug_fails_closed_when_repo_has_frozen_gate(
     assert paths.gate_dir(str(tmp_path)) == str(tmp_path / "assertions" / "junk")
 
 
+def test_unresolved_frozen_gate(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    assert (
+        paths.unresolved_frozen_gate(str(tmp_path)) is False
+    )  # no frozen gates at all
+    # frozen alpha exists; run_branch points at an UNFROZEN planted alternate -> dodging
+    _write(tmp_path, "assertions/alpha/.frozen", "{}\n")
+    _write(tmp_path, "assertions/other/manifest.yaml", "assertions: []\n")
+    _write(tmp_path, ".conductor/run_branch", "conductor/run-other\n")
+    assert paths.unresolved_frozen_gate(str(tmp_path)) is True
+    # once the resolved gate is itself frozen, it is not dodging
+    _write(tmp_path, "assertions/other/.frozen", "{}\n")
+    assert paths.unresolved_frozen_gate(str(tmp_path)) is False
+    # an explicit slug is deliberate setup selection, never flagged
+    monkeypatch.setenv("CONDUCTOR_GATE_SLUG", "brandnew")
+    assert paths.unresolved_frozen_gate(str(tmp_path)) is False
+
+
 # --- manifest_path / baseline_path / run_dir ------------------------------------------
 
 
@@ -380,6 +398,49 @@ def test_corrupt_run_branch_cannot_bypass_a_frozen_namespaced_gate(tmp_path):
     v = _ambient("gate", "verify")
     assert v.returncode != 0, (
         "gate verify read green by dodging the frozen gate:\n" + v.stdout + v.stderr
+    )
+
+
+def test_planted_unfrozen_alternate_manifest_cannot_report_done(tmp_path):
+    # codex P1: freeze alpha, then plant a trivially-green UNFROZEN assertions/other/
+    # manifest.yaml and point run_branch at it. `assert run` must fail closed (exit 6), not
+    # DONE — the runner can't be dodged onto an unfrozen alternate gate.
+    proj = tmp_path / "repo"
+    (proj / "docs" / "specs").mkdir(parents=True)
+    _build_per_slug_gate(proj, "alpha", "A")
+
+    def _ambient(*args):
+        env = dict(os.environ)
+        env["CONDUCTOR_HOME"] = str(proj)
+        for k in (
+            "CONDUCTOR_GATE_SLUG",
+            "CONDUCTOR_MANIFEST",
+            "CONDUCTOR_FREEZE_BASELINE",
+            "CONDUCTOR_GATE_DIR",
+        ):
+            env.pop(k, None)
+        return subprocess.run(
+            [CONDUCTOR, *args],
+            cwd=str(proj),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    assert _ambient("gate", "freeze").returncode == 0
+    assert (proj / "assertions" / "alpha" / ".frozen").is_file()
+
+    other = proj / "assertions" / "other"
+    other.mkdir()
+    (other / "manifest.yaml").write_text(
+        'assertions:\n  - id: planted\n    command: "true"\n    level: spec\n'
+    )
+    (proj / ".conductor" / "run_branch").write_text("conductor/run-other\n")
+
+    r = _ambient("assert", "run", "--level", "spec")
+    assert r.returncode == 6, (
+        "planted unfrozen gate reported DONE:\n" + r.stdout + r.stderr
     )
 
 

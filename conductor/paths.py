@@ -168,6 +168,22 @@ def has_namespaced_frozen_gate(repo_root: str | None = None) -> bool:
     return bool(glob.glob(os.path.join(root, "assertions", "*", ".frozen")))
 
 
+def unresolved_frozen_gate(repo_root: str | None = None) -> bool:
+    """True when this run resolves to an UNFROZEN gate while the repo holds frozen per-spec
+    gates and no explicit ``$CONDUCTOR_GATE_SLUG`` was given (§5, fail-closed) — i.e. an edited
+    ``.conductor/run_branch`` (stale/corrupt slug) or a PLANTED alternate ``assertions/<other>/
+    manifest.yaml`` is dodging a real frozen baseline. BOTH the done-gate runner (``assert
+    run``) and ``gate verify`` must fail closed on this — single-sourced here so they cannot
+    drift. An explicit slug is deliberate setup selection (a not-yet-frozen gate under build),
+    NOT this; a flat-legacy repo (no namespaced ``.frozen``) is never affected."""
+    if os.environ.get("CONDUCTOR_GATE_SLUG"):
+        return False
+    root = repo_root or project_root()
+    if os.path.exists(baseline_path(root)):
+        return False
+    return has_namespaced_frozen_gate(root)
+
+
 def manifest_path(repo_root: str | None = None) -> str:
     """The done-gate manifest: ``$CONDUCTOR_MANIFEST`` if set, else ``gate_dir()/manifest.yaml``."""
     return os.environ.get("CONDUCTOR_MANIFEST") or os.path.join(

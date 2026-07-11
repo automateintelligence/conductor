@@ -45,6 +45,7 @@ from conductor.paths import (  # noqa: E402  (needs PLUGIN_ROOT on sys.path firs
     manifest_path,
     project_root,
     run_dir,
+    unresolved_frozen_gate,
 )
 
 PROJECT = project_root()
@@ -229,6 +230,18 @@ def main() -> int:
             print("[GATE] FAIL: done-gate tampered — " + "; ".join(fr["tampered"]))
             print("SUMMARY: gate NOT done (done-gate tampered) -> exit 6")
             return EXIT_TAMPERED
+    elif unresolved_frozen_gate(PROJECT):
+        # No baseline at the resolved gate, but the repo holds frozen per-spec gates and no
+        # explicit slug was given: an edited .conductor/run_branch or a PLANTED unfrozen
+        # assertions/<other>/manifest.yaml must not report DONE by dodging a real frozen
+        # baseline (codex P1). Same predicate as `gate verify`, single-sourced in paths.
+        write_results({})
+        print(
+            "[GATE] FAIL: run resolves to an unfrozen gate but frozen per-spec gates "
+            "exist — check .conductor/run_branch or CONDUCTOR_GATE_SLUG"
+        )
+        print("SUMMARY: gate NOT done (unfrozen alternate gate) -> exit 6")
+        return EXIT_TAMPERED
     if args.level:
         assertions = [
             a for a in assertions if str(a.get("level", "spec")) == args.level

@@ -22,9 +22,9 @@ import sys
 
 from conductor.paths import (
     baseline_path,
-    has_namespaced_frozen_gate,
     manifest_path,
     project_root,
+    unresolved_frozen_gate,
 )
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
@@ -311,22 +311,18 @@ def main(argv: list | None = None) -> int:
             return 1
         return 0
     if cmd == "verify":
-        res = verify(manifest_path(root), baseline_path(root), root)
         # Fail closed if this run resolves to an UNFROZEN gate while the repo holds frozen
-        # per-spec gates AND no explicit slug was given: stale/corrupt run metadata (an edited
-        # .conductor/run_branch) must not read green by dodging the real namespaced baseline
-        # (codex P1). An explicit CONDUCTOR_GATE_SLUG is deliberate setup selection, not this.
-        if (
-            not res["frozen"]
-            and not os.environ.get("CONDUCTOR_GATE_SLUG")
-            and has_namespaced_frozen_gate(root)
-        ):
+        # per-spec gates and no explicit slug was given: an edited .conductor/run_branch or a
+        # planted alternate manifest must not read green by dodging the real namespaced
+        # baseline (codex P1). Same predicate the done-gate runner uses, single-sourced.
+        if unresolved_frozen_gate(root):
             print(
                 "[GATE] TAMPERED: run resolves to an unfrozen gate but frozen per-spec "
                 "gates exist — check .conductor/run_branch or CONDUCTOR_GATE_SLUG",
                 file=sys.stderr,
             )
             return 1
+        res = verify(manifest_path(root), baseline_path(root), root)
         if res["ok"]:
             note = "" if res["frozen"] else " (no baseline; gate not frozen)"
             print(f"[GATE] done-gate baseline intact{note}")
