@@ -8,6 +8,7 @@ location. Kept in one module so those callers cannot diverge.
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import os
 import pathlib
@@ -148,7 +149,23 @@ def gate_dir(repo_root: str | None = None) -> str:
             os.path.join(nsdir, ".frozen")
         ):
             return nsdir
+        # The ambient slug (from .conductor/run_branch / goal.md) resolves to an unbuilt dir.
+        # Falling back to the flat gate is safe ONLY when the repo has NOT adopted per-spec
+        # gates. If a frozen namespaced gate exists, stale/corrupt run metadata (an edited
+        # run_branch) must NOT silently abandon it for a — possibly green — flat slot: keep
+        # nsdir so the missing manifest fails closed (assert run exit 2). (codex P1)
+        if has_namespaced_frozen_gate(root):
+            return nsdir
     return flat
+
+
+def has_namespaced_frozen_gate(repo_root: str | None = None) -> bool:
+    """True if any ``assertions/<slug>/.frozen`` exists — the repo has FROZEN per-spec gates.
+    Once it has, an ambient slug that doesn't resolve to a built gate is stale/corrupt run
+    metadata and must fail closed rather than fall back to the flat gate. The flat baseline
+    ``assertions/.frozen`` is NOT namespaced (no subdir) and never counts here."""
+    root = repo_root or project_root()
+    return bool(glob.glob(os.path.join(root, "assertions", "*", ".frozen")))
 
 
 def manifest_path(repo_root: str | None = None) -> str:

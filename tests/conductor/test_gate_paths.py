@@ -145,6 +145,29 @@ def test_gate_dir_env_override_wins(tmp_path, monkeypatch):
     assert paths.gate_dir(str(tmp_path)) == "/somewhere/else"
 
 
+def test_has_namespaced_frozen_gate(tmp_path):
+    assert paths.has_namespaced_frozen_gate(str(tmp_path)) is False
+    _write(tmp_path, "assertions/.frozen", "{}\n")  # the FLAT baseline never counts
+    assert paths.has_namespaced_frozen_gate(str(tmp_path)) is False
+    _write(tmp_path, "assertions/alpha/.frozen", "{}\n")  # a namespaced one does
+    assert paths.has_namespaced_frozen_gate(str(tmp_path)) is True
+
+
+def test_corrupt_ambient_slug_fails_closed_when_repo_has_frozen_gate(
+    tmp_path, monkeypatch
+):
+    # codex P1: an ambient slug (run_branch) edited to an UNBUILT slug must NOT fall back to
+    # the flat gate when the repo holds a frozen namespaced gate — resolve to the (empty)
+    # nsdir so the missing manifest fails closed, instead of dodging onto the flat slot.
+    _clear_env(monkeypatch)
+    _write(tmp_path, "assertions/alpha/.frozen", "{}\n")  # a frozen namespaced gate
+    _write(
+        tmp_path, "assertions/manifest.yaml", "assertions: []\n"
+    )  # a flat gate to dodge to
+    _write(tmp_path, ".conductor/run_branch", "conductor/run-junk\n")
+    assert paths.gate_dir(str(tmp_path)) == str(tmp_path / "assertions" / "junk")
+
+
 # --- manifest_path / baseline_path / run_dir ------------------------------------------
 
 
@@ -312,6 +335,52 @@ def test_gate_dir_cli_honors_gate_dir_override(tmp_path):
     override = _gate_dir(env)
     assert override.returncode == 0, override.stderr
     assert override.stdout.strip() == "/tmp/custom-gate"
+
+
+def test_corrupt_run_branch_cannot_bypass_a_frozen_namespaced_gate(tmp_path):
+    # codex P1, end to end: freeze a namespaced gate via the ambient run_branch, then corrupt
+    # run_branch to an unbuilt slug. `assert run` and `gate verify` must fail closed, NOT
+    # resolve onto the (green) flat gate the worker planted.
+    proj = tmp_path / "repo"
+    (proj / "docs" / "specs").mkdir(parents=True)
+    _build_per_slug_gate(proj, "alpha", "A")  # writes .conductor/run_branch = run-alpha
+    (proj / "assertions" / "manifest.yaml").write_text(
+        'assertions:\n  - id: flat-ok\n    command: "true"\n    level: spec\n'
+    )
+
+    def _ambient(*args):
+        env = dict(os.environ)
+        env["CONDUCTOR_HOME"] = str(proj)
+        for k in (
+            "CONDUCTOR_GATE_SLUG",
+            "CONDUCTOR_MANIFEST",
+            "CONDUCTOR_FREEZE_BASELINE",
+            "CONDUCTOR_GATE_DIR",
+        ):
+            env.pop(k, None)
+        return subprocess.run(
+            [CONDUCTOR, *args],
+            cwd=str(proj),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    frozen = _ambient("gate", "freeze")
+    assert frozen.returncode == 0, frozen.stdout + frozen.stderr
+    assert (proj / "assertions" / "alpha" / ".frozen").is_file()
+
+    (proj / ".conductor" / "run_branch").write_text("conductor/run-junk\n")
+
+    r = _ambient("assert", "run", "--level", "spec")
+    assert r.returncode != 0, (
+        "assert run dodged onto the flat gate:\n" + r.stdout + r.stderr
+    )
+    v = _ambient("gate", "verify")
+    assert v.returncode != 0, (
+        "gate verify read green by dodging the frozen gate:\n" + v.stdout + v.stderr
+    )
 
 
 def test_freeze_binds_assertions_source_to_selected_spec(tmp_path):
