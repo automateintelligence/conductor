@@ -103,11 +103,13 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      merge-gate's expected-base leg reads — a phase PR targeting anything else blocks with
      `base-mismatch`. On a fresh clone the file is missing: re-derive it from the ls-remote above
      (this step IS the re-derivation — reconcile-first).
-   - **Work in a WORKTREE:** `git worktree add ../<repo>-run-<spec-slug> "$RB"` (the resolver's
-     name from above — never re-derive the slug for the branch argument)
-     — the worker and the Tier-B watchdog operate in the worktree (`CONDUCTOR_HOME` = worktree
-     root), so the owner's own checkout is never branch-switched or dirtied by fires. SKIP if it
-     exists.
+   - **Work in a WORKTREE:** `git worktree add .worktrees/run-<spec-slug> "$RB"` (the resolver's
+     name from above — never re-derive the slug for the branch argument) — worktrees live in the
+     repo's own **`.worktrees/`** dir (the standing convention), NOT a repo-sibling `../…` dir.
+     Ensure `.worktrees/` is git-ignored first (add it to `.gitignore` if absent) so the nested
+     checkout is never staged. The worker and the Tier-B watchdog operate in the worktree
+     (`CONDUCTOR_HOME` = worktree root), so the owner's own checkout is never branch-switched or
+     dirtied by fires. SKIP if it exists.
    - **Probe default-branch protection** (`gh api repos/{owner}/{repo}/branches/<default>/protection`):
      404/absent → WARN the owner that nothing server-side stops a merge to the default branch;
      403 ("Upgrade to GitHub Pro…") → tell the owner protection needs a paid plan or a public

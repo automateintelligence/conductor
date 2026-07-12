@@ -22,6 +22,7 @@ htmlcov/
 
 # Conductor runtime scratch (goal.md, etc.)
 .conductor/
+.worktrees/
 .claude/worktrees/
 .bubo/config.json
 .bubo/reviews.jsonl
