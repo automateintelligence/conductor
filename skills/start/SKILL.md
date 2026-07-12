@@ -75,7 +75,9 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    - the per-phase recipe verbatim: subagent implement on a phase branch forked FROM THE RUN
      BRANCH → `/code-review` per task (against the phase's Spec sections, not just the diff) →
      commit per task → one PR per phase with **base = the run branch** (`Closes #<phase-issue>`)
-     → codex review ×2 posted as "Codex review" PR comments → `conductor merge-gate` → merge
+     → codex review ×2 — each run as `/codex $superpowers:requesting-code-review Please provide a
+     read-only, pre-merge review for PR#<pr> against the phase's Spec sections` — posted as "Codex
+     review" PR comments → `conductor merge-gate` → merge
      into the run branch → `/document-release` → `conductor ledger phase-done`.
    SKIP if a plan/milestone exists.
 4b. **LINT + CODEX-REVIEW THE PLAN** — it dictates every phase and must not stay the
