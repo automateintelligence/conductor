@@ -4,7 +4,8 @@
 back to either finished work that passes a machine-checked definition of done, or a
 clear, recoverable note about why it stopped.
 
-**State grounded in GitHub to survive sessions and restarts.**
+**Survive sessions and restarts!!!**
+State grounded in GitHub. Not reliant on Claude Cloud.
 Conductor is a Claude Code plugin. You point it at a spec whose definition of done is
 explicit and machine-checkable (built with [spec-craft](https://github.com/automateintelligence/spec-craft)),
 and it drives the work to completion: it plans, tracks every phase as a GitHub issue,
