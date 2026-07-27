@@ -105,6 +105,24 @@ Roles compose, they do not nest: `/conductor:start` is the supervisor you invoke
 schedule is the clock. The full design lives in
 [`docs/specs/2026-06-28-autodev-design.md`](docs/specs/2026-06-28-autodev-design.md).
 
+### Effort routing
+
+Conductor routes reasoning **effort**, not models. Every agent runs the same default model
+(Opus 5); only the effort level changes with the kind of work:
+
+| Work | Effort |
+| --- | --- |
+| Setting up the run, research, writing the plan — `/conductor:start`, `/conductor:prepare`, `/conductor:assertions-to-tests` | `xhigh` |
+| Executing the plan, writing PRs | `auto` |
+| Self-review agents; implementing fixes to self-reviews and codex reviews | `high` |
+
+It is instructions, not machinery: the skills say which level applies where, and the agent sets
+it with the session-scoped `/effort <level>`. Two consequences the skills state explicitly —
+effort does not cross the cron boundary, so each autodev fire sets its own baseline as its first
+act; and a dispatched subagent takes no effort argument, so it inherits the session level and the
+dispatch prompt restates the level in words. `/codex` is outside the router: it shells out to the
+Codex CLI, whose effort comes from that wrapper's own `model_reasoning_effort`.
+
 ### Why the clock is external
 
 An in-process loop would let the agent decide when it is done, let context bloat across
