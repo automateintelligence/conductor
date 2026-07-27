@@ -126,9 +126,14 @@ exist:
 - **The unattended driver gets a flag.** Tier-B fires run headless, so `/conductor:start` puts
   `CONDUCTOR_RESUME_CLAUDE_FLAGS="--effort auto"` in `resume-env.sh`, which the driver expands
   into the fire's `claude` argv.
-- **Subagents get a directive.** The Task tool takes no effort argument, so a dispatched subagent
-  inherits the session level and its prompt restates the level in words. This is the only lever
-  the autodev worker itself holds, and it is what puts self-review and review-fix work at `high`.
+- **Subagents get a hint.** The Task tool takes no effort argument, so a dispatched subagent
+  inherits the session level; its prompt restates the intended level in words. That hint is
+  advisory — it biases deliberation, it does not set the level, and nothing verifies it.
+
+One honest limit, stated in the skills rather than papered over: a cron fire cannot change its own
+level, so the whole loop runs at `auto` and rule 3's `high` survives only as a prompt hint. Pinning
+fires at `high` would enforce that rule and break the `auto` one, so conductor does not. No
+configuration satisfies both within a single fire.
 
 `/codex` is outside the router: it shells out to the Codex CLI, whose effort comes from that
 wrapper's own `model_reasoning_effort`.

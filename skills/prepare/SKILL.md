@@ -26,7 +26,8 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
 > through the step-2 plan fixes and the step-3 ambiguity calls; declined or unanswered → say the
 > alignment is proceeding below the routed effort, and continue. Any subagent you dispatch
 > inherits this session's level and takes no effort parameter — put "reason at xhigh effort" in
-> its prompt. The model NEVER changes (always the default, Opus 5); only the effort does.
+> its prompt as an advisory hint; it biases deliberation but **does not set the effort level**.
+> The model NEVER changes (always the default, Opus 5); only the effort does.
 
 0. **INVENTORY.** Locate: the spec (with `## Expectations`), `<spec>.assertions.md`, the run's
    done-gate — the per-spec `assertions/<slug>/manifest.yaml` + `.frozen` (`<slug>` =

@@ -27,8 +27,9 @@ test and one manifest entry, traceable by `id`. **Use `/superpowers:test-driven-
 > `/conductor:start` you inherit the level the owner set there; invoked standalone,
 > **ask the owner to type `/effort xhigh`** first. Step 3's red-teaming is why it matters: a weak
 > check gets FROZEN and then certifies fake completion. Dispatching any of this to a subagent? Put
-> "reason at xhigh effort" in its prompt — there is no effort parameter. Same model throughout
-> (the default, Opus 5); only effort varies.
+> "reason at xhigh effort" in its prompt — an advisory hint only: there is no effort parameter, the
+> subagent inherits this session's level, and the hint **does not set the effort level**. Same
+> model throughout (the default, Opus 5); only effort varies.
 
 For each assertion spec:
 

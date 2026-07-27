@@ -38,17 +38,20 @@ def test_autodev_skill_contract():
         "not with --admin, not at all",
         "base = the run branch",
         "run_branch",
-        # effort router. The worker CANNOT set its own effort (/effort is a human-only local
-        # command), so these pin the disclaimer plus the one lever it does hold: the dispatch
-        # prompt. A needle asserting autodev runs /effort would lock in fake compliance.
+        # effort router. A fire cannot change its own level: /effort is a human-only local
+        # command and a subagent inherits the fire's level. So inside a fire only rule 2 has a
+        # real mechanism; rules 1/3 are non-enforced prompt hints. These needles pin the
+        # DISCLAIMERS — a needle asserting autodev sets an effort level (by /effort or by
+        # dispatch-prompt text) would freeze fake compliance, which is why none is listed.
         "effort router",
         "the model never changes",
-        "you cannot set your own effort",
+        "you cannot set your own effort, and you cannot set a subagent's",
         "no human is in a fire",
-        "no effort parameter",
+        "does not set the effort level",
+        "non-enforced reasoning hint",
+        "cannot be handed another",
+        "never report that a step ran at",
         "reason at high effort",
-        "reason at xhigh effort",
-        "dispatch prompt is the one lever",
         "model_reasoning_effort",
     ]:
         assert needle in body, needle
@@ -98,8 +101,10 @@ def test_start_skill_contract():
         "idle repl",
         'conductor_resume_claude_flags="--effort auto"',
         "no effort parameter",
-        "reason at xhigh effort",
-        "implement, pr, merge, release at `auto`",
+        "does not set the effort level",
+        "effort hint (advisory, not enforced)",
+        "a fire cannot change its own level",
+        "not reliable here",
     ]:
         assert needle in body, needle
 
@@ -120,7 +125,7 @@ def test_assertions_to_tests_skill_contract():
         # effort router: building the done-gate is xhigh setup work, asked of the owner
         "you cannot set this",
         "ask the owner to type `/effort xhigh`",
-        "reason at xhigh effort",
+        "does not set the effort level",
     ]:
         assert needle in body, needle
 
@@ -145,6 +150,6 @@ def test_prepare_skill_contract():
         # effort router: brownfield alignment is xhigh work, asked of the supervising owner
         "you cannot set your own effort",
         "ask the owner to type `/effort xhigh`",
-        "reason at xhigh effort",
+        "does not set the effort level",
     ]:
         assert needle in body, needle

@@ -38,9 +38,12 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 >    below the routed effort, and continue.
 > 2. **`--effort <level>` on the unattended driver** — real flag, `claude --effort` = "Effort
 >    level for the current session". Step 6 wires it.
-> 3. **A plain directive in the prompt of every subagent you dispatch** — "reason at xhigh
->    effort" in the prompt itself. The `Agent`/Task tool has no effort parameter and a subagent
->    inherits this session's level, so that prompt text is the whole mechanism.
+> 3. **A hint in the prompt of every subagent you dispatch** — "reason at xhigh effort" written
+>    into the prompt. This one is ADVISORY: the `Agent`/Task tool has no effort parameter and a
+>    subagent inherits this session's level, so the hint biases deliberation but
+>    **does not set the effort level**, and nothing verifies it. Worth writing; never reported
+>    as if it set one.
+> Levers 1 and 2 really do set a level; lever 3 does not. Say which one you used.
 > Never swap models to change effort, and never read a lower effort as licence to skip a step.
 
 0. **PREFLIGHT (`conductor preflight`).** Confirm every conducted command resolves (Codex #1):
@@ -101,8 +104,8 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      read-only, pre-merge review for PR#<pr> against the phase's Spec sections` — posted as "Codex
      review" PR comments → `conductor merge-gate` → merge
      into the run branch → `/document-release` → `conductor ledger phase-done`.
-     Effort per step, same model throughout: implement, PR, merge, release at `auto`;
-     `/code-review` and applying review fixes at `high`.
+     Effort hint (advisory, not enforced): `auto` to implement/PR/merge/release, `high` for
+     `/code-review` and review fixes.
    SKIP if a plan/milestone exists.
 4b. **LINT + CODEX-REVIEW THE PLAN** — it dictates every phase and must not stay the
    least-reviewed setup artifact. `conductor plan-lint <plan.md> --spec <spec.md>` must exit 0:
@@ -151,7 +154,7 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    **heartbeat**: `CronCreate` fires **only while the REPL is idle**, so a tick never overlaps a
    running fire — it no-ops until the current phase finishes, so the interval need not match phase
    duration.
-   **EFFORT FOR THE LOOP — run infrastructure IS the lever.** A fire has no human in it, so it
+   **EFFORT FOR THE LOOP — only run infrastructure sets a level here.** A fire has no human in it, so it
    can never type `/effort`; the worker cannot set its own level and must not pretend to. Rule 2
    puts execution at `auto`, and it reaches the two drivers differently — wire BOTH here:
    - **`CronCreate` fires into the owner's IDLE REPL**, so a fire is a turn in that session and
@@ -163,8 +166,14 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      that variable straight into the fire's `claude` argv. APPEND it to whatever posture flags the
      owner already chose there (never replace them), and write it through
      `conductor.authority.write_resume_env` with the rest of the owner env, same as below.
-     A bare `CLAUDE_EFFORT=` line does NOT work here: `write_resume_env` emits `KEY=value` with no
-     `export` and the driver only SOURCES the file, so it never reaches the `claude` child.
+     A bare `CLAUDE_EFFORT=` line is NOT reliable here: `write_resume_env` emits `KEY=value` with
+     no `export` and the driver only SOURCES the file, so it reaches the `claude` child ONLY if
+     that name was already exported in the driver's inherited environment — true in the owner's
+     interactive shell, not under cron's minimal env. Use the flag; don't depend on the variable.
+   **One honest limit, tell the owner:** a fire cannot change its own level, so the whole loop
+   runs at `auto`. Rule 3's `high` for self-review and review fixes is delivered inside a fire as
+   a prompt HINT, not an enforced level (pinning fires at `high` would enforce rule 3 and break
+   rule 2). No configuration satisfies both rules at once within one fire.
    **Tier-B is the fail-closed DEFAULT for an unattended run — never a durability judgment
    call.** Current CLI builds silently ignore `durable: true`: the response says "Session-only
    (not written to disk…)" and no `scheduled_tasks.json` appears (verified live 2026-07-02). Do

@@ -26,24 +26,30 @@ step 3b's terminal crontab removal.
 > below); installed plugins are not on `PATH`.
 
 **EFFORT ROUTER — one model, three efforts.** The model NEVER changes: always the default model
-(Opus 5); only the reasoning effort varies. **You cannot set your own effort.** `/effort` is a
-built-in Claude Code local command that only a HUMAN types into a REPL, and no human is in a fire
-— so never run it, and never narrate having run it. Your level was decided before you woke up: an
-in-REPL `CronCreate` fire is a turn in the owner's session and runs at whatever that REPL is left
-on; a Tier-B headless fire runs at whatever `CONDUCTOR_RESUME_CLAUDE_FLAGS="--effort <level>"`
-handed it. **Both are OWNER-owned run infrastructure** (same class as the frozen gate and the
-crontab) — never edit them to change your own effort; escalate instead. `/conductor:start` sets
-both to rule 2's **`auto`** — executing the plan and writing PRs — so treat `auto` as your
-baseline, and do not claim a level you did not set.
+(Opus 5); only the reasoning effort varies.
+**You cannot set your own effort, and you cannot set a subagent's.** `/effort` is a built-in
+Claude Code local command that only a HUMAN types into a
+REPL, and no human is in a fire — so never run it, and never narrate having run it. Your level was
+decided before you woke up: an in-REPL `CronCreate` fire is a turn in the owner's session and runs
+at whatever that REPL is left on; a Tier-B headless fire runs at whatever
+`CONDUCTOR_RESUME_CLAUDE_FLAGS="--effort <level>"` handed it. **Both are OWNER-owned run
+infrastructure** (same class as the frozen gate and the crontab) — never edit them to raise your
+own effort; escalate instead. `/conductor:start` sets both to rule 2's **`auto`**, so `auto` is
+the level EVERYTHING in this fire actually runs at — including every subagent you dispatch, which
+inherits it and cannot be handed another.
 
-**The dispatch prompt is the ONE lever you hold.** The `Agent`/Task tool has no effort parameter
-and a subagent inherits this session's level, so the router's other tiers travel as **plain
-directives written into the prompt of the subagent you dispatch** — that text is the whole
-mechanism, and there is no argument to pass. Rule 3's `high` work is steps 6.2 (`/code-review`)
-and 6.6 (applying self-review and codex-review fixes): the step-6 dispatch prompt must say
-"reason at high effort" for those in words. Rule 1's `xhigh` work is step 4's re-plan and step 7's
-sub-plan: dispatch each to a subagent carrying "reason at xhigh effort". Anything you run inline
-instead runs at the fire's baseline — say so in the handoff rather than implying otherwise.
+**Inside a fire, rules 1 and 3 are HINTS, not settings — say so, never fake them.** Writing
+"reason at high effort" into a dispatch prompt is a **non-enforced reasoning hint**: it biases how
+hard that subagent deliberates, it **does not set the effort level**, and nothing verifies it.
+Write the hints anyway — deliberate effort is worth asking for — but know the limit: **within one
+fire no configuration enforces rule 2 and rule 3 at once, because a fire cannot change its own
+level.** Pinning fires at `high` would enforce rule 3 and break rule 2, so conductor does not do
+it. Consequence you must honor: **never report that a step ran at `high` or `xhigh`.** If you
+report effort at all, report the fire's actual level and call the rest hints.
+  - Rule 3 (`high`) — steps 6.2 (`/code-review`) and 6.6 (applying self-review and codex-review
+    fixes): put "reason at high effort" in the step-6 dispatch prompt.
+  - Rule 1 (`xhigh`) — step 4's re-plan and step 7's sub-plan: put "reason at xhigh effort" in
+    those dispatch prompts.
 **`/codex` sits outside this router** — it shells out to the Codex CLI, whose effort comes from
 the codex wrapper's own `model_reasoning_effort`; you cannot route it, so never claim you did.
 Effort is a reasoning dial, never licence to skip a step of the recipe.
@@ -110,16 +116,16 @@ Effort is a reasoning dial, never licence to skip a step of the recipe.
    - plan done → `/superpowers:writing-plans` next plan → `ledger.generate` (or `ledger.convert`).
    - no plans left but assertions red → `/superpowers:writing-plans` to close the gap → generate.
    Both `/superpowers:writing-plans` branches are rule-1 planning work: dispatch each to a fresh
-   subagent whose prompt says "reason at xhigh effort" — that directive is the only way to lift
-   planning above the fire's `auto` baseline.
+   subagent whose prompt says "reason at xhigh effort". That is a hint — the subagent still runs
+   at the fire's level — so ask for the deliberation, don't report it as `xhigh`.
 5. **CLAIM.** `ledger.claim(phase, worker, now_ts, ttl)`. If False, back off and re-pick.
 6. **EXECUTE the phase in a FRESH SUBAGENT** via the recipe (one PR per phase). **Build to the
    SPEC:** hand the subagent the plan's `Normative spec:` path plus this phase's `**Spec:**`
    sections and require reading them BEFORE implementing. The plan is a summary and the assertions
    are only the mechanical done-floor — the spec's spirit and intent is the work, so gate-green is
-   necessary, never sufficient. **Carry the effort router into the dispatch prompt** — the subagent
-   inherits the fire's `auto` baseline and takes no effort argument, so the prompt itself must say
-   which steps run at `high` (6.2 and 6.6). That directive is the only lever. Conducted skills: `/superpowers:*` are plugin skills;
+   necessary, never sufficient. **Carry the effort router's hints into the dispatch prompt** — the
+   subagent inherits the fire's `auto` level and takes no effort argument, so name 6.2 and 6.6 as
+   `high`-effort work in the prompt text, as a request for deliberation. Conducted skills: `/superpowers:*` are plugin skills;
    `/code-review`, `/codex`, `/document-release` are **environment-provided** commands (verified
    by `/conductor:start` preflight):
    0. **Reconcile-within-phase (restart safety):** diff the phase's `- [ ]` tasks against
@@ -127,13 +133,13 @@ Effort is a reasoning dial, never licence to skip a step of the recipe.
       per-assertion state; skip tasks already done. A dirty tree left by a dead worker: commit it
       to the phase branch as `wip: reclaimed partial work` — never discard it, never build over
       it blind.
-   1. `/superpowers:subagent-driven-development` to implement the phase's tasks (`auto` baseline)
-      — on a phase branch forked from the RUN branch (never from the default branch when a run
-      branch is configured).
-   2. `/code-review` (self-review) per task at **`high`** — dispatch-prompt directive: "reason at
-      high effort". Review against the phase's Spec
+   1. `/superpowers:subagent-driven-development` to implement the phase's tasks (rule 2 — this is
+      what the fire's `auto` level is for) — on a phase branch forked from the RUN branch (never
+      from the default branch when a run branch is configured).
+   2. `/code-review` (self-review) per task, hinted **`high`** ("reason at high effort" in the
+      dispatch prompt). Review against the phase's Spec
       sections, not just the diff. 3. **commit after every task.**
-   4. **one PR per phase, base = the RUN branch** (`auto` baseline; `Closes #<phase-issue>` for
+   4. **one PR per phase, base = the RUN branch** (runs at the fire's level; `Closes #<phase-issue>` for
       traceability — merge-gate blocks without it, and its base leg blocks any other base with
       `base-mismatch`; run-branch merges don't auto-close issues — `phase-done` does that).
    5. `/codex $superpowers:requesting-code-review Please provide a read-only, pre-merge review for
@@ -166,8 +172,8 @@ Effort is a reasoning dial, never licence to skip a step of the recipe.
       phase traded Codex's independence for Claude's — flag it for optional independent re-review.
       The open `debt` issue rides the handoff's `Open:` line to the final owner PR, where YOU decide;
       it SURFACES the degradation, it does not silently repair it. Keep working.
-   6. `/superpowers:receiving-code-review` at **`high`** — dispatch-prompt directive again;
-      applying self-review and codex-review fixes is rule-3 work, as are the fallback
+   6. `/superpowers:receiving-code-review`, hinted **`high`** again; applying self-review and
+      codex-review fixes is rule-3 work, as are the fallback
       `/code-review` rounds — apply fixes, commit, then **codex re-reviews the
       FINAL state** (posted as another "Codex review" comment; if Codex is still usage-limited the
       step-5 fallback applies again — `/code-review` the final state under the same configured
@@ -186,8 +192,8 @@ Effort is a reasoning dial, never licence to skip a step of the recipe.
    Capture `baseline_revision..final_revision` (equal = did nothing). Respect the per-fire budget
    (checkpoint+handoff if exceeded).
 7. **ESCALATION (§9):** patch-later → `escalate.file_followup(debt|feature)`+link; continue.
-   build-now → bounded deepen-in-place at **`xhigh`** (sub-planning is rule-1 work: dispatch it
-   with "reason at xhigh effort" in the prompt):
+   build-now → bounded deepen-in-place, hinted **`xhigh`** (sub-planning is rule-1 work: dispatch
+   it with "reason at xhigh effort" in the prompt):
    `/superpowers:writing-plans` scoped → generate sub-plan;
    `escalate.block_on_subplan(phase)`; on completion `escalate.write_adr`. build-now AND needs
    human judgment → **halt** with handoff+issue (only branch that pages the user). Process failure
