@@ -19,12 +19,14 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
 > **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
 > below); installed plugins are not on `PATH`. Run from the project root.
 >
-> **EFFORT — `xhigh` for this whole skill.** Brownfield alignment is run setup, research, and plan
-> work, which the effort router puts at `xhigh`: run **`/effort xhigh`** before step 0 and hold it
-> through the step-2 plan fixes and the step-3 ambiguity calls. The model NEVER changes — it is
-> always the default (Opus 5); only the effort does. `/effort` is session-scoped and the
-> `Agent`/Task tool has no effort parameter, so any subagent you dispatch inherits this level —
-> restate "reason at xhigh effort" in its prompt.
+> **EFFORT — `xhigh` for this whole skill.** Brownfield alignment is rule-1 work (run setup,
+> research, plan). **You cannot set your own effort** — `/effort` is a built-in Claude Code local
+> command only a HUMAN types into the REPL, so never run it or narrate running it. prepare is
+> owner-supervised, so **ask the owner to type `/effort xhigh`** before step 0 and to hold it
+> through the step-2 plan fixes and the step-3 ambiguity calls; declined or unanswered → say the
+> alignment is proceeding below the routed effort, and continue. Any subagent you dispatch
+> inherits this session's level and takes no effort parameter — put "reason at xhigh effort" in
+> its prompt. The model NEVER changes (always the default, Opus 5); only the effort does.
 
 0. **INVENTORY.** Locate: the spec (with `## Expectations`), `<spec>.assertions.md`, the run's
    done-gate — the per-spec `assertions/<slug>/manifest.yaml` + `.frozen` (`<slug>` =

@@ -116,12 +116,22 @@ Conductor routes reasoning **effort**, not models. Every agent runs the same def
 | Executing the plan, writing PRs | `auto` |
 | Self-review agents; implementing fixes to self-reviews and codex reviews | `high` |
 
-It is instructions, not machinery: the skills say which level applies where, and the agent sets
-it with the session-scoped `/effort <level>`. Two consequences the skills state explicitly —
-effort does not cross the cron boundary, so each autodev fire sets its own baseline as its first
-act; and a dispatched subagent takes no effort argument, so it inherits the session level and the
-dispatch prompt restates the level in words. `/codex` is outside the router: it shells out to the
-Codex CLI, whose effort comes from that wrapper's own `model_reasoning_effort`.
+It is instructions, not machinery — and no agent can set its own effort. `/effort` is a built-in
+Claude Code local command only *you* can type, so the router runs on the three levers that really
+exist:
+
+- **You set it for setup.** `/conductor:start` and `/conductor:prepare` are owner-supervised, so
+  they ask you to type `/effort xhigh` before setup and `/effort auto` before you walk away. An
+  in-REPL cron fire is a turn in your session and runs at whatever level you left it on.
+- **The unattended driver gets a flag.** Tier-B fires run headless, so `/conductor:start` puts
+  `CONDUCTOR_RESUME_CLAUDE_FLAGS="--effort auto"` in `resume-env.sh`, which the driver expands
+  into the fire's `claude` argv.
+- **Subagents get a directive.** The Task tool takes no effort argument, so a dispatched subagent
+  inherits the session level and its prompt restates the level in words. This is the only lever
+  the autodev worker itself holds, and it is what puts self-review and review-fix work at `high`.
+
+`/codex` is outside the router: it shells out to the Codex CLI, whose effort comes from that
+wrapper's own `model_reasoning_effort`.
 
 ### Why the clock is external
 

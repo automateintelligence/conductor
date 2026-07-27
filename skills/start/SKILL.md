@@ -30,11 +30,18 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 > executing the plan and writing PRs; **`high`** = self-review agents, and implementing fixes to
 > self-reviews and codex reviews. autodev owns the last two at run time; they are named here
 > because the plan you write in step 4 carries them into every phase.
-> **Run `/effort xhigh` NOW, before step 0**, and hold it for the whole skill. `/effort` is
-> session-scoped and the `Agent`/Task tool has NO effort parameter — a dispatched subagent
-> inherits the session's level and cannot be handed a different one, so ALSO restate the level in
-> every dispatch prompt as a plain directive ("reason at xhigh effort"). Never swap models to
-> change effort, and never read a lower effort as licence to skip a step.
+> **You cannot set your own effort.** `/effort` is a built-in Claude Code local command that a
+> HUMAN types into the REPL — it is not a skill and no agent can invoke it. Never write that you
+> set it; a narrated `/effort` is fake compliance. Only three levers actually deliver a level:
+> 1. **ASK THE OWNER to type `/effort xhigh`** before you begin. This skill is owner-supervised,
+>    so a human is present to ask. Declined or unanswered → say plainly that setup is proceeding
+>    below the routed effort, and continue.
+> 2. **`--effort <level>` on the unattended driver** — real flag, `claude --effort` = "Effort
+>    level for the current session". Step 6 wires it.
+> 3. **A plain directive in the prompt of every subagent you dispatch** — "reason at xhigh
+>    effort" in the prompt itself. The `Agent`/Task tool has no effort parameter and a subagent
+>    inherits this session's level, so that prompt text is the whole mechanism.
+> Never swap models to change effort, and never read a lower effort as licence to skip a step.
 
 0. **PREFLIGHT (`conductor preflight`).** Confirm every conducted command resolves (Codex #1):
    `/spec-craft:*`, `/superpowers:*`, and environment-provided `/code-review`, `/codex`,
@@ -144,11 +151,20 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    **heartbeat**: `CronCreate` fires **only while the REPL is idle**, so a tick never overlaps a
    running fire — it no-ops until the current phase finishes, so the interval need not match phase
    duration.
-   **Effort is NOT inherited across the cron boundary.** Every fire is a fresh session that starts
-   with no `/effort` of yours, so autodev sets its own baseline as its first act (its own effort
-   router). Do NOT append `/effort` to the cron `prompt`, and do NOT put it in `resume-env.sh` or
-   `CONDUCTOR_RESUME_CLAUDE_FLAGS` — effort is the worker's in-session act, never run
-   infrastructure.
+   **EFFORT FOR THE LOOP — run infrastructure IS the lever.** A fire has no human in it, so it
+   can never type `/effort`; the worker cannot set its own level and must not pretend to. Rule 2
+   puts execution at `auto`, and it reaches the two drivers differently — wire BOTH here:
+   - **`CronCreate` fires into the owner's IDLE REPL**, so a fire is a turn in that session and
+     runs at whatever level the REPL is left on — it inherits and cannot override. **Tell the
+     owner to type `/effort auto` once setup finishes, before walking away**, and say why: a REPL
+     left at `xhigh` runs the entire execution loop there.
+   - **The Tier-B headless driver takes the real flag:** set
+     `CONDUCTOR_RESUME_CLAUDE_FLAGS="--effort auto"` in `resume-env.sh` — the driver eval-expands
+     that variable straight into the fire's `claude` argv. APPEND it to whatever posture flags the
+     owner already chose there (never replace them), and write it through
+     `conductor.authority.write_resume_env` with the rest of the owner env, same as below.
+     A bare `CLAUDE_EFFORT=` line does NOT work here: `write_resume_env` emits `KEY=value` with no
+     `export` and the driver only SOURCES the file, so it never reaches the `claude` child.
    **Tier-B is the fail-closed DEFAULT for an unattended run — never a durability judgment
    call.** Current CLI builds silently ignore `durable: true`: the response says "Session-only
    (not written to disk…)" and no `scheduled_tasks.json` appears (verified live 2026-07-02). Do
@@ -177,7 +193,8 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    - **Machine/run-specific env goes in `<main-root>/.conductor/resume-env.sh`** (gitignored),
      which the driver sources — NEVER inline in the driver, so regeneration can't clobber it. Put
      the owner-owned `CONDUCTOR_MERGE_VERIFY` there (plus any dev-mode `CONDUCTOR_PLUGIN_DIRS` or
-     `DOCKER_HOST`). Do NOT set `CONDUCTOR_RUN_BRANCH` — the CLI reads `.conductor/run_branch`, the
+     `DOCKER_HOST`, and the router's `CONDUCTOR_RESUME_CLAUDE_FLAGS="--effort auto"`). Do NOT set
+     `CONDUCTOR_RUN_BRANCH` — the CLI reads `.conductor/run_branch`, the
      single source of truth; a stale literal would override it.
    - **UNATTENDED PERMISSIONS — the owner's explicit call, never defaulted.** An autonomous phase
      runs `gh` PR create/merge, `git push`, docker, broad edits, and subagents. A headless `claude
