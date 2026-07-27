@@ -22,6 +22,19 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 > worktrees never contend for the one flat `assertions/` slot at the shared merge base; step 3
 > exports `CONDUCTOR_GATE_SLUG` so `conductor gate freeze|lint` and `assert run` resolve that dir
 > during setup, before the goal/run-branch that carry the slug at run time are written.
+>
+> **EFFORT ROUTER — one model, three efforts.** The model NEVER changes: every conductor agent
+> runs the default model (Opus 5). Only the reasoning effort varies, by kind of work:
+> **`xhigh`** = setting up the run, doing research, and writing the plan — that is ALL of this
+> skill, including `/conductor:assertions-to-tests` and the step-4b plan fixes; **`auto`** =
+> executing the plan and writing PRs; **`high`** = self-review agents, and implementing fixes to
+> self-reviews and codex reviews. autodev owns the last two at run time; they are named here
+> because the plan you write in step 4 carries them into every phase.
+> **Run `/effort xhigh` NOW, before step 0**, and hold it for the whole skill. `/effort` is
+> session-scoped and the `Agent`/Task tool has NO effort parameter — a dispatched subagent
+> inherits the session's level and cannot be handed a different one, so ALSO restate the level in
+> every dispatch prompt as a plain directive ("reason at xhigh effort"). Never swap models to
+> change effort, and never read a lower effort as licence to skip a step.
 
 0. **PREFLIGHT (`conductor preflight`).** Confirm every conducted command resolves (Codex #1):
    `/spec-craft:*`, `/superpowers:*`, and environment-provided `/code-review`, `/codex`,
@@ -56,8 +69,10 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    **Then FREEZE the gate (§5):** `conductor gate freeze` records `$GATE_DIR/.frozen` (commit it)
    so the worker cannot later weaken a check; the runner fail-closes (exit 6) if a frozen
    assertion or its test file changes. SKIP if `.frozen` exists and `conductor gate verify` is clean.
-4. **Plan exists?** No → `/superpowers:writing-plans` (or spec-kit) in a fresh subagent — and
-   PASS IT the spec, its `## Expectations`, and `<spec>.assertions.md` paths as required inputs.
+4. **Plan exists?** No → `/superpowers:writing-plans` (or spec-kit) in a fresh subagent at
+   **`xhigh`** effort — the subagent takes no effort argument, so write "reason at xhigh effort"
+   into the dispatch prompt itself — and PASS IT the spec, its `## Expectations`, and
+   `<spec>.assertions.md` paths as required inputs.
    **The plan builds to the SPEC.** The executable assertions are only the mechanical done-floor
    that gates objective expectations; the spec's spirit and intent — architecture, behaviors,
    qualities — is the actual work, and there is far more of it than the assertions capture.
@@ -79,6 +94,8 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      read-only, pre-merge review for PR#<pr> against the phase's Spec sections` — posted as "Codex
      review" PR comments → `conductor merge-gate` → merge
      into the run branch → `/document-release` → `conductor ledger phase-done`.
+     Effort per step, same model throughout: implement, PR, merge, release at `auto`;
+     `/code-review` and applying review fixes at `high`.
    SKIP if a plan/milestone exists.
 4b. **LINT + CODEX-REVIEW THE PLAN** — it dictates every phase and must not stay the
    least-reviewed setup artifact. `conductor plan-lint <plan.md> --spec <spec.md>` must exit 0:
@@ -127,6 +144,11 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    **heartbeat**: `CronCreate` fires **only while the REPL is idle**, so a tick never overlaps a
    running fire — it no-ops until the current phase finishes, so the interval need not match phase
    duration.
+   **Effort is NOT inherited across the cron boundary.** Every fire is a fresh session that starts
+   with no `/effort` of yours, so autodev sets its own baseline as its first act (its own effort
+   router). Do NOT append `/effort` to the cron `prompt`, and do NOT put it in `resume-env.sh` or
+   `CONDUCTOR_RESUME_CLAUDE_FLAGS` — effort is the worker's in-session act, never run
+   infrastructure.
    **Tier-B is the fail-closed DEFAULT for an unattended run — never a durability judgment
    call.** Current CLI builds silently ignore `durable: true`: the response says "Session-only
    (not written to disk…)" and no `scheduled_tasks.json` appears (verified live 2026-07-02). Do

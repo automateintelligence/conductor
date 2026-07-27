@@ -25,6 +25,23 @@ step 3b's terminal crontab removal.
 > **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
 > below); installed plugins are not on `PATH`.
 
+**EFFORT ROUTER — one model, three efforts.** The model NEVER changes: always the default model
+(Opus 5). Only the reasoning effort varies. **A cron fire inherits nothing, so set the baseline
+yourself as your first act: `/effort auto`** — executing the plan and writing PRs is `auto` work,
+and that is most of a fire. Raise to **`high`** for review work: step 6.2 `/code-review` and step
+6.6 applying self-review and codex-review fixes. Use **`xhigh`** for planning work: step 4's
+re-plan and step 7's deepen-in-place sub-plan. Return to `auto` after either.
+
+**How you apply it.** `/effort` is session-scoped, and the `Agent`/Task tool has no effort parameter:
+a dispatched subagent inherits the session's level and cannot be handed another one. So for step 6,
+whose whole phase runs in a fresh subagent, the tiers travel as **plain directives
+written into the dispatch prompt**: "implement, open the PR, and merge at `auto` effort; run
+`/code-review` and apply review fixes at `high` effort — reason at high effort for those." That
+prompt directive IS the mechanism; there is no argument to pass. **`/codex` sits outside this
+router** — it shells out to the Codex CLI, whose effort comes from the codex wrapper's own
+`model_reasoning_effort`; `/effort` does not reach it, so never claim it set Codex's effort.
+Effort is a reasoning dial, never licence to skip a step of the recipe.
+
 1. **RE-LOAD GOAL (fresh context).** Done only when `conductor assert run --level spec` exits 0.
    Re-read goal + paths from the durable handoff/ledger; trust git/issues, not memory. Read the
    run branch from `<project>/.conductor/run_branch`; file missing → recompute the EXACT name
@@ -86,12 +103,16 @@ step 3b's terminal crontab removal.
    - phase available → SPLIT-CHECK (§6.1); else run the recipe.
    - plan done → `/superpowers:writing-plans` next plan → `ledger.generate` (or `ledger.convert`).
    - no plans left but assertions red → `/superpowers:writing-plans` to close the gap → generate.
+   Both `/superpowers:writing-plans` branches are planning work: `/effort xhigh` first, back to
+   `auto` once the plan is generated.
 5. **CLAIM.** `ledger.claim(phase, worker, now_ts, ttl)`. If False, back off and re-pick.
 6. **EXECUTE the phase in a FRESH SUBAGENT** via the recipe (one PR per phase). **Build to the
    SPEC:** hand the subagent the plan's `Normative spec:` path plus this phase's `**Spec:**`
    sections and require reading them BEFORE implementing. The plan is a summary and the assertions
    are only the mechanical done-floor — the spec's spirit and intent is the work, so gate-green is
-   necessary, never sufficient. Conducted skills: `/superpowers:*` are plugin skills;
+   necessary, never sufficient. **Carry the effort router into the dispatch prompt** — the subagent
+   inherits your `auto` and takes no effort argument, so the prompt must spell out which steps run
+   at `high` (6.2 and 6.6) in words. Conducted skills: `/superpowers:*` are plugin skills;
    `/code-review`, `/codex`, `/document-release` are **environment-provided** commands (verified
    by `/conductor:start` preflight):
    0. **Reconcile-within-phase (restart safety):** diff the phase's `- [ ]` tasks against
@@ -99,16 +120,18 @@ step 3b's terminal crontab removal.
       per-assertion state; skip tasks already done. A dirty tree left by a dead worker: commit it
       to the phase branch as `wip: reclaimed partial work` — never discard it, never build over
       it blind.
-   1. `/superpowers:subagent-driven-development` to implement the phase's tasks — on a phase
-      branch forked from the RUN branch (never from the default branch when a run branch is
+   1. `/superpowers:subagent-driven-development` to implement the phase's tasks (**`auto`**) — on a
+      phase branch forked from the RUN branch (never from the default branch when a run branch is
       configured).
-   2. `/code-review` (self-review) per task — review against the phase's Spec sections, not just
-      the diff. 3. **commit after every task.**
-   4. **one PR per phase, base = the RUN branch** (`Closes #<phase-issue>` for traceability —
-      merge-gate blocks without it, and its base leg blocks any other base with
+   2. `/code-review` (self-review) per task at **`high`** — review against the phase's Spec
+      sections, not just the diff. 3. **commit after every task.**
+   4. **one PR per phase, base = the RUN branch** (**`auto`**; `Closes #<phase-issue>` for
+      traceability — merge-gate blocks without it, and its base leg blocks any other base with
       `base-mismatch`; run-branch merges don't auto-close issues — `phase-done` does that).
    5. `/codex $superpowers:requesting-code-review Please provide a read-only, pre-merge review for
-      PR#<n> against the phase's Spec sections` — post the result as a PR comment starting with the
+      PR#<n> against the phase's Spec sections` — Codex's own effort comes from the codex wrapper's
+      `model_reasoning_effort`, NOT from `/effort`, so do not try to route it here — post the
+      result as a PR comment starting with the
       gate's review marker (**`CONDUCTOR_REVIEW_MARKER`, default "Codex review"**).
       **Codex usage-limit fallback — continue uninterrupted, never stall.** If `/codex` reports its
       5-hour OR weekly usage limit is exhausted (its stderr/stdout names a usage/rate/quota limit,
@@ -135,7 +158,9 @@ step 3b's terminal crontab removal.
       phase traded Codex's independence for Claude's — flag it for optional independent re-review.
       The open `debt` issue rides the handoff's `Open:` line to the final owner PR, where YOU decide;
       it SURFACES the degradation, it does not silently repair it. Keep working.
-   6. `/superpowers:receiving-code-review` — apply fixes, commit, then **codex re-reviews the
+   6. `/superpowers:receiving-code-review` at **`high`** (applying self-review and codex-review
+      fixes is `high` work; so are the fallback `/code-review` rounds) — apply fixes, commit,
+      then **codex re-reviews the
       FINAL state** (posted as another "Codex review" comment; if Codex is still usage-limited the
       step-5 fallback applies again — `/code-review` the final state under the same configured
       marker); repeat until the last review postdates the last commit and raises nothing blocking.
@@ -153,7 +178,8 @@ step 3b's terminal crontab removal.
    Capture `baseline_revision..final_revision` (equal = did nothing). Respect the per-fire budget
    (checkpoint+handoff if exceeded).
 7. **ESCALATION (§9):** patch-later → `escalate.file_followup(debt|feature)`+link; continue.
-   build-now → bounded deepen-in-place: `/superpowers:writing-plans` scoped → generate sub-plan;
+   build-now → bounded deepen-in-place at **`xhigh`** (sub-planning is planning work):
+   `/superpowers:writing-plans` scoped → generate sub-plan;
    `escalate.block_on_subplan(phase)`; on completion `escalate.write_adr`. build-now AND needs
    human judgment → **halt** with handoff+issue (only branch that pages the user). Process failure
    → exit; next fire reconciles (§10).

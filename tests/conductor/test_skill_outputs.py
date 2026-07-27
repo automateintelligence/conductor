@@ -38,6 +38,14 @@ def test_autodev_skill_contract():
         "not with --admin, not at all",
         "base = the run branch",
         "run_branch",
+        # effort router: same model, three efforts; set inside the fire, carried by prompt
+        "effort router",
+        "the model never changes",
+        "/effort auto",
+        "/effort xhigh",
+        "reason at high effort",
+        "no effort parameter",
+        "model_reasoning_effort",
     ]:
         assert needle in body, needle
 
@@ -75,6 +83,13 @@ def test_start_skill_contract():
         "worktree",
         "conductor_allow_direct_main_merge=1",
         "base-mismatch",
+        # effort router: setup/research/plan is xhigh; the recipe carries auto/high into plans
+        "effort router",
+        "the model never changes",
+        "/effort xhigh",
+        "no effort parameter",
+        "implement, pr, merge, release at `auto`",
+        "not inherited across the cron boundary",
     ]:
         assert needle in body, needle
 
@@ -92,6 +107,9 @@ def test_assertions_to_tests_skill_contract():
         "red-team",
         "worse than none",
         "exists-but-unused",
+        # effort router: building the done-gate is setup work
+        "effort router",
+        "/effort xhigh",
     ]:
         assert needle in body, needle
 
@@ -113,5 +131,8 @@ def test_prepare_skill_contract():
         "ready for `/conductor:start`",
         "never guess",
         "gate verify",
+        # effort router: brownfield alignment is setup/plan work
+        "effort router",
+        "/effort xhigh",
     ]:
         assert needle in body, needle

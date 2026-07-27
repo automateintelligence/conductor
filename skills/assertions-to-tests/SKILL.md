@@ -22,6 +22,12 @@ test and one manifest entry, traceable by `id`. **Use `/superpowers:test-driven-
 > `CONDUCTOR_ASSERTIONS_SOURCE`) already; invoked standalone with no run set up yet, `conductor
 > gate-dir <spec>` still names the dir and you export the slug yourself.
 
+> **EFFORT — `xhigh`.** Building the done-gate is run setup, which the effort router puts at
+> `xhigh`. Driven by `/conductor:start` you inherit that level; invoked standalone, run
+> **`/effort xhigh`** first. Step 3's red-teaming is the reason: a weak check gets FROZEN and then
+> certifies fake completion, so never red-team below `xhigh`. Same model throughout (the default,
+> Opus 5) — only effort varies.
+
 For each assertion spec:
 
 1. **Pick a stable `id`** (kebab-case from the claim, e.g. `unknown-code-404`). Keep it stable

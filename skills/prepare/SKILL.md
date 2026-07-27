@@ -18,6 +18,13 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
 
 > **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
 > below); installed plugins are not on `PATH`. Run from the project root.
+>
+> **EFFORT — `xhigh` for this whole skill.** Brownfield alignment is run setup, research, and plan
+> work, which the effort router puts at `xhigh`: run **`/effort xhigh`** before step 0 and hold it
+> through the step-2 plan fixes and the step-3 ambiguity calls. The model NEVER changes — it is
+> always the default (Opus 5); only the effort does. `/effort` is session-scoped and the
+> `Agent`/Task tool has no effort parameter, so any subagent you dispatch inherits this level —
+> restate "reason at xhigh effort" in its prompt.
 
 0. **INVENTORY.** Locate: the spec (with `## Expectations`), `<spec>.assertions.md`, the run's
    done-gate — the per-spec `assertions/<slug>/manifest.yaml` + `.frozen` (`<slug>` =
