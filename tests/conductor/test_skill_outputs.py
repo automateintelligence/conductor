@@ -38,6 +38,11 @@ def test_autodev_skill_contract():
         "not with --admin, not at all",
         "base = the run branch",
         "run_branch",
+        # the decisions leg: ADRs reach the worker, bind it, and get cited when written
+        "**adrs:**",
+        "an adr binds the phase exactly as its",
+        "never quietly build against a closed decision",
+        "cite that adr",
     ]:
         assert needle in body, needle
 
@@ -75,6 +80,10 @@ def test_start_skill_contract():
         "worktree",
         "conductor_allow_direct_main_merge=1",
         "base-mismatch",
+        # the plan MUST carry the decisions pointer, and `none` is the explicit answer
+        "**adrs:**",
+        "**adrs:** none",
+        "adr dir",
     ]:
         assert needle in body, needle
 
@@ -113,5 +122,9 @@ def test_prepare_skill_contract():
         "ready for `/conductor:start`",
         "never guess",
         "gate verify",
+        # the mechanical migration path for the required **ADRs:** line
+        "backfill",
+        "**adrs:** none",
+        "phase-no-adr-pointer",
     ]:
         assert needle in body, needle

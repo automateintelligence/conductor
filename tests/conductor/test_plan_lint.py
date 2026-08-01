@@ -13,6 +13,7 @@ one PR per phase (`Closes #<phase-issue>`) → codex review ×2 → `conductor m
 ## Phase 1 — Scoring (A3, A4)
 
 **Spec:** §6 Metrics; §7 Scoring & Decision Rule
+**ADRs:** ADR-004 Scoring rule is frozen; ADR-011 No per-tenant weights
 
 - [ ] Write failing tests
 - [ ] Implement scoring
@@ -20,6 +21,7 @@ one PR per phase (`Closes #<phase-issue>`) → codex review ×2 → `conductor m
 ## Phase 2 — Reporting (A8)
 
 **Spec:** §10 Sample Report
+**ADRs:** none
 
 - [ ] Implement report
 """
@@ -79,7 +81,8 @@ def test_old_dialect_phase_headings_also_lint():
     text = (
         "# T\n\n**Normative spec:** s.md\n\n"
         "codex /code-review merge-gate closes #\n\n"
-        "## Backend [ready]\n\n**Spec:** §2\n\ngate: none\n\n- [ ] build it\n"
+        "## Backend [ready]\n\n**Spec:** §2\n**ADRs:** none\n\ngate: none\n\n"
+        "- [ ] build it\n"
     )
     assert plan_lint.lint(text) == []
 
@@ -138,3 +141,136 @@ def test_blank_checkbox_line_is_not_a_task():
     text = GOOD_PLAN.replace("- [ ] Implement report", "- [x] ")
     reasons = plan_lint.lint(text)
     assert "phase-no-tasks:Phase 2 — Reporting (A8)" in reasons
+
+
+# --- **ADRs:** pointer line (0.9.0) ----------------------------------------------------
+# Live finding 2026-08-01: two architectural decisions existed ONLY in ADRs, so nothing
+# carried them to a worker resuming a later phase, which could undo either while the
+# done-gate stayed green. The line is required so silence and "none apply" look different.
+
+
+def test_phase_without_adr_pointer_flagged():
+    text = GOOD_PLAN.replace("**ADRs:** none\n", "")
+    reasons = plan_lint.lint(text)
+    assert "phase-no-adr-pointer:Phase 2 — Reporting (A8)" in reasons
+
+
+def test_adrs_none_is_valid_and_explicit():
+    # GOOD_PLAN's phase 2 already says `none`; the whole plan lints clean.
+    assert plan_lint.lint(GOOD_PLAN) == []
+    annotated = GOOD_PLAN.replace(
+        "**ADRs:** none", "**ADRs:** none (no closed decision constrains reporting)"
+    )
+    assert plan_lint.lint(annotated) == []
+
+
+def test_well_formed_id_lists_pass():
+    for value in (
+        "ADR-012",
+        "ADR-012; ADR-016",
+        "ADR-012 Shared retrieval spine, revisited; adr 7",
+        "docs/adr/0001-drift-to-mop-query-path.md",
+        "ADR-012; docs/adr/ADR-016-context-budget.md",
+    ):
+        text = GOOD_PLAN.replace("**ADRs:** none", f"**ADRs:** {value}")
+        assert plan_lint.lint(text) == [], value
+
+
+def test_malformed_adr_references_flagged():
+    for value in ("TBD", "see the design doc", "ADR-", "ADR-XYZ"):
+        text = GOOD_PLAN.replace("**ADRs:** none", f"**ADRs:** {value}")
+        reasons = plan_lint.lint(text)
+        assert f"phase-adr-malformed:Phase 2 — Reporting (A8):{value}" in reasons, value
+
+
+def test_one_bad_fragment_in_a_list_is_flagged_alone():
+    text = GOOD_PLAN.replace("**ADRs:** none", "**ADRs:** ADR-012; TBD the other one")
+    reasons = plan_lint.lint(text)
+    assert reasons == ["phase-adr-malformed:Phase 2 — Reporting (A8):TBD the other one"]
+
+
+def test_empty_adr_line_is_not_compliance():
+    # The line present with no value is silence wearing the line's clothes.
+    text = GOOD_PLAN.replace("**ADRs:** none", "**ADRs:**")
+    reasons = plan_lint.lint(text)
+    assert "phase-adr-empty:Phase 2 — Reporting (A8)" in reasons
+
+
+def test_adr_line_does_not_satisfy_the_spec_pointer():
+    # Two independent bindings: dropping Spec must still fail even with ADRs present.
+    text = GOOD_PLAN.replace("**Spec:** §10 Sample Report\n", "")
+    reasons = plan_lint.lint(text)
+    assert "phase-no-spec-pointer:Phase 2 — Reporting (A8)" in reasons
+    assert not any(r.startswith("phase-no-adr-pointer") for r in reasons)
+
+
+def test_annotated_adr_pointer_accepted():
+    # Same annotated dialect the Spec pointer grew.
+    text = GOOD_PLAN.replace(
+        "**ADRs:** none",
+        "**ADRs — REQUIRED READING (these are closed; do not relitigate):** ADR-012",
+    )
+    assert plan_lint.lint(text) == []
+
+
+def _plan_citing(value: str) -> str:
+    """GOOD_PLAN with `value` as the ONLY ADR reference in the whole plan."""
+    return GOOD_PLAN.replace(
+        "**ADRs:** ADR-004 Scoring rule is frozen; ADR-011 No per-tenant weights",
+        "**ADRs:** none",
+    ).replace(
+        "**ADRs:** none\n\n- [ ] Implement report",
+        f"**ADRs:** {value}\n\n- [ ] Implement report",
+    )
+
+
+def test_dangling_id_warns_when_the_repo_has_an_adr_dir(tmp_path):
+    adr_dir = tmp_path / "docs" / "adr"
+    adr_dir.mkdir(parents=True)
+    (adr_dir / "ADR-012-shared-retrieval-spine.md").write_text("x")
+    warns = plan_lint.adr_warnings(_plan_citing("ADR-012; ADR-999"), str(tmp_path))
+    assert warns == ["warn:phase-adr-dangling:Phase 2 — Reporting (A8):ADR-999"]
+
+
+def test_dangling_path_warns_only_when_its_dir_exists(tmp_path):
+    (tmp_path / "docs" / "adr").mkdir(parents=True)
+    ref = "docs/adr/ADR-012-shared-retrieval-spine.md"
+    assert plan_lint.adr_warnings(_plan_citing(ref), str(tmp_path)) == [
+        f"warn:phase-adr-dangling:Phase 2 — Reporting (A8):{ref}"
+    ]
+    elsewhere = "docs/decisions/ADR-012.md"
+    assert plan_lint.adr_warnings(_plan_citing(elsewhere), str(tmp_path)) == []
+
+
+def test_unpadded_and_padded_ids_resolve_to_the_same_adr(tmp_path):
+    adr_dir = tmp_path / "docs" / "adr"
+    adr_dir.mkdir(parents=True)
+    (adr_dir / "0001-drift-to-mop-query-path.md").write_text("x")
+    assert plan_lint.adr_warnings(_plan_citing("ADR-1"), str(tmp_path)) == []
+
+
+def test_no_adr_dir_means_no_id_warnings(tmp_path):
+    # Plans are routinely written before the ADRs land — unverifiable is not dangling.
+    assert plan_lint.adr_warnings(_plan_citing("ADR-999"), str(tmp_path)) == []
+
+
+def test_dangling_warning_never_fails_the_lint(tmp_path):
+    (tmp_path / "docs" / "adr").mkdir(parents=True)
+    text = _plan_citing("ADR-999")
+    assert plan_lint.adr_warnings(text, str(tmp_path)) != []
+    assert plan_lint.lint(text) == []
+
+
+def test_main_prints_warnings_but_exits_zero(tmp_path, capsys):
+    (tmp_path / "docs" / "adr").mkdir(parents=True)
+    plan = tmp_path / "plan.md"
+    plan.write_text(_plan_citing("ADR-999"))
+    assert plan_lint.main([str(plan)]) == 0
+    assert "warn:phase-adr-dangling:" in capsys.readouterr().err
+
+
+def test_main_exits_one_on_a_missing_adr_line(tmp_path, capsys):
+    plan = tmp_path / "plan.md"
+    plan.write_text(GOOD_PLAN.replace("**ADRs:** none\n", ""))
+    assert plan_lint.main([str(plan)]) == 1
+    assert "phase-no-adr-pointer:" in capsys.readouterr().err
