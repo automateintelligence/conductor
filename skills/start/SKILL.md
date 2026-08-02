@@ -82,9 +82,13 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      indistinguishable from "considered, and none apply". Without this line nothing carries a
      decision to the worker who could undo it: a decision recorded ONLY in an ADR is invisible to
      both the plan and the gate, so a later phase can relitigate it with every check still green
-     (live finding 2026-08-01). `conductor plan-lint` fails on a missing/empty line and on
-     unparsable references, and WARNS (never fails) on a reference no ADR file matches — plans are
-     routinely written before the ADRs they cite land;
+     (live finding 2026-08-01). One pointer line per phase, and `none` is only an answer as the
+     WHOLE value — `none; ADR-9` claims both that no decision applies and that one does, so the
+     lint rejects it rather than silently keeping the `none`. `conductor plan-lint` fails on a
+     missing line (`phase-no-adr-pointer`), on a value that is empty or only delimiters
+     (`phase-adr-empty`), on unparsable references (`phase-adr-malformed`), and on two pointer
+     lines in one phase (`phase-adr-duplicate`); it WARNS (never fails) on a reference no ADR file
+     matches — plans are routinely written before the ADRs they cite land;
    - the per-phase recipe verbatim: subagent implement on a phase branch forked FROM THE RUN
      BRANCH → `/code-review` per task (against the phase's Spec sections and ADRs, not just the
      diff) →

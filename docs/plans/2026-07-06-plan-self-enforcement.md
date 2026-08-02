@@ -72,6 +72,8 @@ owner decision (inherit Claude Code's permission model, NO conductor-specific fl
 bypass warning/acknowledgment and (B) less-privileged dry-run cases, the fail-closed posture
 resolution invariant, and the open implementation question about mode detection.
 
+**ADRs:** none
+
 **Files:**
 - Create: `conductor/authority.py`
 - Modify: `bin/conductor` (add `authority` dispatch + usage line)
@@ -227,6 +229,8 @@ resolution invariant, and the open implementation question about mode detection.
 
 **Spec:** §"Phase 2 — README 'Unattended authority' + canonical bypass spelling (review A-2, A-9)".
 
+**ADRs:** none
+
 **Files:**
 - Modify: `README.md` (add an "Unattended authority" subsection under "## Use" → "### 3. Walk away")
 - Modify: `experiments/E5-end-to-end/recovery.md` (canonical bypass spelling)
@@ -266,6 +270,8 @@ resolution invariant, and the open implementation question about mode detection.
 ## Phase 3 — Posture visibility in the generated driver (a5-posture-label-reflects-flags)
 
 **Spec:** §"Phase 3 — Posture visibility in the generated driver (review A-4, A-6)".
+
+**ADRs:** none
 
 **Files:**
 - Modify: `conductor/resume_script.py` (`render`: posture derivation + labeled `fire-start`;
@@ -315,6 +321,8 @@ resolution invariant, and the open implementation question about mode detection.
 **Spec:** §"Phase 4 — `conductor gate lint`: frozen-gate quality + integrity (review B-4)" —
 including the deliberate Boundary note: lint catches only the mechanically-detectable holes;
 judgment-requiring weaknesses stay with the `/conductor:assertions-to-tests` red-team step.
+
+**ADRs:** none
 
 **Files:**
 - Create: `conductor/gate_lint.py`
@@ -409,6 +417,8 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
 **Spec:** §"Phase 5 — Single-sourced identifiers: `run-branch name` + `default-branch` (review B-5)"
 — mirror the `conductor remote` precedent: one implementation per cross-skill string contract.
 
+**ADRs:** none
+
 **Files:**
 - Create: `conductor/branches.py`
 - Modify: `bin/conductor` (dispatch `run-branch` and `default-branch` + usage),
@@ -491,6 +501,8 @@ throughout: unparseable command → reject; unparseable (SyntaxError) test file 
 
 **Spec:** §"Phase 6 — `conductor driver install|status`: unconditional Tier-B + cron ownership
 (review B-3, B-6)".
+
+**ADRs:** none
 
 **Files:**
 - Create: `conductor/driver.py`

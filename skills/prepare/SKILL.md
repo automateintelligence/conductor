@@ -49,11 +49,20 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
    complete diff, apply on approval. `none` is the honest default — it states that no decision is
    recorded for that phase, which is exactly true of a pre-0.9.0 plan — and it is a real answer,
    not a silencer: the requirement exists so "nobody checked" stops looking like "none apply".
+   **Show the ADR inventory from step 0 NEXT TO the backfill diff, and say plainly that `none`
+   here means "not yet reviewed against these".** A repo with no ADR dir makes `none` true by
+   construction; a repo WITH ADRs on disk does not, and blanket-`none`-ing those phases would
+   rebuild the exact ambiguity this line exists to remove — an applicable decision existing while
+   the plan records nothing. So when the dir is non-empty, walk the owner through it per phase and
+   get an explicit "none applies" before writing `none` there.
    Where the owner KNOWS an ADR constrains a phase, replace `none` with the reference at that
    point; **prepare never guesses which ADRs apply** (same rule as ledger alignment). Then rerun
    the lint. `plan-lint` also prints `warn:phase-adr-dangling:<phase>:<ref>` for a reference no
    file under `docs/adr/` matches — surface those to the owner; they never block (a plan may
-   legitimately cite an ADR that has not landed yet).
+   legitimately cite an ADR that has not landed yet). Two other codes come from the same leg:
+   `phase-adr-duplicate:<title>` (two pointer lines in one phase — merge them; the backfill can
+   cause this by inserting above a line the author already wrote) and `phase-adr-empty:<title>`
+   for a value that is only delimiters or emphasis.
 3. **LEDGER ALIGNMENT — dry-run FIRST, always.** `conductor ledger align <plan.md>` and show
    the owner the report: matches (by **assertion-id set** — titles lie, id sets don't),
    renames planned for issues + milestone, unmatched phases/issues, ambiguities. Ambiguities →

@@ -30,6 +30,8 @@ _SPEC_POINTER = re.compile(r"(?im)^\s*(?:[>*-]\s*)*\*{0,2}spec\b[^:\n]*:")
 # "SUMO case roles are not adopted" and "extraction closes over the relation taxonomy, not
 # the synonym map" — existed only in ADRs and appeared in neither spec nor plan).
 # The value is captured so the referenced ids can be checked for well-formedness.
+# `adrs?` accepts the singular `**ADR:**` deliberately — same leniency `_SPEC_POINTER` has,
+# and a plural-only rule would fail a phase that correctly names its one decision.
 _ADR_POINTER = re.compile(
     r"(?im)^[ \t]*(?:[>*-][ \t]*)*\*{0,2}adrs?\b[^:\n]*:[ \t]*(.*)$"
 )
@@ -41,7 +43,9 @@ _ADR_PATH = re.compile(r"(?i)\b[\w./-]+\.md\b")
 # silence must not be indistinguishable from "considered, and none apply".
 _ADR_NONE = re.compile(r"(?i)^none\b")
 # Markdown emphasis around the value: "**ADRs:** ADR-1" captures "** ADR-1".
-_EMPHASIS = " \t*`_"
+# `\r` is in the set so a CRLF plan's empty line reports `phase-adr-empty`, not a
+# `phase-adr-malformed:…:\r` (the capture is `(.*)$`, and `.` matches `\r`).
+_EMPHASIS = " \t\r*`_"
 # Where ADRs conventionally live; used ONLY for the cheap dangling-reference warning.
 _ADR_DIRS = ("docs/adr", "docs/ADR", "docs/adrs", "docs/decisions")
 
@@ -57,25 +61,36 @@ def _phase_sections(text: str) -> Iterator[tuple[tuple[str, str, list[str]], str
         yield parsed, text[m.end() : end]
 
 
-def _adr_value(section: str) -> str | None:
-    """The phase's `**ADRs:**` value, or None when the line is absent entirely."""
-    m = _ADR_POINTER.search(section)
-    return None if m is None else m.group(1).strip(_EMPHASIS)
+def _adr_values(section: str) -> list[str]:
+    """Every `**ADRs:**` value in the phase, in document order (empty when none).
+
+    ALL of them, not just the first: a backfilled `**ADRs:** none` inserted after the
+    `**Spec:**` line sits ABOVE any pointer the author already wrote further down, so
+    first-match-wins would let the inserted line shadow — and silently validate — a
+    malformed or contradictory one below it."""
+    return [m.group(1).strip(_EMPHASIS) for m in _ADR_POINTER.finditer(section)]
+
+
+def _adr_fragments(value: str) -> list[str]:
+    """The value's non-empty semicolon-separated fragments.
+
+    Semicolon-separated, matching the `**Spec:** §6 Metrics; §7 Scoring` convention, so a
+    comma inside an ADR's title stays inside its fragment. Empty when the value carries no
+    fragment at all (`;`, `;;`) — delimiters are not an answer."""
+    return [f for f in (raw.strip(_EMPHASIS) for raw in value.split(";")) if f]
 
 
 def _adr_refs(value: str) -> tuple[list[str], list[str]]:
-    """(well-formed references, unparsable fragments) for an `**ADRs:**` value.
-
-    Semicolon-separated, matching the `**Spec:** §6 Metrics; §7 Scoring` convention, so a
-    comma inside an ADR's title stays inside its fragment."""
-    if _ADR_NONE.match(value):
+    """(well-formed references, unparsable fragments) for an `**ADRs:**` value."""
+    frags = _adr_fragments(value)
+    # `none` is the explicit "none apply" ONLY as the whole value. `none; ADR-9` asserts
+    # both that no decision applies and that one does, so it is parsed as an ordinary
+    # fragment and reported malformed rather than silently truncating to `none`.
+    if len(frags) == 1 and _ADR_NONE.match(frags[0]):
         return [], []
     refs: list[str] = []
     bad: list[str] = []
-    for raw in value.split(";"):
-        frag = raw.strip(_EMPHASIS)
-        if not frag:
-            continue
+    for frag in frags:
         # Paths first, then ids from what is LEFT — `docs/adr/ADR-012-spine.md` is one
         # reference, not a path plus the id embedded in its filename.
         found = _ADR_PATH.findall(frag) + _ADR_ID.findall(_ADR_PATH.sub(" ", frag))
@@ -115,12 +130,19 @@ def lint(text: str, spec_path: str | None = None) -> list[str]:
             reasons.append(f"phase-no-spec-pointer:{title}")
         # The decisions leg of the same binding. `**ADRs:** none` passes; a MISSING line
         # is a failure, because "nobody checked" must not look like "none apply".
-        adr_value = _adr_value(section)
-        if adr_value is None:
+        adr_values = _adr_values(section)
+        if not adr_values:
             reasons.append(f"phase-no-adr-pointer:{title}")
-        elif not adr_value:
-            reasons.append(f"phase-adr-empty:{title}")
-        else:
+        # Two pointer lines in one phase leave the worker to guess which binds — the
+        # likeliest source is a backfill or a merge landing beside an existing line.
+        if len(adr_values) > 1:
+            reasons.append(f"phase-adr-duplicate:{title}")
+        for adr_value in adr_values:
+            # Delimiters or emphasis with nothing between them are silence wearing the
+            # line's clothes, exactly like the wholly empty value.
+            if not _adr_fragments(adr_value):
+                reasons.append(f"phase-adr-empty:{title}")
+                continue
             for frag in _adr_refs(adr_value)[1]:
                 reasons.append(f"phase-adr-malformed:{title}:{frag}")
         # A phase without assertion ids can't be gate-verified downstream (--from-gate /
@@ -139,23 +161,35 @@ def lint(text: str, spec_path: str | None = None) -> list[str]:
 
 
 def _id_matches(ref: str, filename: str) -> bool:
-    """`ADR-12` matches `adr-012-foo.md` and `0012-foo.md`, never `120-foo.md`."""
+    """`ADR-12` matches `adr-012-foo.md` and `0012-foo.md`, never `120-foo.md`.
+
+    The number must occupy the filename's LEADING number slot — bare, or behind an `adr`
+    prefix. Matching it anywhere would let `2026-08-12-unrelated.md` resolve `ADR-12` and
+    silently swallow the dangling-reference warning."""
     digits = re.search(r"\d+", ref)
     if digits is None:
         return False
-    return re.search(rf"(?<!\d)0*{int(digits.group(0))}(?!\d)", filename) is not None
+    n = int(digits.group(0))
+    return re.match(rf"(?:adr[-_ ]?)?0*{n}(?!\d)", filename) is not None
 
 
 def _adr_index(root: str) -> list[str] | None:
     """Lowercased filenames across root's conventional ADR dirs, or None when the repo
-    has no ADR dir at all — an EMPTY dir is checkable ([]), a missing one is not."""
+    has no ADR dir at all — an EMPTY dir is checkable ([]), a missing one is not.
+
+    An unreadable dir reads as unindexable (None), never as an exception: this whole leg
+    is advisory, and a warning must not be able to take down a lint that would pass."""
     names: list[str] = []
     found = False
     for d in _ADR_DIRS:
         p = os.path.join(root, d)
         if os.path.isdir(p):
+            try:
+                entries = os.listdir(p)
+            except OSError:
+                continue
             found = True
-            names.extend(n.lower() for n in os.listdir(p))
+            names.extend(n.lower() for n in entries)
     return names if found else None
 
 
@@ -168,18 +202,18 @@ def adr_warnings(text: str, root: str) -> list[str]:
     warns: list[str] = []
     index = _adr_index(root)
     for (title, _status, _ids), section in _phase_sections(text):
-        value = _adr_value(section)
-        if not value:
-            continue
-        for ref in _adr_refs(value)[0]:
-            if ref.lower().endswith(".md"):
-                target = os.path.join(root, ref)
-                if os.path.isdir(os.path.dirname(target)) and not os.path.exists(
-                    target
-                ):
+        for value in _adr_values(section):
+            if not value:
+                continue
+            for ref in _adr_refs(value)[0]:
+                if ref.lower().endswith(".md"):
+                    target = os.path.join(root, ref)
+                    if os.path.isdir(os.path.dirname(target)) and not os.path.exists(
+                        target
+                    ):
+                        warns.append(f"warn:phase-adr-dangling:{title}:{ref}")
+                elif index is not None and not any(_id_matches(ref, n) for n in index):
                     warns.append(f"warn:phase-adr-dangling:{title}:{ref}")
-            elif index is not None and not any(_id_matches(ref, n) for n in index):
-                warns.append(f"warn:phase-adr-dangling:{title}:{ref}")
     return warns
 
 
@@ -220,7 +254,14 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"plan-unreadable: {exc}", file=sys.stderr)
         return 2
-    for warning in adr_warnings(text, _project_root(args.plan_md)):
+    # Belt to _adr_index's braces: the warning leg is advisory end to end, so ANY failure
+    # resolving it (unreadable dir, vanished path, permission change mid-walk) costs the
+    # warnings and nothing else. The lint's verdict is never the warning leg's to change.
+    try:
+        warnings = adr_warnings(text, _project_root(args.plan_md))
+    except OSError as exc:
+        warnings = [f"warn:phase-adr-unresolvable: {exc}"]
+    for warning in warnings:
         print(warning, file=sys.stderr)
     reasons = lint(text, spec_path=args.spec)
     for reason in reasons:

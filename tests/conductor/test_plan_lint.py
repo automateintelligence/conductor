@@ -1,3 +1,8 @@
+import glob
+import os
+
+import pytest
+
 from conductor import plan_lint
 
 GOOD_PLAN = """\
@@ -274,3 +279,99 @@ def test_main_exits_one_on_a_missing_adr_line(tmp_path, capsys):
     plan.write_text(GOOD_PLAN.replace("**ADRs:** none\n", ""))
     assert plan_lint.main([str(plan)]) == 1
     assert "phase-no-adr-pointer:" in capsys.readouterr().err
+
+
+# --- codex PR-80 review: the value grammar's holes ------------------------------------
+# Every case below lint()ed CLEAN before the fix, so the line could be present, required,
+# and still say nothing — the exact defect the required line exists to remove.
+
+
+def test_delimiters_only_are_not_an_answer():
+    for value in (";", ";;", " ; ", "**"):
+        text = GOOD_PLAN.replace("**ADRs:** none", f"**ADRs:** {value}")
+        reasons = plan_lint.lint(text)
+        assert "phase-adr-empty:Phase 2 — Reporting (A8)" in reasons, value
+
+
+def test_trailing_semicolon_after_a_real_reference_still_passes():
+    # A stray delimiter is a typo, not silence, once something real is on the line.
+    text = GOOD_PLAN.replace("**ADRs:** none", "**ADRs:** ADR-012;")
+    assert plan_lint.lint(text) == []
+
+
+def test_none_beside_a_reference_is_a_contradiction():
+    # "no decision applies" AND "this decision applies" cannot both hold; before the fix
+    # `^none` matched and everything after it was discarded silently.
+    for value in ("none; ADR-999", "none; TBD", "None; docs/adr/0001-x.md"):
+        text = GOOD_PLAN.replace("**ADRs:** none", f"**ADRs:** {value}")
+        reasons = plan_lint.lint(text)
+        assert any(r.startswith("phase-adr-malformed:") for r in reasons), value
+
+
+def test_duplicate_adr_pointers_in_one_phase_are_flagged():
+    text = GOOD_PLAN.replace("**ADRs:** none", "**ADRs:** none\n**ADRs:** ADR-7")
+    assert "phase-adr-duplicate:Phase 2 — Reporting (A8)" in plan_lint.lint(text)
+
+
+def test_every_adr_pointer_is_validated_not_just_the_first():
+    # The backfill inserts `none` ABOVE an author's line, so first-match-wins would let
+    # the inserted line validate a malformed one below it.
+    text = GOOD_PLAN.replace("**ADRs:** none", "**ADRs:** none\n**ADRs:** TBD")
+    reasons = plan_lint.lint(text)
+    assert "phase-adr-malformed:Phase 2 — Reporting (A8):TBD" in reasons
+
+
+def test_crlf_empty_line_reports_empty_not_malformed():
+    text = GOOD_PLAN.replace("**ADRs:** none\n", "**ADRs:**\r\n")
+    reasons = plan_lint.lint(text)
+    assert "phase-adr-empty:Phase 2 — Reporting (A8)" in reasons
+    assert not any(r.startswith("phase-adr-malformed") for r in reasons)
+
+
+def test_id_resolves_only_against_the_leading_number_slot(tmp_path):
+    # `2026-08-12-…` must NOT resolve ADR-12 — a date would silently swallow the warning.
+    adr_dir = tmp_path / "docs" / "adr"
+    adr_dir.mkdir(parents=True)
+    (adr_dir / "2026-08-12-unrelated.md").write_text("x")
+    assert plan_lint.adr_warnings(_plan_citing("ADR-12"), str(tmp_path)) == [
+        "warn:phase-adr-dangling:Phase 2 — Reporting (A8):ADR-12"
+    ]
+    (adr_dir / "adr-12-real.md").write_text("x")
+    assert plan_lint.adr_warnings(_plan_citing("ADR-12"), str(tmp_path)) == []
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores mode 0o000, so the dir cannot be made unreadable",
+)
+def test_unreadable_adr_dir_never_fails_the_lint(tmp_path, capsys):
+    adr_dir = tmp_path / "docs" / "adr"
+    adr_dir.mkdir(parents=True)
+    plan = tmp_path / "plan.md"
+    plan.write_text(_plan_citing("ADR-999"))
+    adr_dir.chmod(0o000)
+    try:
+        # Unindexable is not dangling: no warning, and above all no traceback.
+        assert plan_lint.adr_warnings(plan.read_text(), str(tmp_path)) == []
+        assert plan_lint.main([str(plan)]) == 0
+    finally:
+        adr_dir.chmod(0o755)
+    assert "Traceback" not in capsys.readouterr().err
+
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def test_this_repos_own_current_dialect_plans_lint_clean():
+    """Conductor conducts itself: shipping a hard-error dialect whose only valid example
+    is a test fixture is an unfinished migration. Scoped by `**Normative spec:**` so the
+    pre-dialect 2026-06-28 plans (kept as history) stay out of it."""
+    plans = sorted(
+        p
+        for p in glob.glob(os.path.join(ROOT, "docs/plans/*.md"))
+        if "**Normative spec:**" in open(p, encoding="utf-8").read()
+    )
+    assert plans, "no current-dialect plan found — did docs/plans/ move?"
+    for path in plans:
+        text = open(path, encoding="utf-8").read()
+        assert plan_lint.lint(text) == [], os.path.basename(path)
