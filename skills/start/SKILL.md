@@ -57,7 +57,9 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    so the worker cannot later weaken a check; the runner fail-closes (exit 6) if a frozen
    assertion or its test file changes. SKIP if `.frozen` exists and `conductor gate verify` is clean.
 4. **Plan exists?** No → `/superpowers:writing-plans` (or spec-kit) in a fresh subagent — and
-   PASS IT the spec, its `## Expectations`, and `<spec>.assertions.md` paths as required inputs.
+   PASS IT the spec, its `## Expectations`, `<spec>.assertions.md`, and the repo's **ADR dir**
+   (`docs/adr/`, if any) as required inputs, instructing it to cite per phase the decisions that
+   constrain it.
    **The plan builds to the SPEC.** The executable assertions are only the mechanical done-floor
    that gates objective expectations; the spec's spirit and intent — architecture, behaviors,
    qualities — is the actual work, and there is far more of it than the assertions capture.
@@ -72,11 +74,27 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      into the ledger's machine-readable gate mapping). A deliberately gateless phase (rare —
      `phase-done` cannot gate-verify it) must declare `gate: none` in its section;
    - per phase: a `**Spec:** §N <section name>; …` pointer line and `- [ ]` task lines;
+   - per phase: an `**ADRs:** ADR-012 <name>; docs/adr/0001-<slug>.md; …` pointer line — the
+     decisions leg of the same binding, semicolon-separated like the `Spec:` line, naming every
+     architectural decision that constrains the phase. The worker reads them BEFORE implementing
+     and treats them as binding, exactly as it treats the `Spec:` sections. **`**ADRs:** none` is
+     valid and required when none apply; a MISSING line is a lint failure** — silence must not be
+     indistinguishable from "considered, and none apply". Without this line nothing carries a
+     decision to the worker who could undo it: a decision recorded ONLY in an ADR is invisible to
+     both the plan and the gate, so a later phase can relitigate it with every check still green
+     (live finding 2026-08-01). One pointer line per phase, and `none` is only an answer as the
+     WHOLE value — `none; ADR-9` claims both that no decision applies and that one does, so the
+     lint rejects it rather than silently keeping the `none`. `conductor plan-lint` fails on a
+     missing line (`phase-no-adr-pointer`), on a value that is empty or only delimiters
+     (`phase-adr-empty`), on unparsable references (`phase-adr-malformed`), and on two pointer
+     lines in one phase (`phase-adr-duplicate`); it WARNS (never fails) on a reference no ADR file
+     matches — plans are routinely written before the ADRs they cite land;
    - the per-phase recipe verbatim: subagent implement on a phase branch forked FROM THE RUN
-     BRANCH → `/code-review` per task (against the phase's Spec sections, not just the diff) →
+     BRANCH → `/code-review` per task (against the phase's Spec sections and ADRs, not just the
+     diff) →
      commit per task → one PR per phase with **base = the run branch** (`Closes #<phase-issue>`)
      → codex review ×2 — each run as `/codex $superpowers:requesting-code-review Please provide a
-     read-only, pre-merge review for PR#<pr> against the phase's Spec sections` — posted as "Codex
+     read-only, pre-merge review for PR#<pr> against the phase's Spec sections and ADRs` — posted as "Codex
      review" PR comments → `conductor merge-gate` → merge
      into the run branch → `/document-release` → `conductor ledger phase-done`.
    SKIP if a plan/milestone exists.
@@ -85,6 +103,10 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    fix the plan, never bypass the lint. Then codex-review the plan **against the spec** (does
    every spec section land in a phase? is intent preserved, not just assertion coverage?) and
    apply the fixes. SKIP only if both were already done for this plan.
+   **Upgraded conductor while a run was in flight? Rerun `/conductor:prepare` before resuming.**
+   A plan written before 0.9.0 has no `**ADRs:**` lines, and an in-flight run never comes back
+   through this step — `autodev` step 4b will refuse to claim its phases until the dialect is
+   backfilled. `prepare` step 2 is the migration; it is a one-line-per-phase mechanical fix.
 5. **issue-sync** — `ledger.generate` (or `convert <plan.md>`; the parser reads the real
    `## Phase N — Title (ids)` dialect directly and writes each phase's `conductor-assertions`
    marker). SKIP if the hierarchy exists; else reconcile. Phases authored `[draft]` are created

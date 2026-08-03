@@ -22,7 +22,8 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
 0. **INVENTORY.** Locate: the spec (with `## Expectations`), `<spec>.assertions.md`, the run's
    done-gate — the per-spec `assertions/<slug>/manifest.yaml` + `.frozen` (`<slug>` =
    `conductor gate-dir <spec>`), falling back to a flat legacy `assertions/manifest.yaml` +
-   `assertions/.frozen` — the plan(s) under `docs/plans/`, and the GitHub milestone/phase issues.
+   `assertions/.frozen` — the plan(s) under `docs/plans/`, the ADR dir (`docs/adr/`, if any —
+   step 2 needs it), and the GitHub milestone/phase issues.
    Report found/missing.
    - Spec or `<spec>.assertions.md` missing → STOP: point the owner at
      `/spec-craft:expectations` then `/spec-craft:executable-assertions` (prepare aligns
@@ -35,11 +36,33 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
    `conductor gate verify` must be clean; tampered → STOP and show the owner (re-freezing is
    an owner action, never prepare's).
 2. **PLAN EVALUATION.** `conductor plan-lint <plan.md> --spec <spec.md>`. On failures, FIX the
-   plan to compliance — normative-spec header, per-phase `Spec:` pointers, assertion ids in
+   plan to compliance — normative-spec header, per-phase `Spec:` pointers, per-phase `**ADRs:**`
+   pointers, assertion ids in
    headings (or explicit `gate: none`), `- [ ]` tasks, the per-phase recipe — the spec is
    normative for content; show the owner the diff before committing it. Then codex-review the
    plan **against the spec** (does every spec section land in a phase? intent preserved?) and
    apply fixes. Lint must exit 0 before step 3.
+   **`**ADRs:**` BACKFILL — this is the migration path for the 0.9.0 plan dialect; dry-run
+   FIRST, like everything else here.** Any plan written before 0.9.0 has no `**ADRs:**` lines, so
+   EVERY phase now fails lint with `phase-no-adr-pointer:<title>`. Mechanical fix: insert
+   `**ADRs:** none` immediately after each phase's `**Spec:**` pointer line, show the owner the
+   complete diff, apply on approval. `none` is the honest default — it states that no decision is
+   recorded for that phase, which is exactly true of a pre-0.9.0 plan — and it is a real answer,
+   not a silencer: the requirement exists so "nobody checked" stops looking like "none apply".
+   **Show the ADR inventory from step 0 NEXT TO the backfill diff, and say plainly that `none`
+   here means "not yet reviewed against these".** A repo with no ADR dir makes `none` true by
+   construction; a repo WITH ADRs on disk does not, and blanket-`none`-ing those phases would
+   rebuild the exact ambiguity this line exists to remove — an applicable decision existing while
+   the plan records nothing. So when the dir is non-empty, walk the owner through it per phase and
+   get an explicit "none applies" before writing `none` there.
+   Where the owner KNOWS an ADR constrains a phase, replace `none` with the reference at that
+   point; **prepare never guesses which ADRs apply** (same rule as ledger alignment). Then rerun
+   the lint. `plan-lint` also prints `warn:phase-adr-dangling:<phase>:<ref>` for a reference no
+   file under `docs/adr/` matches — surface those to the owner; they never block (a plan may
+   legitimately cite an ADR that has not landed yet). Two other codes come from the same leg:
+   `phase-adr-duplicate:<title>` (two pointer lines in one phase — merge them; the backfill can
+   cause this by inserting above a line the author already wrote) and `phase-adr-empty:<title>`
+   for a value that is only delimiters or emphasis.
 3. **LEDGER ALIGNMENT — dry-run FIRST, always.** `conductor ledger align <plan.md>` and show
    the owner the report: matches (by **assertion-id set** — titles lie, id sets don't),
    renames planned for issues + milestone, unmatched phases/issues, ambiguities. Ambiguities →

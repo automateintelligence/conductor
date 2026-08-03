@@ -86,12 +86,43 @@ step 3b's terminal crontab removal.
    - phase available → SPLIT-CHECK (§6.1); else run the recipe.
    - plan done → `/superpowers:writing-plans` next plan → `ledger.generate` (or `ledger.convert`).
    - no plans left but assertions red → `/superpowers:writing-plans` to close the gap → generate.
+4b. **DECISIONS PRECONDITION — fail-closed, BEFORE the claim.**
+   `gh issue view <phase-issue#> --json title -q .title | conductor plan-lint <plan.md> --phase -`
+   **Pipe the title in; never interpolate it into the command.** Real phase titles carry `"`,
+   `|`, and backticks — this repo's own plan has two — so a quoted `--phase "<title>"` is a
+   quoting bug waiting for the wrong phase. `--phase -` reads it from stdin, which has no
+   quoting failure mode. Exit 0 → it prints this phase's ADR references on
+   stdout; keep them for step 6. Exit non-zero → **do not claim, do not implement.** Escalate
+   needs-human (§9) and STOP the run: this is the one precondition a worker cannot satisfy
+   itself, because the missing decisions are exactly what it would need in order to know what
+   it must not undo. Guard the escalation against duplicates — if a needs-human issue for this
+   is already open, just write the handoff and exit; every later fire re-checks and re-halts
+   until an owner fixes the plan, so it must not file a new issue each time.
+   **This is the decisions leg ONLY, never the full `plan-lint`** — deliberately. The full lint
+   stays out of a headless fire (an unrelated plan defect must not be able to stop a run with
+   nobody standing by); this one check must be in it, because without it an upgraded in-flight
+   run — a pre-0.9.0 plan that started before 0.9.0 and never goes back through `start`/`prepare`
+   — would keep working phases with nothing carrying their decisions, which is the exact failure
+   the `**ADRs:**` line exists to prevent. **Upgrading conductor mid-run? Rerun
+   `/conductor:prepare` before resuming** — that backfills the dialect and clears this halt.
 5. **CLAIM.** `ledger.claim(phase, worker, now_ts, ttl)`. If False, back off and re-pick.
 6. **EXECUTE the phase in a FRESH SUBAGENT** via the recipe (one PR per phase). **Build to the
    SPEC:** hand the subagent the plan's `Normative spec:` path plus this phase's `**Spec:**`
    sections and require reading them BEFORE implementing. The plan is a summary and the assertions
    are only the mechanical done-floor — the spec's spirit and intent is the work, so gate-green is
-   necessary, never sufficient. Conducted skills: `/superpowers:*` are plugin skills;
+   necessary, never sufficient.
+   **Build within the DECISIONS:** hand it the `**ADRs:**` references step 4b printed, and require
+   reading them BEFORE implementing, with the same force. **An ADR binds the phase exactly as its
+   Spec sections do** — it records a decision already made and closed, so the work is constrained
+   by it, not free to relitigate it. This is the leg that used to be missing: a decision that lives
+   only in an ADR is invisible to the plan AND to the gate, so a worker resuming a later phase can
+   undo it while every check stays green (live finding 2026-08-01 — "SUMO case roles are not
+   adopted" and "extraction closes over the relation taxonomy, not the synonym map" reached no
+   worker). `**ADRs:** none` is the plan author's explicit "none apply"; a MISSING line is a plan
+   defect, never permission — step 4b already refused to claim the phase over it, so you never
+   reach here blind. Believe an ADR is wrong? Escalate it (§9, patch-later or needs-human) and
+   keep building to it meanwhile — never quietly build against a closed decision.
+   Conducted skills: `/superpowers:*` are plugin skills;
    `/code-review`, `/codex`, `/document-release` are **environment-provided** commands (verified
    by `/conductor:start` preflight):
    0. **Reconcile-within-phase (restart safety):** diff the phase's `- [ ]` tasks against
@@ -102,13 +133,13 @@ step 3b's terminal crontab removal.
    1. `/superpowers:subagent-driven-development` to implement the phase's tasks — on a phase
       branch forked from the RUN branch (never from the default branch when a run branch is
       configured).
-   2. `/code-review` (self-review) per task — review against the phase's Spec sections, not just
-      the diff. 3. **commit after every task.**
+   2. `/code-review` (self-review) per task — review against the phase's Spec sections and ADRs,
+      not just the diff. 3. **commit after every task.**
    4. **one PR per phase, base = the RUN branch** (`Closes #<phase-issue>` for traceability —
       merge-gate blocks without it, and its base leg blocks any other base with
       `base-mismatch`; run-branch merges don't auto-close issues — `phase-done` does that).
    5. `/codex $superpowers:requesting-code-review Please provide a read-only, pre-merge review for
-      PR#<n> against the phase's Spec sections` — post the result as a PR comment starting with the
+      PR#<n> against the phase's Spec sections and ADRs` — post the result as a PR comment starting with the
       gate's review marker (**`CONDUCTOR_REVIEW_MARKER`, default "Codex review"**).
       **Codex usage-limit fallback — continue uninterrupted, never stall.** If `/codex` reports its
       5-hour OR weekly usage limit is exhausted (its stderr/stdout names a usage/rate/quota limit,
@@ -154,7 +185,10 @@ step 3b's terminal crontab removal.
    (checkpoint+handoff if exceeded).
 7. **ESCALATION (§9):** patch-later → `escalate.file_followup(debt|feature)`+link; continue.
    build-now → bounded deepen-in-place: `/superpowers:writing-plans` scoped → generate sub-plan;
-   `escalate.block_on_subplan(phase)`; on completion `escalate.write_adr`. build-now AND needs
+   `escalate.block_on_subplan(phase)`; on completion `escalate.write_adr` — **then CITE that ADR
+   in the `**ADRs:**` line of every plan phase it constrains, in the same commit.** Writing the
+   ADR is only half the job: an uncited ADR reaches no future worker, which is the exact failure
+   step 6 exists to prevent. build-now AND needs
    human judgment → **halt** with handoff+issue (only branch that pages the user). Process failure
    → exit; next fire reconciles (§10).
 8. **RECORD — MECHANICAL, one command.** Phase complete = `conductor ledger phase-done
