@@ -1,162 +1,419 @@
 # tests/conductor/test_skill_outputs.py
+"""Contract tests for the conducted skills — needle PLUS the step that must contain it.
+
+These asserted `needle in body` against a whole lowercased SKILL.md, which proves a phrase
+exists somewhere in the file and nothing more. A refactor that moves an instruction out of
+the step a worker executes and into trailing prose keeps every needle green while the
+behavior is gone (issue #81; demonstrated on prepare's `**ADRs:**` backfill paragraph).
+
+So each needle now names the region that must contain it. Regions are declared as an ORDERED
+list of `(region_id, start_anchor)` per file; each region ends where the next one starts, and
+the last runs to EOF. Only the START is in the data, never the successor — otherwise
+inserting a step edits the key of the step before it, and every renumber churns unrelated
+entries. Renumbering a step is a one-line anchor edit; renaming one fails loudly, which is a
+real semantic change worth failing on.
+
+Reserved ids: `@frontmatter`, `@preamble` (standing rules before step 1, always resident).
+A needle anchored to `@preamble` also fails if it gets PROMOTED into a step — placement is
+checked in both directions.
+"""
+
 import os
+import re
+
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Ordered (region_id, start_anchor). Anchors are lowercase literals matched against the RAW
+# lowercased text — line structure is load-bearing, so they are NOT whitespace-normalized.
+# Every anchor is the full bolded step heading on purpose: short prefixes like `"3. "` are
+# not unique (autodev's step 6 contains a nested recipe renumbered 0.-8.).
+_REGIONS: dict[str, list[tuple[str, str]]] = {
+    "skills/autodev/SKILL.md": [
+        ("@frontmatter", "name: autodev"),
+        ("@preamble", "# /conductor:autodev — one phase per fire (§8)"),
+        ("1-reload-goal", "1. **re-load goal (fresh context).**"),
+        (
+            "1b-run-branch-current",
+            "1b. **keep the run branch current (every fire, before anything else builds).**",
+        ),
+        ("2-reconcile", "2. **reconcile (precedence git/tests > pr > label).**"),
+        ("3-spec-done-gate", "3. **spec-done gate.**"),
+        (
+            "3a-final-owner-pr",
+            "**3a. open the final owner pr (run topology only — skip when no run branch is "
+            "configured).**",
+        ),
+        ("3b-teardown", "**3b.** mark done"),
+        ("4-pick-phase", "4. **pick the next eligible phase**"),
+        (
+            "4b-decisions-precondition",
+            "4b. **decisions precondition — fail-closed, before the claim.**",
+        ),
+        ("5-claim", "5. **claim.**"),
+        ("6-execute", "6. **execute the phase in a fresh subagent**"),
+        ("7-escalation", "7. **escalation (§9):**"),
+        ("8-record", "8. **record — mechanical, one command.**"),
+        ("9-handoff", "9. **write handoff (§4)**"),
+    ],
+    "skills/start/SKILL.md": [
+        (
+            "@frontmatter",
+            "description: start (or resume) an autonomous conductor run",
+        ),
+        ("@preamble", "# /conductor:start — preflight + set up + launch"),
+        ("0-preflight", "0. **preflight (`conductor preflight`).**"),
+        ("1-detect-spec", "1. **detect spec source**"),
+        ("2-assertions-present", "2. **precondition — assertion specs present?**"),
+        ("3-gate-dir", "3. **resolve the per-spec gate dir first:**"),
+        ("4-plan", "4. **plan exists?**"),
+        ("4b-lint-and-review", "4b. **lint + codex-review the plan**"),
+        ("5-issue-sync", "5. **issue-sync**"),
+        ("5b-run-topology", "5b. **run topology (0.5.0 default):"),
+        ("6-record-goal", "6. **record `/goal`**"),
+        ("7-phase-2", "7. **(phase 2 only)**"),
+        ("@trailer", "a restart = re-invoke `/conductor:start`"),
+    ],
+    "skills/assertions-to-tests/SKILL.md": [
+        ("@preamble", "# /conductor:assertions-to-tests"),
+        # 1 and 2 carry no needles today; they are declared anyway because every top-level
+        # step MUST be, or its content gets absorbed into the region above it unchecked.
+        ("1-pick-id", "1. **pick a stable `id`**"),
+        ("2-write-test", "2. **write the test (it stays red).**"),
+        ("3-red-team", "3. **red-team the test"),
+        ("4-wire-in", "4. **wire it into the run"),
+        ("5-verify-red", "5. **verify the gate sees it red"),
+    ],
+    "skills/prepare/SKILL.md": [
+        ("@frontmatter", "---\nname: prepare"),
+        (
+            "@preamble",
+            "# /conductor:prepare — brownfield alignment (owner-supervised)",
+        ),
+        ("0-inventory", "0. **inventory.**"),
+        ("1-gate-integrity", "1. **gate integrity.**"),
+        ("2-plan-evaluation", "2. **plan evaluation.**"),
+        ("3-ledger-alignment", "3. **ledger alignment"),
+        ("4-status-truth", "4. **status truth.**"),
+        ("5-run-topology", "5. **run topology.**"),
+        ("6-report", "6. **report — ready for `/conductor:start`.**"),
+    ],
+}
+
+# region_id -> the needles that region must contain. A needle appearing in several regions is
+# anchored to the LOAD-BEARING one: where a worker executing the skill has to read it, not
+# where it is merely cross-referenced. Frontmatter `description:` never counts — no worker
+# executes a description.
+_CONTRACT: dict[str, dict[str, list[str]]] = {
+    "skills/autodev/SKILL.md": {
+        "@preamble": [
+            "one phase",
+            "ask no questions",
+            "owner-owned",
+        ],
+        "1-reload-goal": [
+            "re-load goal",
+            "conductor remote",
+            "run_branch",
+        ],
+        "1b-run-branch-current": [
+            "keep the run branch current",
+            "merge, never rebase",
+        ],
+        "2-reconcile": [
+            "reconcile",
+            "--from-gate",
+            "no-progress-cap-exceeded",
+        ],
+        "3-spec-done-gate": ["assert run --level spec"],
+        "3a-final-owner-pr": [
+            "run-packet",
+            "not with --admin, not at all",
+        ],
+        "3b-teardown": [
+            "crondelete",
+            "# conductor-autodev",
+            "grep -f -v",
+            # the equivalence prose above is not the instruction; pin the command
+            "conductor resume-script uninstall-cron",
+        ],
+        "4b-decisions-precondition": [
+            # the command itself and what a non-zero exit MUST do — vocabulary alone
+            # can survive as negated or historical prose
+            "conductor plan-lint <plan.md> --phase -",
+            "do not claim, do not implement",
+        ],
+        "6-execute": [
+            "fresh subagent",
+            "normative spec",
+            "never sufficient",
+            "environment-provided",
+            "reconcile-within-phase",
+            "wip: reclaimed partial work",
+            "base = the run branch",
+            "conductor merge-gate",
+            "conductor merge <pr>",
+            "codex review",
+            "usage-limit fallback",
+            # the decisions leg: the ADRs must reach the worker, and bind it
+            "**adrs:**",
+            "an adr binds the phase exactly as its",
+            "never quietly build against a closed decision",
+        ],
+        "7-escalation": [
+            "escalate.file_followup",
+            # an ADR written on escalation is only half the job until it is cited
+            "cite that adr",
+        ],
+        "8-record": ["phase-done"],
+        "9-handoff": ["handoff"],
+    },
+    "skills/start/SKILL.md": {
+        "@preamble": [
+            # the idempotence contract has no numbered-step home; it governs every step
+            "idempotent",
+            "already done",
+        ],
+        "0-preflight": ["preflight"],
+        "2-assertions-present": ["spec-craft:executable-assertions"],
+        "3-gate-dir": [
+            "conductor:assertions-to-tests",
+            "start_probe.assertions_ready",
+            "conductor gate lint",
+            "conductor gate freeze",
+        ],
+        "4-plan": [
+            "the plan builds to the spec",
+            "done-floor",
+            "normative spec:",
+            # the plan MUST carry the decisions pointer, and `none` is the explicit answer
+            "adr dir",
+            "**adrs:**",
+            "**adrs:** none",
+        ],
+        "4b-lint-and-review": [
+            "plan-lint",
+            "codex-review the plan",
+        ],
+        "5-issue-sync": ["issue-sync"],
+        "5b-run-topology": [
+            "reconcile-first",
+            "run topology",
+            "conductor run-branch name",
+            "run_branch",
+            "worktree",
+            "conductor_allow_direct_main_merge=1",
+            "base-mismatch",
+        ],
+        "6-record-goal": [
+            "croncreate",
+            "/conductor:autodev",
+            "verify durability",
+            "flock",
+            "resume-script write",
+            "conductor resume-script",
+            "resume-env.sh",
+            "resume-script verify",
+            "# conductor-autodev",
+        ],
+    },
+    "skills/assertions-to-tests/SKILL.md": {
+        "@preamble": ["<spec>.assertions.md"],
+        "3-red-team": [
+            "red-team",
+            "worse than none",
+            "exists-but-unused",
+        ],
+        "4-wire-in": [
+            "pytest_disable_plugin_autoload=1",
+            "--noconftest",
+            "no:cacheprovider",
+            "self-contained",
+        ],
+    },
+    "skills/prepare/SKILL.md": {
+        "@preamble": [
+            "brownfield",
+            "owner-supervised",
+        ],
+        "1-gate-integrity": ["gate verify"],
+        "2-plan-evaluation": [
+            "plan-lint",
+            # the mechanical migration path for the required **ADRs:** line
+            "backfill",
+            "**adrs:** none",
+            "phase-no-adr-pointer",
+        ],
+        "3-ledger-alignment": [
+            "dry-run first",
+            "assertion-id set",
+            "conductor ledger align <plan.md> --apply",
+            "conductor ledger convert <plan.md>",
+            "never guess",
+        ],
+        "4-status-truth": [
+            "--from-gate",
+            "phase-done",
+            "status:draft",
+        ],
+        "5-run-topology": ["run topology"],
+        "6-report": ["ready for `/conductor:start`"],
+    },
+}
+
+
+# A top-level step heading: `4.` / `4b.` at column 0. The executable spine of a skill.
+# Column 0 is what distinguishes it from a SUB-step — autodev indents `**3a.`/`**3b.` and
+# its whole step-6 recipe by three spaces, and those legitimately belong to their parent.
+_TOP_STEP = re.compile(r"(?m)^\d+[a-z]?\.")
+
+
+def _line_start(raw: str, i: int) -> bool:
+    """True when only whitespace separates `i` from the start of its line.
+
+    An anchor that stops being a heading — pulled into a blockquote, a code fence, or the
+    middle of a sentence — must stop anchoring, or the region silently keeps its name while
+    its boundary has moved."""
+    return raw[raw.rfind("\n", 0, i) + 1 : i].strip() == ""
+
+
+def _regions(path: str) -> dict[str, str]:
+    """region_id -> that region's text, whitespace-normalized.
+
+    Normalized because these files are hard-wrapped at ~100 columns, so any needle spanning
+    a line break could never match otherwise (`an adr binds the phase exactly as its` in
+    autodev is one wrap away from being unassertable). Anchors are located in the RAW text
+    first, since they are line-anchored headings.
+
+    The boundaries are cross-checked against the headings actually present in the file, not
+    just against `_REGIONS`. Trusting the declaration alone reopens #81 from the other side:
+    an UNDECLARED step is silently absorbed into the region above it, so an instruction can
+    leave the executable step while staying inside its nominal slice. Codex demonstrated it
+    on this very refactor — inserting `3a. **Historical compatibility note — do not
+    execute.**` into start let the real `conductor gate freeze` operation be deleted from
+    step 3 with every test still green."""
+    raw = open(os.path.join(ROOT, path), encoding="utf-8").read().lower()
+    starts: list[tuple[str, int]] = []
+    for rid, anchor in _REGIONS[path]:
+        count = raw.count(anchor)
+        # A duplicated anchor would silently slice the wrong region via first-match-wins.
+        assert count == 1, (
+            f"{path}: anchor for {rid} occurs {count}x, need 1: {anchor!r}"
+        )
+        i = raw.index(anchor)
+        assert _line_start(raw, i), (
+            f"{path}: anchor for {rid} is no longer at the start of a line — it has stopped "
+            f"being a heading: {anchor!r}"
+        )
+        starts.append((rid, i))
+    for (a, i), (b, j) in zip(starts, starts[1:]):
+        assert i < j, f"{path}: region {a} must come before {b}; _REGIONS is misordered"
+    declared = {i for _, i in starts}
+    undeclared = [
+        f"line {raw[: m.start()].count(chr(10)) + 1}: {raw[m.start() : m.start() + 60]!r}"
+        for m in _TOP_STEP.finditer(raw)
+        if m.start() not in declared
+    ]
+    assert not undeclared, (
+        f"{path}: top-level step(s) not declared in _REGIONS, so their content is being "
+        f"absorbed into the region above and is unchecked — add them:\n    "
+        + "\n    ".join(undeclared)
+    )
+    out: dict[str, str] = {}
+    for k, (rid, i) in enumerate(starts):
+        end = starts[k + 1][1] if k + 1 < len(starts) else len(raw)
+        # The slice INCLUDES its own anchor — several needles are the step heading itself.
+        out[rid] = re.sub(r"\s+", " ", raw[i:end])
+    return out
+
+
+def _assert_contract(path: str) -> None:
+    """Two-stage: absent from the file and present-but-misplaced are different defects with
+    different fixes, so they get different messages. Every failure for the file is collected
+    and reported at once — one assert per needle hides the rest behind the first."""
+    regions = _regions(path)
+    failures: list[str] = []
+    for rid, needles in _CONTRACT[path].items():
+        assert rid in regions, f"{path}: _CONTRACT names unknown region {rid}"
+        for needle in needles:
+            if needle in regions[rid]:
+                continue
+            # Search each region separately, never a joined string: concatenation can
+            # synthesize a match across a boundary and mislabel a MISSING needle MISPLACED.
+            found = [r for r, text in regions.items() if needle in text]
+            if not found:
+                failures.append(f"MISSING  {needle!r} — not in {path} at all")
+                continue
+            failures.append(
+                f"MISPLACED {needle!r} — expected in {rid}, found in {', '.join(found)}"
+            )
+    if failures:
+        pytest.fail(f"{path}\n  " + "\n  ".join(failures), pytrace=False)
+
 
 def test_autodev_skill_contract():
-    body = open(os.path.join(ROOT, "skills/autodev/SKILL.md")).read().lower()
-    for needle in [
-        "re-load goal",
-        "reconcile",
-        "assert run --level spec",
-        "fresh subagent",
-        "conductor merge-gate",
-        "conductor merge <pr>",
-        "no-progress-cap-exceeded",
-        "handoff",
-        "one phase",
-        "crondelete",
-        "ask no questions",
-        "environment-provided",
-        "--from-gate",
-        "phase-done",
-        "codex review",
-        "usage-limit fallback",
-        "escalate.file_followup",
-        "conductor remote",
-        "reconcile-within-phase",
-        "wip: reclaimed partial work",
-        "never sufficient",
-        "normative spec",
-        "# conductor-autodev",
-        "grep -f -v",
-        "owner-owned",
-        "keep the run branch current",
-        "merge, never rebase",
-        "run-packet",
-        "not with --admin, not at all",
-        "base = the run branch",
-        "run_branch",
-        # the decisions leg: ADRs reach the worker, bind it, and get cited when written
-        "**adrs:**",
-        "an adr binds the phase exactly as its",
-        "never quietly build against a closed decision",
-        "cite that adr",
-    ]:
-        assert needle in body, needle
+    _assert_contract("skills/autodev/SKILL.md")
 
 
 def test_start_skill_contract():
-    body = open(os.path.join(ROOT, "skills/start/SKILL.md")).read().lower()
+    _assert_contract("skills/start/SKILL.md")
+    # The frozen assertion a8-gate-freeze-needle-present pins this needle as a LITERAL
+    # inside this function — it greps for a quoted `gate freeze` line in
+    # `def test_start_skill_contract`'s body so the freeze step cannot rot out of the
+    # skill. Its own file is digest-locked in assertions/.frozen, so the check is not
+    # ours to relax; the restatement lives here instead. _CONTRACT remains the source of
+    # truth and already covers this needle; scoping it to the region is strictly stronger
+    # than the file-wide form A8 was written against. Do not delete: the gate runner
+    # fail-closes when a frozen assertion's check goes missing.
     for needle in [
-        "preflight",
-        "reconcile-first",
-        "idempotent",
-        "spec-craft:executable-assertions",
-        "conductor:assertions-to-tests",
-        "issue-sync",
-        "croncreate",
-        "/conductor:autodev",
-        "start_probe.assertions_ready",
-        "gate freeze",
-        "conductor gate lint",
-        "already done",
-        "resume",
-        "plan-lint",
-        "normative spec:",
-        "the plan builds to the spec",
-        "done-floor",
-        "codex-review the plan",
-        "verify durability",
-        "flock",
-        "conductor resume-script",
-        "resume-env.sh",
-        "resume-script verify",
-        "# conductor-autodev",
-        "run topology",
-        "conductor/run-",
-        "run_branch",
-        "worktree",
-        "conductor_allow_direct_main_merge=1",
-        "base-mismatch",
-        # the plan MUST carry the decisions pointer, and `none` is the explicit answer
-        "**adrs:**",
-        "**adrs:** none",
-        "adr dir",
+        "conductor gate freeze",
     ]:
-        assert needle in body, needle
+        assert needle in _regions("skills/start/SKILL.md")["3-gate-dir"], needle
 
 
 def test_assertions_to_tests_skill_contract():
-    body = (
-        open(os.path.join(ROOT, "skills/assertions-to-tests/SKILL.md")).read().lower()
-    )
-    for needle in [
-        "pytest_disable_plugin_autoload=1",
-        "--noconftest",
-        "no:cacheprovider",
-        "self-contained",
-        "<spec>.assertions.md",
-        "red-team",
-        "worse than none",
-        "exists-but-unused",
-    ]:
-        assert needle in body, needle
+    _assert_contract("skills/assertions-to-tests/SKILL.md")
 
 
 def test_prepare_skill_contract():
-    body = open(os.path.join(ROOT, "skills/prepare/SKILL.md")).read().lower()
-    for needle in [
-        "brownfield",
-        "owner-supervised",
-        "dry-run first",
-        "assertion-id set",
-        "conductor ledger align <plan.md> --apply",
-        "conductor ledger convert <plan.md>",
-        "plan-lint",
-        "--from-gate",
-        "phase-done",
-        "status:draft",
-        "run topology",
-        "ready for `/conductor:start`",
-        "never guess",
-        "gate verify",
-        # the mechanical migration path for the required **ADRs:** line
-        "backfill",
-        "**adrs:** none",
-        "phase-no-adr-pointer",
-    ]:
-        assert needle in body, needle
+    _assert_contract("skills/prepare/SKILL.md")
 
 
-def _step(body: str, start: str, end: str) -> str:
-    """The slice of a SKILL.md between two step markers.
-
-    Narrow placement check, not a redesign: these contract tests assert vocabulary exists
-    ANYWHERE in the file, so a refactor that moves an instruction out of the step a worker
-    executes and into trailing prose keeps them green. Making all ~40 needles step-aware is
-    tracked separately; the two below cover the instructions that carry decisions to a
-    worker, where wrong placement means the decisions silently stop arriving."""
-    i, j = body.index(start), body.index(end)
-    assert i < j, (start, end)
-    return body[i:j]
+def test_every_declared_region_is_reachable():
+    """_REGIONS is the load-bearing data — a stale anchor there silently mis-slices every
+    needle downstream of it, so validate the whole declaration independently of any needle."""
+    for path in _REGIONS:
+        regions = _regions(path)
+        assert [rid for rid, _ in _REGIONS[path]] == list(regions)
+        # Measure the BODY, not the slice: every slice includes its own heading, so a
+        # gutted step still clears a raw length check on its own markup alone. Applied to
+        # numbered steps only — `@preamble` and `@trailer` are legitimately terse.
+        anchors = dict(_REGIONS[path])
+        empty = []
+        for rid, text in regions.items():
+            if rid.startswith("@"):
+                assert text.strip(), f"{path}: {rid} sliced to nothing"
+                continue
+            body = text.replace(re.sub(r"\s+", " ", anchors[rid]), "", 1)
+            if len(re.sub(r"[*`_#>\-\s]", "", body)) < 40:
+                empty.append(rid)
+        assert not empty, f"{path}: step(s) with no substantive body — {empty}"
 
 
 def test_adr_precondition_lives_in_autodevs_pre_claim_step():
-    body = open(os.path.join(ROOT, "skills/autodev/SKILL.md")).read().lower()
-    precondition = _step(body, "4b. **decisions precondition", "5. **claim.**")
-    assert "--phase" in precondition
+    # The one instruction that must run BEFORE the claim; misplacement here means a worker
+    # starts a phase whose decisions nothing carries.
+    precondition = _regions("skills/autodev/SKILL.md")["4b-decisions-precondition"]
+    assert "--phase -" in precondition
     assert "before the claim" in precondition
     assert "/conductor:prepare" in precondition
-    # And the references it prints must be handed over inside the execute step.
-    execute = _step(body, "6. **execute the phase", "7. **escalation")
+    execute = _regions("skills/autodev/SKILL.md")["6-execute"]
     assert "build within the decisions" in execute
 
 
 def test_adr_backfill_lives_in_prepares_plan_evaluation_step():
-    body = open(os.path.join(ROOT, "skills/prepare/SKILL.md")).read().lower()
-    evaluation = _step(body, "2. **plan evaluation.**", "3. **ledger alignment")
+    evaluation = _regions("skills/prepare/SKILL.md")["2-plan-evaluation"]
     assert "backfill" in evaluation
     assert "**adrs:** none" in evaluation
     assert "dry-run" in evaluation
