@@ -77,6 +77,10 @@ _REGIONS: dict[str, list[tuple[str, str]]] = {
     ],
     "skills/assertions-to-tests/SKILL.md": [
         ("@preamble", "# /conductor:assertions-to-tests"),
+        # 1 and 2 carry no needles today; they are declared anyway because every top-level
+        # step MUST be, or its content gets absorbed into the region above it unchecked.
+        ("1-pick-id", "1. **pick a stable `id`**"),
+        ("2-write-test", "2. **write the test (it stays red).**"),
         ("3-red-team", "3. **red-team the test"),
         ("4-wire-in", "4. **wire it into the run"),
         ("5-verify-red", "5. **verify the gate sees it red"),
@@ -131,6 +135,14 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             "crondelete",
             "# conductor-autodev",
             "grep -f -v",
+            # the equivalence prose above is not the instruction; pin the command
+            "conductor resume-script uninstall-cron",
+        ],
+        "4b-decisions-precondition": [
+            # the command itself and what a non-zero exit MUST do — vocabulary alone
+            # can survive as negated or historical prose
+            "conductor plan-lint <plan.md> --phase -",
+            "do not claim, do not implement",
         ],
         "6-execute": [
             "fresh subagent",
@@ -169,7 +181,7 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             "conductor:assertions-to-tests",
             "start_probe.assertions_ready",
             "conductor gate lint",
-            "gate freeze",
+            "conductor gate freeze",
         ],
         "4-plan": [
             "the plan builds to the spec",
@@ -188,7 +200,7 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
         "5b-run-topology": [
             "reconcile-first",
             "run topology",
-            "conductor/run-",
+            "conductor run-branch name",
             "run_branch",
             "worktree",
             "conductor_allow_direct_main_merge=1",
@@ -199,7 +211,7 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             "/conductor:autodev",
             "verify durability",
             "flock",
-            "resume",
+            "resume-script write",
             "conductor resume-script",
             "resume-env.sh",
             "resume-script verify",
@@ -251,13 +263,36 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
 }
 
 
+# A top-level step heading: `4.` / `4b.` at column 0. The executable spine of a skill.
+# Column 0 is what distinguishes it from a SUB-step — autodev indents `**3a.`/`**3b.` and
+# its whole step-6 recipe by three spaces, and those legitimately belong to their parent.
+_TOP_STEP = re.compile(r"(?m)^\d+[a-z]?\.")
+
+
+def _line_start(raw: str, i: int) -> bool:
+    """True when only whitespace separates `i` from the start of its line.
+
+    An anchor that stops being a heading — pulled into a blockquote, a code fence, or the
+    middle of a sentence — must stop anchoring, or the region silently keeps its name while
+    its boundary has moved."""
+    return raw[raw.rfind("\n", 0, i) + 1 : i].strip() == ""
+
+
 def _regions(path: str) -> dict[str, str]:
     """region_id -> that region's text, whitespace-normalized.
 
     Normalized because these files are hard-wrapped at ~100 columns, so any needle spanning
     a line break could never match otherwise (`an adr binds the phase exactly as its` in
     autodev is one wrap away from being unassertable). Anchors are located in the RAW text
-    first, since they are line-anchored headings."""
+    first, since they are line-anchored headings.
+
+    The boundaries are cross-checked against the headings actually present in the file, not
+    just against `_REGIONS`. Trusting the declaration alone reopens #81 from the other side:
+    an UNDECLARED step is silently absorbed into the region above it, so an instruction can
+    leave the executable step while staying inside its nominal slice. Codex demonstrated it
+    on this very refactor — inserting `3a. **Historical compatibility note — do not
+    execute.**` into start let the real `conductor gate freeze` operation be deleted from
+    step 3 with every test still green."""
     raw = open(os.path.join(ROOT, path), encoding="utf-8").read().lower()
     starts: list[tuple[str, int]] = []
     for rid, anchor in _REGIONS[path]:
@@ -266,9 +301,25 @@ def _regions(path: str) -> dict[str, str]:
         assert count == 1, (
             f"{path}: anchor for {rid} occurs {count}x, need 1: {anchor!r}"
         )
-        starts.append((rid, raw.index(anchor)))
+        i = raw.index(anchor)
+        assert _line_start(raw, i), (
+            f"{path}: anchor for {rid} is no longer at the start of a line — it has stopped "
+            f"being a heading: {anchor!r}"
+        )
+        starts.append((rid, i))
     for (a, i), (b, j) in zip(starts, starts[1:]):
         assert i < j, f"{path}: region {a} must come before {b}; _REGIONS is misordered"
+    declared = {i for _, i in starts}
+    undeclared = [
+        f"line {raw[: m.start()].count(chr(10)) + 1}: {raw[m.start() : m.start() + 60]!r}"
+        for m in _TOP_STEP.finditer(raw)
+        if m.start() not in declared
+    ]
+    assert not undeclared, (
+        f"{path}: top-level step(s) not declared in _REGIONS, so their content is being "
+        f"absorbed into the region above and is unchecked — add them:\n    "
+        + "\n    ".join(undeclared)
+    )
     out: dict[str, str] = {}
     for k, (rid, i) in enumerate(starts):
         end = starts[k + 1][1] if k + 1 < len(starts) else len(raw)
@@ -282,17 +333,18 @@ def _assert_contract(path: str) -> None:
     different fixes, so they get different messages. Every failure for the file is collected
     and reported at once — one assert per needle hides the rest behind the first."""
     regions = _regions(path)
-    whole = " ".join(regions.values())
     failures: list[str] = []
     for rid, needles in _CONTRACT[path].items():
         assert rid in regions, f"{path}: _CONTRACT names unknown region {rid}"
         for needle in needles:
             if needle in regions[rid]:
                 continue
-            if needle not in whole:
+            # Search each region separately, never a joined string: concatenation can
+            # synthesize a match across a boundary and mislabel a MISSING needle MISPLACED.
+            found = [r for r, text in regions.items() if needle in text]
+            if not found:
                 failures.append(f"MISSING  {needle!r} — not in {path} at all")
                 continue
-            found = [r for r, text in regions.items() if needle in text] or ["?"]
             failures.append(
                 f"MISPLACED {needle!r} — expected in {rid}, found in {', '.join(found)}"
             )
@@ -315,7 +367,7 @@ def test_start_skill_contract():
     # than the file-wide form A8 was written against. Do not delete: the gate runner
     # fail-closes when a frozen assertion's check goes missing.
     for needle in [
-        "gate freeze",
+        "conductor gate freeze",
     ]:
         assert needle in _regions("skills/start/SKILL.md")["3-gate-dir"], needle
 
@@ -334,8 +386,19 @@ def test_every_declared_region_is_reachable():
     for path in _REGIONS:
         regions = _regions(path)
         assert [rid for rid, _ in _REGIONS[path]] == list(regions)
-        empty = [rid for rid, text in regions.items() if len(text.strip()) < 20]
-        assert not empty, f"{path}: regions sliced to nothing — {empty}"
+        # Measure the BODY, not the slice: every slice includes its own heading, so a
+        # gutted step still clears a raw length check on its own markup alone. Applied to
+        # numbered steps only — `@preamble` and `@trailer` are legitimately terse.
+        anchors = dict(_REGIONS[path])
+        empty = []
+        for rid, text in regions.items():
+            if rid.startswith("@"):
+                assert text.strip(), f"{path}: {rid} sliced to nothing"
+                continue
+            body = text.replace(re.sub(r"\s+", " ", anchors[rid]), "", 1)
+            if len(re.sub(r"[*`_#>\-\s]", "", body)) < 40:
+                empty.append(rid)
+        assert not empty, f"{path}: step(s) with no substantive body — {empty}"
 
 
 def test_adr_precondition_lives_in_autodevs_pre_claim_step():
