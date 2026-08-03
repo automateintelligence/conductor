@@ -111,6 +111,50 @@ _TASK_ANY = re.compile(r"^- \[[ xX]\] .+$", re.MULTILINE)
 _RECIPE_NEEDLES = ("/code-review", "codex", "merge-gate", "closes #")
 
 
+def _adr_reasons(title: str, section: str) -> list[str]:
+    """The decisions leg's failures for one phase section.
+
+    Factored out because two callers need EXACTLY this rule and no other: the whole-plan
+    `lint()`, and `lint_phase_adrs()` — autodev's pre-claim check."""
+    reasons: list[str] = []
+    values = _adr_values(section)
+    if not values:
+        reasons.append(f"phase-no-adr-pointer:{title}")
+    # Two pointer lines in one phase leave the worker to guess which binds — the
+    # likeliest source is a backfill or a merge landing beside an existing line.
+    if len(values) > 1:
+        reasons.append(f"phase-adr-duplicate:{title}")
+    for value in values:
+        # Delimiters or emphasis with nothing between them are silence wearing the
+        # line's clothes, exactly like the wholly empty value.
+        if not _adr_fragments(value):
+            reasons.append(f"phase-adr-empty:{title}")
+            continue
+        for frag in _adr_refs(value)[1]:
+            reasons.append(f"phase-adr-malformed:{title}:{frag}")
+    return reasons
+
+
+def lint_phase_adrs(text: str, phase_title: str) -> tuple[list[str], list[str]]:
+    """(reasons, references) for ONE phase's `**ADRs:**` line, by phase title.
+
+    autodev's fail-closed pre-claim check. Deliberately the decisions leg ALONE and not
+    the whole `lint()`: a headless fire has no owner standing by, so it must be stoppable
+    only by the defect that would make its own work unsafe — never by an unrelated plan
+    problem elsewhere in the file. `phase_title` is the phase ISSUE's title, which equals
+    the plan's phase heading (`convert`/`generate` create issues from those headings, and
+    `phase-done` ticks checkboxes by the same equality).
+
+    A phase absent from the plan is a failure, not a pass: nothing carries its decisions
+    either, which is the condition being checked."""
+    for (title, _status, _ids), section in _phase_sections(text):
+        if title != phase_title:
+            continue
+        refs = [ref for value in _adr_values(section) for ref in _adr_refs(value)[0]]
+        return _adr_reasons(title, section), refs
+    return [f"phase-not-found:{phase_title}"], []
+
+
 def lint(text: str, spec_path: str | None = None) -> list[str]:
     reasons: list[str] = []
     if not _NORMATIVE.search(text):
@@ -130,21 +174,7 @@ def lint(text: str, spec_path: str | None = None) -> list[str]:
             reasons.append(f"phase-no-spec-pointer:{title}")
         # The decisions leg of the same binding. `**ADRs:** none` passes; a MISSING line
         # is a failure, because "nobody checked" must not look like "none apply".
-        adr_values = _adr_values(section)
-        if not adr_values:
-            reasons.append(f"phase-no-adr-pointer:{title}")
-        # Two pointer lines in one phase leave the worker to guess which binds — the
-        # likeliest source is a backfill or a merge landing beside an existing line.
-        if len(adr_values) > 1:
-            reasons.append(f"phase-adr-duplicate:{title}")
-        for adr_value in adr_values:
-            # Delimiters or emphasis with nothing between them are silence wearing the
-            # line's clothes, exactly like the wholly empty value.
-            if not _adr_fragments(adr_value):
-                reasons.append(f"phase-adr-empty:{title}")
-                continue
-            for frag in _adr_refs(adr_value)[1]:
-                reasons.append(f"phase-adr-malformed:{title}:{frag}")
+        reasons.extend(_adr_reasons(title, section))
         # A phase without assertion ids can't be gate-verified downstream (--from-gate /
         # phase-done fail closed on a missing marker) — gatelessness must be deliberate,
         # declared with a literal `gate: none` in the phase section (codex PR-28 #1).
@@ -247,6 +277,14 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="Normative spec file the plan must reference by name",
     )
+    p.add_argument(
+        "--phase",
+        default=None,
+        metavar="TITLE",
+        help="Check ONLY this phase's **ADRs:** line (the phase issue's title) and print "
+        "its references to stdout. autodev's pre-claim check — scoped this narrowly on "
+        "purpose, so an unrelated plan defect can never stop a headless fire.",
+    )
     args = p.parse_args(argv)
     try:
         with open(args.plan_md, encoding="utf-8") as f:
@@ -254,6 +292,21 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"plan-unreadable: {exc}", file=sys.stderr)
         return 2
+    if args.phase is not None:
+        reasons, refs = lint_phase_adrs(text, args.phase)
+        for ref in refs:
+            print(ref)
+        for reason in reasons:
+            print(reason, file=sys.stderr)
+        if reasons:
+            print(
+                f"{args.plan_md}: this phase carries no usable **ADRs:** line, so nothing "
+                "would carry its architectural decisions to the worker. Run "
+                "/conductor:prepare on this repo to backfill the 0.9.0 plan dialect, "
+                "then re-fire.",
+                file=sys.stderr,
+            )
+        return 1 if reasons else 0
     # Belt to _adr_index's braces: the warning leg is advisory end to end, so ANY failure
     # resolving it (unreadable dir, vanished path, permission change mid-walk) costs the
     # warnings and nothing else. The lint's verdict is never the warning leg's to change.

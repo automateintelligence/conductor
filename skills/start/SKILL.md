@@ -103,6 +103,10 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    fix the plan, never bypass the lint. Then codex-review the plan **against the spec** (does
    every spec section land in a phase? is intent preserved, not just assertion coverage?) and
    apply the fixes. SKIP only if both were already done for this plan.
+   **Upgraded conductor while a run was in flight? Rerun `/conductor:prepare` before resuming.**
+   A plan written before 0.9.0 has no `**ADRs:**` lines, and an in-flight run never comes back
+   through this step — `autodev` step 4b will refuse to claim its phases until the dialect is
+   backfilled. `prepare` step 2 is the migration; it is a one-line-per-phase mechanical fix.
 5. **issue-sync** — `ledger.generate` (or `convert <plan.md>`; the parser reads the real
    `## Phase N — Title (ids)` dialect directly and writes each phase's `conductor-assertions`
    marker). SKIP if the hierarchy exists; else reconcile. Phases authored `[draft]` are created

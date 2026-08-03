@@ -128,3 +128,35 @@ def test_prepare_skill_contract():
         "phase-no-adr-pointer",
     ]:
         assert needle in body, needle
+
+
+def _step(body: str, start: str, end: str) -> str:
+    """The slice of a SKILL.md between two step markers.
+
+    Narrow placement check, not a redesign: these contract tests assert vocabulary exists
+    ANYWHERE in the file, so a refactor that moves an instruction out of the step a worker
+    executes and into trailing prose keeps them green. Making all ~40 needles step-aware is
+    tracked separately; the two below cover the instructions that carry decisions to a
+    worker, where wrong placement means the decisions silently stop arriving."""
+    i, j = body.index(start), body.index(end)
+    assert i < j, (start, end)
+    return body[i:j]
+
+
+def test_adr_precondition_lives_in_autodevs_pre_claim_step():
+    body = open(os.path.join(ROOT, "skills/autodev/SKILL.md")).read().lower()
+    precondition = _step(body, "4b. **decisions precondition", "5. **claim.**")
+    assert "--phase" in precondition
+    assert "before the claim" in precondition
+    assert "/conductor:prepare" in precondition
+    # And the references it prints must be handed over inside the execute step.
+    execute = _step(body, "6. **execute the phase", "7. **escalation")
+    assert "build within the decisions" in execute
+
+
+def test_adr_backfill_lives_in_prepares_plan_evaluation_step():
+    body = open(os.path.join(ROOT, "skills/prepare/SKILL.md")).read().lower()
+    evaluation = _step(body, "2. **plan evaluation.**", "3. **ledger alignment")
+    assert "backfill" in evaluation
+    assert "**adrs:** none" in evaluation
+    assert "dry-run" in evaluation

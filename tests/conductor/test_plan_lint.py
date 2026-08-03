@@ -359,6 +359,64 @@ def test_unreadable_adr_dir_never_fails_the_lint(tmp_path, capsys):
     assert "Traceback" not in capsys.readouterr().err
 
 
+# --- `--phase`: autodev's fail-closed pre-claim check ---------------------------------
+# The gap this closes: only `start`/`prepare` run the full lint, and an in-flight run never
+# returns to either, so an upgraded pre-0.9.0 run would keep working phases with nothing
+# carrying their decisions. Narrow ON PURPOSE — an unrelated plan defect must never be able
+# to stop a headless fire.
+
+_P1 = "Phase 1 — Scoring (A3, A4)"
+_P2 = "Phase 2 — Reporting (A8)"
+
+
+def test_phase_check_returns_that_phases_references():
+    reasons, refs = plan_lint.lint_phase_adrs(GOOD_PLAN, _P1)
+    assert reasons == []
+    assert refs == ["ADR-004", "ADR-011"]
+
+
+def test_phase_check_passes_on_none_with_no_references():
+    assert plan_lint.lint_phase_adrs(GOOD_PLAN, _P2) == ([], [])
+
+
+def test_phase_check_fails_closed_on_a_missing_line():
+    text = GOOD_PLAN.replace("**ADRs:** none\n", "")
+    reasons, refs = plan_lint.lint_phase_adrs(text, _P2)
+    assert reasons == [f"phase-no-adr-pointer:{_P2}"]
+    assert refs == []
+
+
+def test_phase_check_fails_closed_when_the_phase_is_absent():
+    # Nothing carries an absent phase's decisions either; silence is not a pass.
+    assert plan_lint.lint_phase_adrs(GOOD_PLAN, "Phase 9 — Nope") == (
+        ["phase-not-found:Phase 9 — Nope"],
+        [],
+    )
+
+
+def test_phase_check_ignores_defects_in_other_phases():
+    # The whole point: a broken phase 1 must not stop a fire working phase 2.
+    text = GOOD_PLAN.replace("**Spec:** §6 Metrics; §7 Scoring & Decision Rule\n", "")
+    assert f"phase-no-spec-pointer:{_P1}" in plan_lint.lint(text)
+    assert plan_lint.lint_phase_adrs(text, _P2) == ([], [])
+
+
+def test_phase_check_cli_prints_refs_and_exits_zero(tmp_path, capsys):
+    plan = tmp_path / "plan.md"
+    plan.write_text(GOOD_PLAN)
+    assert plan_lint.main([str(plan), "--phase", _P1]) == 0
+    assert capsys.readouterr().out.split() == ["ADR-004", "ADR-011"]
+
+
+def test_phase_check_cli_names_prepare_as_the_fix(tmp_path, capsys):
+    plan = tmp_path / "plan.md"
+    plan.write_text(GOOD_PLAN.replace("**ADRs:** none\n", ""))
+    assert plan_lint.main([str(plan), "--phase", _P2]) == 1
+    err = capsys.readouterr().err
+    assert f"phase-no-adr-pointer:{_P2}" in err
+    assert "/conductor:prepare" in err
+
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
