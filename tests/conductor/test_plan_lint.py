@@ -1,4 +1,5 @@
 import glob
+import io
 import os
 
 import pytest
@@ -406,6 +407,19 @@ def test_phase_check_cli_prints_refs_and_exits_zero(tmp_path, capsys):
     plan.write_text(GOOD_PLAN)
     assert plan_lint.main([str(plan), "--phase", _P1]) == 0
     assert capsys.readouterr().out.split() == ["ADR-004", "ADR-011"]
+
+
+def test_phase_check_cli_reads_a_shell_hostile_title_from_stdin(
+    tmp_path, capsys, monkeypatch
+):
+    # Real titles carry `"` and `|` (this repo's own plan has both), so the pipe form is
+    # the one autodev uses — argv interpolation is a quoting bug waiting for that phase.
+    hostile = 'Phase 2 — README "Unattended authority" + driver install|status (A8)'
+    plan = tmp_path / "plan.md"
+    plan.write_text(GOOD_PLAN.replace(_P2, hostile))
+    monkeypatch.setattr("sys.stdin", io.StringIO(hostile + "\n"))
+    assert plan_lint.main([str(plan), "--phase", "-"]) == 0
+    assert capsys.readouterr().out == ""
 
 
 def test_phase_check_cli_names_prepare_as_the_fix(tmp_path, capsys):

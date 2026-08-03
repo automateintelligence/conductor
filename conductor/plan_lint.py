@@ -283,7 +283,10 @@ def main(argv: list[str] | None = None) -> int:
         metavar="TITLE",
         help="Check ONLY this phase's **ADRs:** line (the phase issue's title) and print "
         "its references to stdout. autodev's pre-claim check — scoped this narrowly on "
-        "purpose, so an unrelated plan defect can never stop a headless fire.",
+        "purpose, so an unrelated plan defect can never stop a headless fire. `-` reads "
+        'the title from stdin, which is the form to use: real phase titles carry `"`, '
+        "`|`, and backticks (this repo's own plan has two), and a model composing a "
+        "shell command around one will eventually mis-quote it.",
     )
     args = p.parse_args(argv)
     try:
@@ -293,7 +296,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"plan-unreadable: {exc}", file=sys.stderr)
         return 2
     if args.phase is not None:
-        reasons, refs = lint_phase_adrs(text, args.phase)
+        # `-` = read the title from stdin. The ONLY form with no quoting failure mode,
+        # which matters because the caller is a model composing a shell command around a
+        # title it does not control. Trailing newline stripped; nothing else touched, so a
+        # title is compared exactly as the issue and the heading spell it.
+        phase = sys.stdin.read().rstrip("\r\n") if args.phase == "-" else args.phase
+        reasons, refs = lint_phase_adrs(text, phase)
         for ref in refs:
             print(ref)
         for reason in reasons:

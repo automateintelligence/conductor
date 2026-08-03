@@ -86,8 +86,12 @@ step 3b's terminal crontab removal.
    - phase available → SPLIT-CHECK (§6.1); else run the recipe.
    - plan done → `/superpowers:writing-plans` next plan → `ledger.generate` (or `ledger.convert`).
    - no plans left but assertions red → `/superpowers:writing-plans` to close the gap → generate.
-4b. **DECISIONS PRECONDITION — fail-closed, BEFORE the claim.** `conductor plan-lint <plan.md>
-   --phase "<the phase issue's title>"`. Exit 0 → it prints this phase's ADR references on
+4b. **DECISIONS PRECONDITION — fail-closed, BEFORE the claim.**
+   `gh issue view <phase-issue#> --json title -q .title | conductor plan-lint <plan.md> --phase -`
+   **Pipe the title in; never interpolate it into the command.** Real phase titles carry `"`,
+   `|`, and backticks — this repo's own plan has two — so a quoted `--phase "<title>"` is a
+   quoting bug waiting for the wrong phase. `--phase -` reads it from stdin, which has no
+   quoting failure mode. Exit 0 → it prints this phase's ADR references on
    stdout; keep them for step 6. Exit non-zero → **do not claim, do not implement.** Escalate
    needs-human (§9) and STOP the run: this is the one precondition a worker cannot satisfy
    itself, because the missing decisions are exactly what it would need in order to know what
