@@ -1008,6 +1008,16 @@ def test_run_gate_dir_is_assertions_slash_run_key(tmp_path):
     assert paths.run_gate_dir(str(tmp_path), key) == str(tmp_path / "assertions" / key)
 
 
+def test_run_gate_dir_refuses_an_unsafe_run_key(tmp_path):
+    # A helper that composes a filesystem path from a key must refuse a key that escapes the
+    # gate root, exactly as runstate._checked does before building a state path — otherwise the
+    # traversal is latent until the first caller passes a tampered key.
+    for bad in ("../x", "a/b", "..", ".lock", "x.lock", "", "-leading", "/abs"):
+        with pytest.raises(ValueError) as excinfo:
+            paths.run_gate_dir(str(tmp_path), bad)
+        assert repr(bad) in str(excinfo.value), bad
+
+
 def test_run_key_mode_ignores_ambient_files_and_environment(tmp_path, monkeypatch):
     spec = "docs/specs/alpha.md"
     doc = _run_doc(spec)
@@ -1083,7 +1093,8 @@ def test_an_unknown_identity_scheme_fails_closed(tmp_path):
     doc = _run_doc("docs/specs/alpha.md", identity_scheme="path-hash-v3")
     res = paths.resolve_gate(str(tmp_path), run_key=doc["run_key"], run=doc)
     assert res.fail_closed and "identity_scheme" in res.fail_closed
-    assert res.directory == str(tmp_path / "assertions")
+    # the refusal names the directory the record CLAIMED — never the flat gate
+    assert res.directory == str(tmp_path / "assertions" / doc["run_key"])
 
 
 def test_a_run_document_for_another_run_fails_closed(tmp_path):
@@ -1097,7 +1108,64 @@ def test_a_run_document_for_another_run_fails_closed(tmp_path):
     mine = runkey.run_key("docs/specs/alpha.md")
     res = paths.resolve_gate(str(tmp_path), run_key=mine, run=other)
     assert res.fail_closed and "run_key" in res.fail_closed
-    assert res.directory != str(tmp_path / "assertions" / "self-enforcement")
+    # the verdict names BOTH keys, so the operator can see which record was loaded
+    assert mine in res.fail_closed and other["run_key"] in res.fail_closed
+
+
+def _failing_run_key_cases():
+    """Every way run-key mode refuses, as (label, run_key, run document) rows."""
+    wrong_record = _run_doc("docs/specs/beta.md", identity_scheme="legacy-slug-v1")
+    wrong_record["gate_dir"] = "assertions/self-enforcement"
+    wrong_record["integration_branch"] = "conductor/run-self-enforcement"
+    unsafe_dir = _run_doc("docs/specs/alpha.md")
+    unsafe_dir["gate_dir"] = "assertions/../../outside"
+    absent_dir = _run_doc("docs/specs/alpha.md", gate_dir="somewhere/else")
+    bad_gate_dir = _run_doc("docs/specs/alpha.md", gate_dir="assertions/some-other-run")
+    bad_branch = _run_doc(
+        "docs/specs/alpha.md", integration_branch="conductor/run-something-else"
+    )
+    unknown_scheme = _run_doc("docs/specs/alpha.md", identity_scheme="path-hash-v3")
+    return [
+        ("wrong run's record", runkey.run_key("docs/specs/alpha.md"), wrong_record),
+        ("unsafe gate_dir", unsafe_dir["run_key"], unsafe_dir),
+        ("gate_dir outside assertions/", absent_dir["run_key"], absent_dir),
+        ("gate_dir mismatch", bad_gate_dir["run_key"], bad_gate_dir),
+        ("integration_branch mismatch", bad_branch["run_key"], bad_branch),
+        ("unknown identity_scheme", unknown_scheme["run_key"], unknown_scheme),
+    ]
+
+
+def test_no_run_key_refusal_collapses_onto_the_flat_gate(tmp_path):
+    # THE point of run-key mode. In a repo that has one — this one does — flat `assertions/` is
+    # a real, FROZEN, green gate, so a refusal that redirected there would hand a caller that
+    # read .directory without checking .fail_closed the repo's own passing gate to validate and
+    # to write results into. Legacy mode never redirects on failure (it keeps whatever it
+    # resolved, and reaches flat only when fail_closed is None); run-key mode must not either.
+    _write(tmp_path, "assertions/manifest.yaml", "assertions: []\n")
+    _write(tmp_path, "assertions/.frozen", "{}\n")
+    flat = str(tmp_path / "assertions")
+    for label, key, doc in _failing_run_key_cases():
+        res = paths.resolve_gate(str(tmp_path), run_key=key, run=doc)
+        assert res.fail_closed, label
+        assert res.directory != flat, label
+        assert res.manifest != os.path.join(flat, "manifest.yaml"), label
+        assert res.baseline != os.path.join(flat, ".frozen"), label
+        assert res.run_dir != os.path.join(flat, "run"), label
+        assert not os.path.exists(res.manifest), label
+        assert not os.path.exists(res.baseline), label
+
+
+def test_an_unusable_gate_dir_refusal_lands_on_an_inert_directory(tmp_path):
+    # With no safe segment to name, the refusal needs a path that cannot be any run's gate.
+    # A run key must start with [a-z0-9], so `__unresolved__` can never collide with one.
+    for gate_dir in ("assertions/../../outside", "somewhere/else", "assertions/"):
+        doc = _run_doc("docs/specs/alpha.md")
+        doc["gate_dir"] = gate_dir
+        res = paths.resolve_gate(str(tmp_path), run_key=doc["run_key"], run=doc)
+        assert res.fail_closed, gate_dir
+        assert res.directory == str(tmp_path / "assertions" / "__unresolved__"), (
+            gate_dir
+        )
 
 
 def test_a_legacy_slug_run_keeps_its_recorded_names(tmp_path):

@@ -134,7 +134,14 @@ def run_gate_dir(repo_root: str, run_key: str) -> str:
 
     The run key is the SINGLE source shared by the run's integration-branch suffix
     (``conductor/run-<run-key>``) and this directory, so the two cannot diverge. ``resolve_gate``
-    verifies that equality against ``run.json`` rather than re-deriving it from ambient files."""
+    verifies that equality against ``run.json`` rather than re-deriving it from ambient files.
+
+    Refuses an unsafe key instead of composing a traversal path out of it, the same way
+    ``conductor.core.runstate`` refuses one before building a state path."""
+    if not _safe_slug(run_key):
+        raise ValueError(
+            f"unsafe run key {run_key!r}; refusing to build a gate path from it"
+        )
     return os.path.join(repo_root, "assertions", run_key)
 
 
@@ -204,8 +211,17 @@ def _resolve_gate_by_run_key(
             f"run {run_key!r} records unknown identity_scheme {scheme!r}; expected "
             "'path-hash-v2' or 'legacy-slug-v1' — repair run.json"
         )
-    flat = os.path.join(root, "assertions")
-    directory = flat if fail else os.path.join(flat, segment)
+    if segment and _safe_slug(segment):
+        directory = os.path.join(root, "assertions", segment)
+    else:
+        # No usable segment, and the failure must not point at the flat gate: in a repo that has
+        # one, `assertions/` is a real, frozen, green gate, so a caller that ignored fail_closed
+        # would validate the wrong thing. Note this is the OPPOSITE of legacy mode, which never
+        # redirects on failure — it keeps whatever it already resolved, and reaches flat only
+        # when fail_closed is None. `__unresolved__` cannot collide with any run key (keys must
+        # start with [a-z0-9]), so manifest/baseline/run_dir all land on a path that does not
+        # exist, and a caller that ignores fail_closed still fails closed.
+        directory = os.path.join(root, "assertions", "__unresolved__")
     return GateResolution(
         directory,
         os.path.join(directory, "manifest.yaml"),
@@ -239,7 +255,11 @@ def resolve_gate(
     keeps the names migration recorded. ``resolve_gate`` never loads the document itself — that
     would make ``paths`` import ``conductor.core.runstate``, whose ``runkey`` already imports
     ``paths.spec_slug``; ``conductor.core.resolve.gate_for_run`` is the one place that pairs a
-    loaded record with this resolver.
+    loaded record with this resolver. On refusal the gate NEVER collapses onto the flat
+    ``assertions/`` — it keeps the segment the record claimed while that is safe, else
+    ``assertions/__unresolved__`` — because in a repo that has one the flat gate is real, frozen
+    and green, and a caller reading ``directory`` without checking ``fail_closed`` would then
+    validate (or write results into) exactly the wrong gate.
 
     LEGACY MODE (no ``run_key``) is everything below and is unchanged. Plan 03 retires it once
     every run is migrated.
