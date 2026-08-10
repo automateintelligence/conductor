@@ -456,7 +456,8 @@ def main(argv: list[str] | None = None) -> int:
             # main_root on a non-repo path: name the failure, never traceback.
             detail = (e.stderr or "").strip()
             print(
-                f"cannot resolve main root for {args.project}: {detail or e}",
+                f"cannot resolve main root for {args.project}: "
+                f"{detail or e}",
                 file=sys.stderr,
             )
             return 1

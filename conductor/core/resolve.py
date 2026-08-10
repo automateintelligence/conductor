@@ -46,8 +46,18 @@ def repo_root(start: str | None = None) -> str:
     """The MAIN checkout root for any path inside the repository.
 
     ``--git-common-dir`` is identical from the owner checkout and from a linked run worktree;
-    ``--show-toplevel`` is not, which is why it is not used here."""
-    base = start or os.environ.get("CONDUCTOR_HOME") or os.getcwd()
+    ``--show-toplevel`` is not, which is why it is not used here.
+
+    Only an ABSENT ``start`` falls back to the ambient project. A supplied one is passed to git
+    as given, empty string included: ``resume_script.main`` hands ``--project`` straight to
+    ``main_root`` with no or-chain of its own, so treating ``""`` as "not supplied" would let
+    ``CONDUCTOR_HOME`` name a different project than the one the operator asked for, and
+    ``uninstall-cron`` would report success while the target project's cron lines kept firing."""
+    base = (
+        start
+        if start is not None
+        else (os.environ.get("CONDUCTOR_HOME") or os.getcwd())
+    )
     common = subprocess.run(
         ["git", "-C", base, "rev-parse", "--path-format=absolute", "--git-common-dir"],
         check=True,
@@ -89,20 +99,31 @@ def repo_identity(root: str) -> dict:
     }
 
 
-def _recover_pending(root: str) -> None:
-    """Complete or reverse any unfinished transaction before this state root is READ.
+def recover_pending(state_root: str) -> list[str]:
+    """Complete or reverse every unfinished transaction under ``state_root``; return the ids
+    handled, sorted.
 
-    A crash between ``transaction.commit`` and ``transaction.apply`` leaves ``project.json`` and
-    ``run.json`` holding their before images, so an un-recovered read sees the *previous* set of
-    runs: a bare command would report no active run, or resolve to a run that a committed
-    transaction has already replaced, and land work on the wrong branch. ``pending`` is checked
-    before the lock is taken so resolving inside a repository that has no state root never
-    creates one; ``transaction`` itself takes no locks, so recovering under ``project.lock`` —
-    the same lock ``registry`` recovers under — cannot deadlock."""
-    if not transaction.pending(root):
-        return
-    with locks.hold(registry.lock_path(root), kind="project"):
-        transaction.recover(root)
+    CALL THIS FROM AN ENTRY POINT, BEFORE ACQUIRING ANY LOCK. It takes ``project.lock`` itself,
+    so calling it while already holding the project, owner or state lock raises
+    ``locks.LockOrderError``. It is deliberately NOT called by ``resolve`` or ``active_run_keys``:
+    those are leaf reads that must stay callable from under a lock, and a recovery hidden inside
+    them would fail only when a journal happened to be pending — an intermittent unattended-run
+    failure of exactly the kind ``locks``' global order exists to prevent.
+
+    Why an entry point must call it at all: a crash between ``transaction.commit`` and
+    ``transaction.apply`` leaves ``project.json`` and ``run.json`` holding their BEFORE images,
+    so an unrecovered read sees the previous set of runs — a bare command reports no active run
+    for a run that is already committed, or resolves to a run a committed transaction has
+    replaced, and lands work on the wrong branch.
+
+    ``transaction.pending`` is checked before the lock is taken, so calling this against a
+    repository that has no state root never creates one. A journal appearing in that window
+    belongs to a live writer, which holds ``project.lock`` across prepare/commit/apply and
+    finishes its own transaction; the next entry point recovers anything it truly abandoned."""
+    if not transaction.pending(state_root):
+        return []
+    with locks.hold(registry.lock_path(state_root), kind="project"):
+        return transaction.recover(state_root)
 
 
 def active_run_keys(root: str) -> list[str]:
@@ -110,8 +131,10 @@ def active_run_keys(root: str) -> list[str]:
 
     Reads ``run.json`` rather than the registry's status mirror: the mirror exists for the
     new-generation policy and cheap listing, and a stale mirror must never decide which run a
-    bare command operates on."""
-    _recover_pending(root)
+    bare command operates on.
+
+    A pure read: takes no lock, so it is safe under one. Recovering a pending transaction is
+    ``recover_pending``'s job, and the entry point's to call."""
     doc = registry.load(root)
     if doc is None:
         return []
@@ -124,10 +147,12 @@ def active_run_keys(root: str) -> list[str]:
 
 
 def resolve(*, run_key: str | None = None, start: str | None = None) -> RunResolution:
-    """The run this invocation means."""
+    """The run this invocation means.
+
+    A pure read, like ``active_run_keys``: safe to call while holding a lock. An entry point that
+    may be running after a crash calls ``recover_pending`` first."""
     root = repo_root(start)
     sroot = os.path.join(root, ".conductor")
-    _recover_pending(sroot)
     if run_key is not None:
         run = runstate.load(sroot, run_key)
         if run is None:
@@ -142,7 +167,16 @@ def resolve(*, run_key: str | None = None, start: str | None = None) -> RunResol
     if len(active) == 1:
         key = active[0]
         run = runstate.load(sroot, key)
-        assert run is not None  # active_run_keys only returns keys whose record loaded
+        if run is None:
+            # active_run_keys loaded this record a moment ago, so reaching here means it was
+            # removed mid-resolution. Rare, but it gets the same treatment as every other
+            # failure here: name the run, the path, that nothing was written, and the way out.
+            raise RunNotFound(
+                f"run {key!r} was listed as active but its record at "
+                f"{runstate.run_path(sroot, key)} disappeared mid-resolution; no write "
+                "occurred. Re-run the command, or list known runs with: "
+                "conductor run list --all"
+            )
         return RunResolution(sroot, root, key, runstate.run_dir(sroot, key), run)
     if not active:
         raise RunNotFound(

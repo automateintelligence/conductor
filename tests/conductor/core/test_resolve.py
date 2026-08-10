@@ -9,10 +9,19 @@ resolution succeeds only when exactly one active run exists."""
 from __future__ import annotations
 
 import os
+import subprocess
 
 import pytest
 
-from conductor.core import registry, resolve, runkey, runstate, schema, transaction
+from conductor.core import (
+    locks,
+    registry,
+    resolve,
+    runkey,
+    runstate,
+    schema,
+    transaction,
+)
 
 WORKSTATION = "0123456789abcdef0123456789abcdef"
 NOW = "2026-08-10T12:00:00+00:00"
@@ -119,6 +128,23 @@ def test_repo_root_falls_back_to_conductor_home_when_no_start_is_given(
     )
 
 
+def test_repo_root_takes_an_explicit_empty_start_literally(
+    git_repo, tmp_path, monkeypatch
+):
+    """`resume_script.main` hands --project straight to main_root with no or-chain, so an empty
+    --project must NOT be quietly replaced by CONDUCTOR_HOME: uninstall-cron would then compute a
+    marker for a different project, find no matching crontab lines, and exit 0 while the target
+    project's cron lines kept firing. Passed through as given, git resolves it against the process
+    cwd — outside a repository that is a CalledProcessError, which resume_script.main:455-462
+    already turns into an actionable message."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(git_repo))
+    outside = tmp_path / "not-a-repo"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    with pytest.raises(subprocess.CalledProcessError):
+        resolve.repo_root("")
+
+
 def test_repo_identity_records_the_root_commit(git_repo):
     identity = resolve.repo_identity(str(git_repo))
     assert identity["root_commit"] and len(identity["root_commit"]) == 40
@@ -202,32 +228,85 @@ def test_active_run_keys_reads_run_json_not_the_registry_mirror(project):
     assert resolve.active_run_keys(state_root) == [key]
 
 
-def test_active_run_keys_completes_an_unfinished_transaction_before_reading(project):
+def test_recover_pending_finishes_a_committed_transaction_and_names_what_it_handled(
+    project,
+):
     """A crash between transaction.commit() and apply leaves project.json and run.json holding
-    their before images, so the newly created run is invisible on disk. Reading without recovering
-    would report no active run — and a bare command would then start work against the wrong run,
-    or refuse to start at all, over state that is already committed."""
+    their BEFORE images, so a run that is already committed is invisible on disk. recover_pending
+    rolls the journal forward and reports which transactions it settled."""
     _, state_root = project
     key = _pending_create(state_root, "docs/specs/alpha.md", "txn-create-alpha")
     assert registry.run_keys(registry.load(state_root)) == []
     assert runstate.load(state_root, key) is None
 
-    assert resolve.active_run_keys(state_root) == [key]
+    assert resolve.recover_pending(state_root) == ["txn-create-alpha"]
     assert transaction.pending(state_root) == []
+    assert registry.run_keys(registry.load(state_root)) == [key]
+    assert runstate.load(state_root, key)["spec_path"] == "docs/specs/alpha.md"
+    assert resolve.recover_pending(state_root) == []
 
 
-def test_an_explicit_run_key_completes_an_unfinished_transaction_before_reading(
-    project,
-):
-    """The explicit-key path reads run.json directly rather than through active_run_keys, so it
-    needs the same recovery: a committed-but-unapplied creation must resolve, not raise."""
+def test_active_run_keys_sees_the_run_only_after_the_entry_point_recovers(project):
+    """active_run_keys is a leaf READ: it must not recover, because recovery takes project.lock
+    and a caller may already hold a lock. Until the entry point calls recover_pending, a
+    committed-but-unapplied run is legitimately not there."""
+    _, state_root = project
+    key = _pending_create(state_root, "docs/specs/alpha.md", "txn-create-alpha")
+    assert resolve.active_run_keys(state_root) == []
+    assert transaction.pending(state_root) == ["txn-create-alpha"]
+
+    resolve.recover_pending(state_root)
+    assert resolve.active_run_keys(state_root) == [key]
+
+
+def test_an_explicit_run_key_sees_the_run_only_after_the_entry_point_recovers(project):
+    """The explicit-key path reads run.json directly rather than through active_run_keys, and is
+    a leaf read for the same reason. Once the entry point has recovered, it resolves."""
     root, state_root = project
     key = _pending_create(state_root, "docs/specs/beta.md", "txn-create-beta")
-    assert runstate.load(state_root, key) is None
+    with pytest.raises(resolve.RunNotFound):
+        resolve.resolve(run_key=key, start=root)
 
-    resolution = resolve.resolve(run_key=key, start=root)
-    assert resolution.run["spec_path"] == "docs/specs/beta.md"
-    assert transaction.pending(state_root) == []
+    resolve.recover_pending(state_root)
+    assert resolve.resolve(run_key=key, start=root).run["spec_path"] == (
+        "docs/specs/beta.md"
+    )
+
+
+def test_the_readers_take_no_locks_so_they_are_safe_to_call_under_one(project):
+    """The guard against reintroducing recovery — or any other lock — into the read path. A
+    takeover or a repoint resolves while holding owner.lock; a project.lock taken underneath that
+    is a lock-order violation (locks.LOCK_ORDER), and one that would only fire when a journal
+    happened to be pending, i.e. during crash recovery of an unattended run."""
+    root, state_root = project
+    key = _make_run(state_root, "docs/specs/alpha.md")
+    # A journal deliberately left pending: recovery only takes project.lock when one exists, so a
+    # guard run against an empty journal directory would pass no matter what the readers did.
+    _pending_create(state_root, "docs/specs/beta.md", "txn-create-beta")
+    with locks.hold(
+        runstate.owner_lock_path(state_root, key), kind="owner", run_key=key
+    ):
+        assert resolve.active_run_keys(state_root) == [key]
+        assert resolve.resolve(run_key=key, start=root).run_key == key
+        assert resolve.resolve(start=root).run_key == key
+    assert transaction.pending(state_root) == ["txn-create-beta"]
+
+
+def test_a_run_that_vanishes_mid_resolution_names_the_path_and_the_way_out(
+    project, monkeypatch
+):
+    """The one-active-run branch re-reads the record active_run_keys just loaded. If it is gone,
+    that is a real race, and it gets the same actionable failure as every other branch here rather
+    than a bare AssertionError — which `python -O` would strip away entirely."""
+    root, state_root = project
+    monkeypatch.setattr(resolve, "active_run_keys", lambda _root: ["ghost-0badf00d"])
+    with pytest.raises(resolve.RunNotFound) as excinfo:
+        resolve.resolve(start=root)
+    message = str(excinfo.value)
+    assert "ghost-0badf00d" in message
+    assert runstate.run_path(state_root, "ghost-0badf00d") in message
+    assert "no write occurred" in message
+    assert "conductor run list --all" in message
 
 
 def test_resume_script_main_root_delegates_to_the_same_resolver(
