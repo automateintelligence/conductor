@@ -98,6 +98,17 @@ list (design lines 418–427) must be a runnable check, not a prose instruction.
 recreation step (design line 414) is the highest-risk item — absolute linked-worktree metadata
 under the renamed root is what breaks.
 
+> **BLOCKING PRECONDITION — do not start Plan 00 without an explicit go-ahead.**
+> As of 2026-08-10 the owner has a live Conductor run executing out of `~/.claude/conductor`.
+> Renaming or quarantining that path while a run holds a worktree, a schedule, or a live process
+> under it is exactly the failure design lines 412–414 describe: linked-worktree metadata is
+> absolute, so the run's worktree registrations break and work completes under a quarantined
+> path. Plan 00 step 2 ("checkpoint or quiesce every in-flight run") is not a formality —
+> it is the gate. Before any step of Plan 00 runs, the owner must confirm that every run is
+> checkpointed or quiesced and no live process has its working directory or executable under the
+> old checkout. Plans 01–07 are unaffected: they are ordinary feature branches developed in
+> `.worktrees/`, and they never move, rename, or write to the checkout root.
+
 ---
 
 ## Plan 01 — Run identity, project registry, per-run state
