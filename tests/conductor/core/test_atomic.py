@@ -65,3 +65,12 @@ def test_read_json_raises_on_malformed_content(tmp_path):
     target.write_text("{not json")
     with pytest.raises(ValueError):
         atomic.read_json(str(target))
+
+
+def test_remove_durably_deletes_an_existing_file_and_is_silent_on_absence(tmp_path):
+    target = tmp_path / "to_remove.json"
+    target.write_text("content\n")
+    atomic.remove_durably(str(target))
+    assert not target.exists()
+    # Second call on absent file must not raise
+    atomic.remove_durably(str(target))

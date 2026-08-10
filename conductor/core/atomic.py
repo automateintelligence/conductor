@@ -53,6 +53,20 @@ def write_json_atomic(path: str, doc: dict, *, mode: int = 0o644) -> None:
     write_atomic(path, json.dumps(doc, indent=2, sort_keys=True) + "\n", mode=mode)
 
 
+def remove_durably(path: str) -> None:
+    """Delete ``path`` and fsync its directory, so the removal survives an unclean shutdown.
+
+    ``write_atomic`` fsyncs the directory after its rename; a bare ``os.unlink`` does not, and an
+    unfsynced delete can be reordered after a later durable operation. Deleting a file the caller
+    asked to remove therefore needs the same discipline as writing one. Absent is success — the
+    postcondition is that the path does not exist."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    _fsync_dir(os.path.dirname(os.path.abspath(path)) or ".")
+
+
 def read_json(path: str) -> dict | None:
     """The document at ``path``, or ``None`` when the file does not exist.
 

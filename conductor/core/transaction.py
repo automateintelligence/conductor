@@ -112,10 +112,7 @@ def commit(state_root: str, txn_id: str) -> None:
 
 def _write_image(path: str, image: dict | None) -> None:
     if image is None:
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
+        atomic.remove_durably(path)
         return
     atomic.write_json_atomic(path, image)
 
@@ -129,7 +126,7 @@ def apply(state_root: str, txn_id: str) -> None:
         )
     for entry in doc["entries"]:
         _write_image(entry["path"], entry.get("after"))
-    os.unlink(journal_path(state_root, txn_id))
+    atomic.remove_durably(journal_path(state_root, txn_id))
 
 
 def pending(state_root: str) -> list[str]:
@@ -156,6 +153,6 @@ def recover(state_root: str) -> list[str]:
             _write_image(
                 entry["path"], entry.get("after") if forward else entry.get("before")
             )
-        os.unlink(journal_path(state_root, txn_id))
+        atomic.remove_durably(journal_path(state_root, txn_id))
         handled.append(txn_id)
     return handled

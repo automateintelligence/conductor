@@ -191,3 +191,22 @@ def test_a_journal_that_cannot_be_parsed_fails_closed(tmp_path):
         fh.write("{not json")
     with pytest.raises(ValueError):
         transaction.recover(str(state_root))
+
+
+def test_committed_delete_entry_leaves_target_absent_and_recover_is_idempotent(
+    tmp_path,
+):
+    state_root = tmp_path / ".conductor"
+    target = tmp_path / "to_delete.json"
+    atomic.write_json_atomic(str(target), {"data": "present"})
+    assert target.exists()
+    transaction.prepare(
+        str(state_root), "txn-1", [_entry(target, {"data": "present"}, None)]
+    )
+    transaction.commit(str(state_root), "txn-1")
+    transaction.apply(str(state_root), "txn-1")
+    assert not target.exists()
+    assert transaction.pending(str(state_root)) == []
+    # recover should be idempotent: calling on clean state returns empty
+    assert transaction.recover(str(state_root)) == []
+    assert not target.exists()
