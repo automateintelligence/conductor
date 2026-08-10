@@ -49,6 +49,7 @@ def init(state_root: str, *, workstation_id: str, repo_identity: dict) -> dict:
     """Create the registry if absent; return the existing one otherwise. Never overwrites, so a
     second caller cannot reset the workstation identity or drop mappings."""
     with locks.hold(lock_path(state_root), kind="project"):
+        transaction.recover(state_root)
         existing = load(state_root)
         if existing is not None:
             return schema.validate_project(existing)

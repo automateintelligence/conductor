@@ -186,7 +186,8 @@ def test_commit_completes_an_unfinished_transaction_before_reading(state_root):
     before reading mappings, so a crash cannot leave a silently split identity."""
     doc = registry.load(state_root)
     key = runkey.run_key(ALPHA)
-    after = registry.register(dict(doc), spec=ALPHA, run_key=key, generation=1)
+    # Use deep copy so before and after genuinely differ; shallow copy would alias nested dicts.
+    after = registry.register(schema.clone(doc), spec=ALPHA, run_key=key, generation=1)
     after["revision"] = 1
     transaction.prepare(
         state_root,
@@ -195,6 +196,8 @@ def test_commit_completes_an_unfinished_transaction_before_reading(state_root):
     )
     transaction.commit(state_root, "txn-repoint")
     refreshed = registry.update(state_root, lambda d: d)
+    # After recovery-triggering update, assert ALPHA registration IS present
+    # (only true if journal rolled forward, not backward).
     assert registry.current_run_key(refreshed, ALPHA) == key
     assert transaction.pending(state_root) == []
 
