@@ -3110,8 +3110,12 @@ def repo_root(start: str | None = None) -> str:
     """The MAIN checkout root for any path inside the repository.
 
     ``--git-common-dir`` is identical from the owner checkout and from a linked run worktree;
-    ``--show-toplevel`` is not, which is why it is not used here."""
-    base = start or os.environ.get("CONDUCTOR_HOME") or os.getcwd()
+    ``--show-toplevel`` is not, which is why it is not used here.
+
+    ``start is not None`` rather than a truthiness test: an explicitly supplied ``""`` must not
+    fall through to the ambient ``CONDUCTOR_HOME``. Silently resolving a different repository
+    than the caller named is the one failure this module exists to eliminate."""
+    base = start if start is not None else (os.environ.get("CONDUCTOR_HOME") or os.getcwd())
     common = subprocess.run(
         ["git", "-C", base, "rev-parse", "--path-format=absolute", "--git-common-dir"],
         check=True,
@@ -3151,8 +3155,34 @@ def repo_identity(root: str) -> dict:
     }
 
 
+def recover_pending(state_root: str) -> list[str]:
+    """Complete or reverse any unfinished transaction. Returns the journal ids handled.
+
+    CALL THIS FROM AN ENTRY POINT, BEFORE ACQUIRING ANY LOCK. It takes ``project.lock`` itself,
+    so a caller already holding ``project``, ``owner`` or ``state`` gets ``LockOrderError``.
+
+    The leaf reads below (``active_run_keys``, ``resolve``) deliberately do NOT call this. If
+    they did, they would inherit that lock-order constraint and become unsafe to call from
+    inside any lock — and the failure would only appear when a journal happened to be pending,
+    i.e. during crash recovery, which is the worst time to discover it. The design scopes the
+    recover-before-read rule to entry points, not to every leaf read, so recovery lives here and
+    the leaves stay pure.
+
+    ``transaction.pending`` is checked BEFORE the lock so a pure read of a project that has no
+    state root creates nothing. That check-then-lock window is benign: writers hold
+    ``project.lock`` across prepare/commit/apply, so once this holds the lock no writer can be
+    mid-transaction, and a false-negative merely means the next caller recovers instead."""
+    if not transaction.pending(state_root):
+        return []
+    with locks.hold(registry.lock_path(state_root), kind="project"):
+        return transaction.recover(state_root)
+
+
 def active_run_keys(root: str) -> list[str]:
     """Run keys whose RUN RECORD says active, checkpointed, or blocked, sorted.
+
+    A pure read: takes no lock, so it is safe to call from anywhere, including from inside a
+    held lock. See ``recover_pending`` for why recovery is not done here.
 
     Reads ``run.json`` rather than the registry's status mirror: the mirror exists for the
     new-generation policy and cheap listing, and a stale mirror must never decide which run a
@@ -3184,7 +3214,16 @@ def resolve(*, run_key: str | None = None, start: str | None = None) -> RunResol
     if len(active) == 1:
         key = active[0]
         run = runstate.load(sroot, key)
-        assert run is not None  # active_run_keys only returns keys whose record loaded
+        if run is None:
+            # A race: the record existed when active_run_keys read it and is gone now. An
+            # `assert` here would raise a bare AssertionError, which breaks the rule its two
+            # sibling branches keep — every actionable failure names the operation, the path,
+            # whether a write occurred, and the recovery command.
+            raise RunNotFound(
+                f"run {key!r} disappeared between listing and loading "
+                f"({runstate.run_path(sroot, key)}); no write occurred. Retry, or inspect with: "
+                "conductor run list --all"
+            )
         return RunResolution(sroot, root, key, runstate.run_dir(sroot, key), run)
     if not active:
         raise RunNotFound(
@@ -4323,6 +4362,24 @@ conductor run repoint-spec --run <run-key> <new-relative-path> [--project <root>
 - Exit codes: `0` success, `1` refusal or failure, `2` ambiguous run (several active, no `--run`), `3` no such run / no active run, `64` usage.
 
 **Scope boundary:** `run new` creates the registry entry, the run directory, and `run.json`. It does **not** create branches or worktrees (Plan 06), install a schedule (Plan 05), or record hosts (Plan 04). `/conductor:start` composes those once those plans land.
+
+**Every verb is an entry point and MUST call `resolve.recover_pending(state_root)` first.** This is not optional bookkeeping — it is the other half of a decision made in Task 9. `resolve()` and `active_run_keys()` are deliberately pure lock-free reads, so that Plan 02's takeover and Plan 12's `repoint` can call them while holding `owner.lock`. The cost of that purity is that **nothing recovers an unfinished transaction unless an entry point does it**, and a committed-but-unapplied journal makes a run invisible: a bare command then resolves to a different run and lands work on the wrong branch.
+
+So `main()` calls `resolve.recover_pending(...)` once, before dispatching to any handler and before any handler takes a lock. Put it in `main()` rather than in each `cmd_*` so a verb added later cannot forget it:
+
+```python
+    try:
+        root = resolve.repo_root(getattr(args, "project", None))
+        resolve.recover_pending(os.path.join(root, ".conductor"))
+    except subprocess.CalledProcessError as exc:
+        print(f"git failed resolving the project: {(exc.stderr or '').strip() or exc}", file=sys.stderr)
+        return EXIT_FAIL
+    return _HANDLERS[args.cmd](args)
+```
+
+`recover_pending` returns `[]` cheaply when no journal is pending and creates nothing when the project has no state root, so this is safe on a first-ever `run new`.
+
+**Required test:** prepare and commit a transaction registering a spec, without applying it; then invoke a CLI verb (`resolve` is the cheapest) and assert it sees the recovered run and that `transaction.pending(state_root) == []` afterwards. Verify it fails without the `recover_pending` call — a test that passes either way is the failure mode this plan has already hit twice.
 
 - [ ] **Step 1: Write the failing test**
 
