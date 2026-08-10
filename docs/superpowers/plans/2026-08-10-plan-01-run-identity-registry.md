@@ -625,6 +625,37 @@ def test_normalize_refuses_a_path_outside_the_repository(tmp_path):
     assert "outside the repository" in str(excinfo.value)
 
 
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform has no symlinks")
+def test_normalize_rescues_a_repository_reached_through_a_symlink_alias(tmp_path):
+    """`root` is realpath'd but an absolute spec path is not, so a repo reached through a
+    symlinked alias would otherwise report an in-repo file as outside."""
+    actual = tmp_path / "actual"
+    (actual / "docs" / "specs").mkdir(parents=True)
+    (actual / "docs" / "specs" / "alpha.md").write_text("# alpha\n")
+    alias = tmp_path / "alias"
+    os.symlink(actual, alias)
+    through_alias = runkey.normalize_spec_path(
+        str(alias), str(alias / "docs" / "specs" / "alpha.md")
+    )
+    through_real = runkey.normalize_spec_path(
+        str(actual), str(actual / "docs" / "specs" / "alpha.md")
+    )
+    assert through_alias == through_real == "docs/specs/alpha.md"
+    assert runkey.run_key(through_alias) == runkey.run_key(through_real)
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform has no symlinks")
+def test_the_symlink_retry_does_not_weaken_the_outside_repository_guard(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "alpha.md").write_text("# alpha\n")
+    with pytest.raises(ValueError) as excinfo:
+        runkey.normalize_spec_path(str(root), str(outside / "alpha.md"))
+    assert "outside the repository" in str(excinfo.value)
+
+
 def test_is_safe_run_key_accepts_generated_keys_and_rejects_traversal():
     assert runkey.is_safe_run_key(runkey.run_key("docs/specs/alpha.md", 3))
     assert not runkey.is_safe_run_key("../outside")
@@ -670,7 +701,14 @@ from conductor.paths import spec_slug
 HASH_LEN = 8
 
 _KEY_RE = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
-_GEN_RE = re.compile(r"-g([2-9]\d*)\Z")
+# Generation 1 carries no suffix, so only 2 and up are encoded — but the range is on the WHOLE
+# number, not its first digit. `[2-9]\d*` would silently parse -g10, -g11, -g17 as generation 1.
+_GEN_RE = re.compile(r"-g([1-9]\d*)\Z")
+
+
+def _escapes_repo(relative: str) -> bool:
+    """Whether a computed relative path leaves the repository root."""
+    return relative == ".." or relative.startswith(".." + os.sep)
 
 
 def normalize_spec_path(repo_root: str, spec_path: str) -> str:
@@ -686,7 +724,16 @@ def normalize_spec_path(repo_root: str, spec_path: str) -> str:
         else os.path.normpath(os.path.join(root, spec_path))
     )
     relative = os.path.relpath(absolute, root)
-    if relative == ".." or relative.startswith(".." + os.sep):
+    if _escapes_repo(relative):
+        # The caller may have reached the repository through a symlinked alias (a symlinked
+        # home, /tmp on macOS, a WSL mount): ``root`` is realpath'd but an absolute
+        # ``spec_path`` is not, so relpath would compare a resolved path against an unresolved
+        # one and report a file inside the repo as outside. Resolve once and retry before
+        # refusing. A spec that is ITSELF a symlink still keeps its in-repo path — this runs
+        # only on the refusal path, so it rescues an alias and never relocates a spec that
+        # already resolved inside the repository.
+        relative = os.path.relpath(os.path.realpath(absolute), root)
+    if _escapes_repo(relative):
         raise ValueError(
             f"spec path is outside the repository: {spec_path!r} is not under {root!r}"
         )
@@ -721,7 +768,7 @@ def is_safe_run_key(key: str) -> bool:
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `pytest tests/conductor/core/test_runkey.py -q`
-Expected: PASS (11 passed)
+Expected: PASS (12 passed)
 
 - [ ] **Step 5: Lint and typecheck**
 
