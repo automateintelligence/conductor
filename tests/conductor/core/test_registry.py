@@ -202,6 +202,40 @@ def test_commit_completes_an_unfinished_transaction_before_reading(state_root):
     assert transaction.pending(state_root) == []
 
 
+def test_init_completes_an_unfinished_transaction_before_reading(tmp_path):
+    """init() must call transaction.recover() before reading, so a crash between
+    transaction.commit() and apply does not leave init() silently returning stale state.
+    No other registry call should precede init() here — if any other call triggers
+    recovery first, this test passes whether or not init() was fixed."""
+    state_root = str(tmp_path / ".conductor")
+    # Create and initialize the registry at revision 0.
+    first = registry.init(
+        state_root, workstation_id=WORKSTATION, repo_identity=IDENTITY
+    )
+    assert first["revision"] == 0
+
+    # Build a transaction that registers ALPHA with revision 1, leaving it committed but unapplied.
+    doc = registry.load(state_root)
+    key = runkey.run_key(ALPHA)
+    # Use deep copy so before and after genuinely differ; shallow copy would alias nested dicts.
+    after = registry.register(schema.clone(doc), spec=ALPHA, run_key=key, generation=1)
+    after["revision"] = 1
+    transaction.prepare(
+        state_root,
+        "txn-register-alpha",
+        [{"path": registry.registry_path(state_root), "before": doc, "after": after}],
+    )
+    transaction.commit(state_root, "txn-register-alpha")
+
+    # Call init() again — it must recover the pending transaction before reading.
+    recovered = registry.init(
+        state_root, workstation_id=WORKSTATION, repo_identity=IDENTITY
+    )
+    # Assert the returned document already contains the ALPHA registration from the recovered transaction.
+    assert registry.current_run_key(recovered, ALPHA) == key
+    assert transaction.pending(state_root) == []
+
+
 def test_the_mutate_callback_cannot_alter_the_on_disk_snapshot(state_root):
     def mutate(doc):
         doc["specs"]["docs/specs/ghost.md"] = {"generations": [], "current": None}
