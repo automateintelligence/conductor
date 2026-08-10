@@ -59,22 +59,13 @@ def main_root(path: str) -> str:
     """The MAIN-checkout root for any path inside the repo: dirname of
     `git rev-parse --path-format=absolute --git-common-dir`. IDENTICAL whether computed
     from the owner checkout or a linked run worktree (`--show-toplevel` is NOT — it
-    returns the worktree path there, so install and removal would disagree)."""
-    common = subprocess.run(
-        [
-            "git",
-            "-C",
-            path,
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-common-dir",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    ).stdout.strip()
-    return os.path.dirname(common)
+    returns the worktree path there, so install and removal would disagree).
+
+    Delegates to `conductor.core.resolve.repo_root` so the driver, the resume script, and the
+    run resolver cannot disagree about which checkout owns a project's state."""
+    from conductor.core.resolve import repo_root
+
+    return repo_root(path)
 
 
 def cron_marker(root: str) -> str:
@@ -465,8 +456,7 @@ def main(argv: list[str] | None = None) -> int:
             # main_root on a non-repo path: name the failure, never traceback.
             detail = (e.stderr or "").strip()
             print(
-                f"cannot resolve main root for {args.project}: "
-                f"{detail or e}",
+                f"cannot resolve main root for {args.project}: {detail or e}",
                 file=sys.stderr,
             )
             return 1
