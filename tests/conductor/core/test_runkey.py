@@ -9,6 +9,9 @@ directories, and run directories are generation-distinct."""
 
 from __future__ import annotations
 
+import os
+import platform
+
 import pytest
 
 from conductor import paths
@@ -90,3 +93,42 @@ def test_is_safe_run_key_accepts_generated_keys_and_rejects_traversal():
     assert not runkey.is_safe_run_key("")
     assert not runkey.is_safe_run_key("-leading")
     assert not runkey.is_safe_run_key("alpha.lock")
+
+
+@pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="symlink creation may require admin privileges on Windows",
+)
+def test_normalize_rescues_repository_accessed_through_symlink_alias(tmp_path):
+    """If the repository is reached through a symlinked alias (e.g., /home/user/repo -> /data/actual-repo),
+    an absolute spec path built through that alias should still normalize correctly."""
+    actual = tmp_path / "actual"
+    alias = tmp_path / "alias"
+    (actual / "docs" / "specs").mkdir(parents=True)
+    (actual / "docs" / "specs" / "alpha.md").write_text("# alpha\n")
+    os.symlink(actual, alias)
+
+    # Normalize using the alias path with an absolute spec path through the alias.
+    rel_via_alias = runkey.normalize_spec_path(
+        str(alias), str(alias / "docs" / "specs" / "alpha.md")
+    )
+    # Normalize using the real path for comparison.
+    rel_via_actual = runkey.normalize_spec_path(
+        str(actual), str(actual / "docs" / "specs" / "alpha.md")
+    )
+
+    # Both should produce the same normalized path and the same run key.
+    assert rel_via_alias == rel_via_actual == "docs/specs/alpha.md"
+    assert runkey.run_key(rel_via_alias) == runkey.run_key(rel_via_actual)
+
+
+def test_normalize_still_refuses_genuinely_outside_paths_after_symlink_retry(tmp_path):
+    """Even after the symlink rescue retry, paths genuinely outside the repository should still raise."""
+    repo = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    repo.mkdir()
+    (outside / "alpha.md").mkdir(parents=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        runkey.normalize_spec_path(str(repo), str(outside / "alpha.md"))
+    assert "outside the repository" in str(excinfo.value)

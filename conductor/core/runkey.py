@@ -27,6 +27,11 @@ _KEY_RE = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
 _GEN_RE = re.compile(r"-g([1-9]\d*)\Z")
 
 
+def _escapes_repo(rel: str) -> bool:
+    """Check if a relative path escapes the repository via .. segments."""
+    return rel == ".." or rel.startswith(".." + os.sep)
+
+
 def normalize_spec_path(repo_root: str, spec_path: str) -> str:
     """The repository-relative POSIX path the key hashes.
 
@@ -40,7 +45,16 @@ def normalize_spec_path(repo_root: str, spec_path: str) -> str:
         else os.path.normpath(os.path.join(root, spec_path))
     )
     relative = os.path.relpath(absolute, root)
-    if relative == ".." or relative.startswith(".." + os.sep):
+    if _escapes_repo(relative):
+        # The caller may have reached the repository through a symlinked alias (a
+        # symlinked home, /tmp on macOS, a WSL mount): `root` is realpath'd but an
+        # absolute spec_path is not, so relpath would compare a resolved path against
+        # an unresolved one and report a file inside the repo as outside. Resolve once
+        # and retry before refusing. A spec that is itself a symlink still keeps its
+        # in-repo path — this runs only on the refusal path, so it rescues an alias and
+        # never relocates a spec that already resolved inside the repository.
+        relative = os.path.relpath(os.path.realpath(absolute), root)
+    if _escapes_repo(relative):
         raise ValueError(
             f"spec path is outside the repository: {spec_path!r} is not under {root!r}"
         )
