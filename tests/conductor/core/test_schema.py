@@ -208,3 +208,43 @@ def test_validate_does_not_mutate_its_input():
     before = copy.deepcopy(doc)
     schema.validate_run(doc)
     assert doc == before
+
+
+def test_duplicate_generation_numbers_for_one_spec_are_refused():
+    doc = schema.new_project_doc(
+        workstation_id="0123456789abcdef0123456789abcdef",
+        repo_identity={"root_commit": "abc", "origin_url": None},
+    )
+    doc["specs"]["docs/specs/alpha.md"] = {
+        "generations": [
+            {"run_key": "alpha-11111111", "generation": 1, "status": "terminal"},
+            {"run_key": "beta-22222222", "generation": 1, "status": "active"},
+        ],
+        "current": "beta-22222222",
+        "path_history": [],
+    }
+    with pytest.raises(schema.SchemaError) as excinfo:
+        schema.validate_project(doc)
+    assert "duplicate" in str(excinfo.value)
+
+
+def test_path_hash_v2_gate_dir_must_match_the_run_key_derived_path():
+    doc = _run(gate_dir="assertions/totally-different-hash1234")
+    with pytest.raises(schema.SchemaError):
+        schema.validate_run(doc)
+
+
+def test_path_hash_v2_integration_branch_must_match_the_run_key_derived_branch():
+    doc = _run(integration_branch="conductor/run-totally-different-hash1234")
+    with pytest.raises(schema.SchemaError):
+        schema.validate_run(doc)
+
+
+def test_legacy_slug_v1_run_keeps_its_recorded_gate_dir_and_branch():
+    doc = _run(
+        run_key="self-enforcement-1a2b3c4d",
+        identity_scheme="legacy-slug-v1",
+        gate_dir="assertions/legacy-gate",
+        integration_branch="conductor/run-2026-07-05-self-enforcement",
+    )
+    assert schema.validate_run(doc) == doc

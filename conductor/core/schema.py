@@ -238,6 +238,25 @@ def validate_run(doc: dict) -> dict:
             f"gate_dir {gate_dir!r} must be 'assertions/<single-safe-segment>' relative to the "
             "repository root"
         )
+    if doc["identity_scheme"] == "path-hash-v2":
+        # A path-hash-v2 run's identity is fully derived from run_key, so gate_dir and
+        # integration_branch must match that derived form exactly — a mismatch means the
+        # recorded identity and the on-disk paths have silently diverged. legacy-slug-v1 runs
+        # (Plan 03 migration) deliberately retain their pre-migration branch/gate names, so
+        # this cross-check does not apply to them; only the safety checks above do.
+        expected_gate_dir = f"assertions/{key}"
+        if gate_dir != expected_gate_dir:
+            raise SchemaError(
+                f"gate_dir {gate_dir!r} does not match the run_key-derived path "
+                f"{expected_gate_dir!r} required for identity_scheme 'path-hash-v2'"
+            )
+        expected_branch = f"conductor/run-{key}"
+        if doc["integration_branch"] != expected_branch:
+            raise SchemaError(
+                f"integration_branch {doc['integration_branch']!r} does not match the "
+                f"run_key-derived branch {expected_branch!r} required for identity_scheme "
+                "'path-hash-v2'"
+            )
     for field in ("path_history", "phase_ids", "phase_reviews", "dispatches"):
         if not isinstance(doc[field], list):
             raise SchemaError(
@@ -324,6 +343,12 @@ def validate_project(doc: dict) -> dict:
                 raise SchemaError(f"specs[{spec_path!r}] has status {status!r}")
             if status not in TERMINAL_STATUSES:
                 nonterminal.append(key)
+        if len(numbers) != len(set(numbers)):
+            duplicates = sorted({n for n in numbers if numbers.count(n) > 1})
+            raise SchemaError(
+                f"specs[{spec_path!r}].generations has duplicate generation number(s) "
+                f"{duplicates}; each generation must appear at most once"
+            )
         if numbers != sorted(numbers):
             raise SchemaError(
                 f"specs[{spec_path!r}].generations must be in ascending order"
