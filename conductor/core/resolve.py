@@ -19,6 +19,7 @@ import os
 import subprocess
 from typing import NamedTuple
 
+from conductor import paths
 from conductor.core import locks, registry, runstate, schema, transaction
 
 _GIT_TIMEOUT = 30.0
@@ -190,3 +191,9 @@ def resolve(*, run_key: str | None = None, start: str | None = None) -> RunResol
         f"Active run keys: {', '.join(active)}\n"
         f"Re-run the command with one of:\n{listing}"
     )
+
+
+def gate_for_run(res: RunResolution) -> paths.GateResolution:
+    """The done-gate this run owns. The one place that pairs a loaded run record with
+    ``paths.resolve_gate``'s run-key mode, so no caller has to remember to pass both."""
+    return paths.resolve_gate(res.repo_root, run_key=res.run_key, run=res.run)
