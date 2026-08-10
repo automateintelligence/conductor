@@ -1263,6 +1263,23 @@ def validate_run(doc: dict) -> dict:
             f"gate_dir {gate_dir!r} must be 'assertions/<single-safe-segment>' relative to the "
             "repository root"
         )
+    if doc["identity_scheme"] == "path-hash-v2":
+        # The run key is the SINGLE source of both derived names, so a record whose identity and
+        # derived paths have diverged is a corrupt record, not a valid variant. Scheme-conditional
+        # on purpose: a `legacy-slug-v1` run migrated by Plan 03 deliberately retains the gate
+        # directory and branch names it had BEFORE migration, which need not follow the derived
+        # form — an unconditional check would make every migrated run unvalidatable.
+        want_gate = f"assertions/{key}"
+        if gate_dir != want_gate:
+            raise SchemaError(
+                f"gate_dir {gate_dir!r} disagrees with run_key {key!r}; expected {want_gate!r}"
+            )
+        want_branch = f"conductor/run-{key}"
+        if doc["integration_branch"] != want_branch:
+            raise SchemaError(
+                f"integration_branch {doc['integration_branch']!r} disagrees with run_key "
+                f"{key!r}; expected {want_branch!r}"
+            )
     for field in ("path_history", "phase_ids", "phase_reviews", "dispatches"):
         if not isinstance(doc[field], list):
             raise SchemaError(f"{field} must be a list, got {type(doc[field]).__name__}")
@@ -1329,6 +1346,12 @@ def validate_project(doc: dict) -> dict:
                 raise SchemaError(f"specs[{spec_path!r}] has status {status!r}")
             if status not in TERMINAL_STATUSES:
                 nonterminal.append(key)
+        if len(numbers) != len(set(numbers)):
+            duplicates = sorted({n for n in numbers if numbers.count(n) > 1})
+            raise SchemaError(
+                f"specs[{spec_path!r}] has duplicate generation number(s) "
+                f"{duplicates}; each generation appears at most once"
+            )
         if numbers != sorted(numbers):
             raise SchemaError(f"specs[{spec_path!r}].generations must be in ascending order")
         if len(nonterminal) > 1:
