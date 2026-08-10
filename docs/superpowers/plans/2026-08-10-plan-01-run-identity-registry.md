@@ -45,6 +45,7 @@
 | `conductor/core/__init__.py` | empty package marker |
 | `conductor/core/atomic.py` | durable writes: temp + flush + fsync + replace + directory fsync; JSON helpers |
 | `conductor/core/locks.py` | `flock`-based advisory locks and the global lock-order invariant |
+| `conductor/core/names.py` | THE definition of the two names a run key determines: `assertions/<key>` and `conductor/run-<key>`. A leaf module — imports nothing from `paths` or `runkey`, so `paths.py` can use it without a cycle (`runkey` already imports `paths.spec_slug`) |
 | `conductor/core/runkey.py` | spec-path normalization, path hash, run key, generation suffixes |
 | `conductor/core/schema.py` | `project.json` / `run.json` shapes, the status and review-policy vocabularies, status transitions |
 | `conductor/core/workstation.py` | the random host-neutral installation ID shared by both adapters |
@@ -3493,7 +3494,11 @@ git commit -m "conductor/core/hygiene.py:1-150 — refuse tracked run state, est
 
 **Contract (design lines 150 and 152):** the run key is the single source shared by a new run's integration-branch suffix and its done-gate directory, and the resolver verifies this equality **from `run.json`** rather than recovering it from ambient project files. When an invocation carries a run key, that key alone determines the gate directory, manifest, freeze baseline, and results path.
 
-**Import-direction rule:** `conductor/paths.py` must **not** import `conductor.core`. `runkey` already imports `paths.spec_slug`, and a back-edge would be a cycle. `resolve_gate` therefore takes the already-loaded run document; `resolve.gate_for_run` is the one place that loads it.
+**Import-direction rule:** `conductor/paths.py` must **not** import `conductor.core.runkey`, `registry`, `runstate`, or `resolve`. `runkey` already imports `paths.spec_slug`, and a back-edge would be a cycle. `resolve_gate` therefore takes the already-loaded run document; `resolve.gate_for_run` is the one place that loads it.
+
+`conductor.core.names` is the deliberate exception and the reason it exists as its own module: it is a leaf that imports nothing from `paths` or `runkey`, so `paths.py` may import it (`from conductor.core.names import derived_names`) without forming a cycle. That is what lets all three call sites — `schema.validate_run`, `paths.resolve_gate`, and `run_cmd.cmd_new` — share one definition of the two formats instead of each carrying a literal copy.
+
+**Tests keep their literals.** The test files in this plan assert `gate_dir == f"assertions/{key}"` and `integration_branch == f"conductor/run-{key}"` directly. Do **not** rewrite those to call `derived_names` — a test that computes its expectation with the same helper it is testing asserts nothing. The independent restatement in the tests is what pins the format.
 
 **Legacy behaviour is unchanged.** With `run_key=None`, `resolve_gate` keeps its existing env → `run_branch` → `goal.md` → flat precedence and its two §5 ambient-dodge checks, so assertion A12 and every existing caller keep passing. Plan 03 removes the legacy branch after migration.
 
@@ -3709,7 +3714,10 @@ def _resolve_gate_by_run_key(
             "'assertions/<single-safe-segment>' — repair run.json"
         )
     elif scheme == "path-hash-v2":
-        want_dir, want_branch = f"assertions/{run_key}", f"conductor/run-{run_key}"
+        # names.derived_names is THE definition of both formats — never re-write the literals
+        # here. conductor/branches.py:1-15 records what happened the last time two callers each
+        # derived `conductor/run-<...>` independently: they drifted.
+        want_dir, want_branch = derived_names(run_key)
         if recorded_dir != want_dir:
             fail = (
                 f"run {run_key!r} records gate_dir={recorded_dir!r}, expected {want_dir!r}; the "
@@ -4546,6 +4554,7 @@ import sys
 from conductor import paths
 from conductor.core import (
     hygiene,
+    names,
     registry,
     repoint,
     resolve,
@@ -4628,6 +4637,7 @@ def cmd_new(args: argparse.Namespace) -> int:
             return EXIT_FAIL
     generation = registry.next_generation(project_doc, relative)
     key = runkey.run_key(relative, generation)
+    derived = names.derived_names(key)  # THE definition of both formats; never inline them here
     runstate.create(
         state_root,
         key,
@@ -4636,8 +4646,8 @@ def cmd_new(args: argparse.Namespace) -> int:
             generation=generation,
             spec_path=relative,
             workstation_id=project_doc["workstation_id"],
-            integration_branch=f"conductor/run-{key}",
-            gate_dir=f"assertions/{key}",
+            integration_branch=derived.integration_branch,
+            gate_dir=derived.gate_dir,
             spec_digest=digest,
             now=_now(),
         ),
