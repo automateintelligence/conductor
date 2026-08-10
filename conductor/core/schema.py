@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import re
 
+from conductor.core.names import derived_names
 from conductor.core.runkey import is_safe_run_key, parse_generation
 
 SCHEMA_VERSION = 2
@@ -244,17 +245,16 @@ def validate_run(doc: dict) -> dict:
         # recorded identity and the on-disk paths have silently diverged. legacy-slug-v1 runs
         # (Plan 03 migration) deliberately retain their pre-migration branch/gate names, so
         # this cross-check does not apply to them; only the safety checks above do.
-        expected_gate_dir = f"assertions/{key}"
-        if gate_dir != expected_gate_dir:
+        names = derived_names(key)
+        if gate_dir != names.gate_dir:
             raise SchemaError(
                 f"gate_dir {gate_dir!r} does not match the run_key-derived path "
-                f"{expected_gate_dir!r} required for identity_scheme 'path-hash-v2'"
+                f"{names.gate_dir!r} required for identity_scheme 'path-hash-v2'"
             )
-        expected_branch = f"conductor/run-{key}"
-        if doc["integration_branch"] != expected_branch:
+        if doc["integration_branch"] != names.integration_branch:
             raise SchemaError(
                 f"integration_branch {doc['integration_branch']!r} does not match the "
-                f"run_key-derived branch {expected_branch!r} required for identity_scheme "
+                f"run_key-derived branch {names.integration_branch!r} required for identity_scheme "
                 "'path-hash-v2'"
             )
     for field in ("path_history", "phase_ids", "phase_reviews", "dispatches"):
