@@ -355,6 +355,29 @@ fire does not advance the phase ledger; `awaiting-team-merge` removes its schedu
 refuses until authoritative remote metadata proves the final PR merged with the right base, head
 SHA, and no review debt; failed commit/push/lease/handoff **blocks** rather than exiting clean.
 
+**Dispatch economics (owner instruction, 2026-08-10).** These bind the prompts Conductor's own
+orchestrator sends to its implementation and review subagents, not just this repo's development
+process:
+
+- **No full test suites inside a phase.** An implementation subagent runs only the focused tests
+  covering the code it changed. The full suite runs once, at the phase pull request — which is
+  also where the merge gate already runs it.
+- **Never re-run the same suite on the same task.** A reviewer does not re-run tests the
+  implementer already ran on identical code; the implementer's report is the test evidence.
+- **Scale the model to the task.** Small, well-specified transcription work gets the cheapest
+  tier for both implementation and review. Reserve the expensive tiers for architecture,
+  concurrency, and the whole-branch review.
+
+The orchestrator prompt contract in design §"Orchestrator context contract" is where these land,
+alongside the two verbatim reminders. Note that today's shipped `skills/autodev/SKILL.md` predates
+this and should be updated independently rather than waiting for Plan 05 — see the standalone
+follow-up below.
+
+**Standalone follow-up (do before Plan 05):** apply the three rules above to the existing
+`skills/autodev/SKILL.md` dispatch prose. That is a live behaviour change to a shipped skill, so
+it takes a feature branch, a PR, a codex review, and a plugin version bump — not a docs-direct
+commit.
+
 ---
 
 ## Plan 06 — Branch/worktree/PR model, merge gates, sync phases
