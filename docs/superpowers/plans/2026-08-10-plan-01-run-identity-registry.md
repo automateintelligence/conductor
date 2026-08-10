@@ -2165,7 +2165,11 @@ def test_commit_completes_an_unfinished_transaction_before_reading(state_root):
     before reading mappings, so a crash cannot leave a silently split identity."""
     doc = registry.load(state_root)
     key = runkey.run_key(ALPHA)
-    after = registry.register(dict(doc), spec=ALPHA, run_key=key, generation=1)
+    # schema.clone, NOT dict(doc): a shallow copy leaves after["specs"] aliasing doc["specs"],
+    # so register() mutates both and the journal's before/after images become identical apart
+    # from `revision`. The test would then pass even if recover() rolled a committed journal
+    # BACKWARD — it would be asserting nothing about the direction it claims to check.
+    after = registry.register(schema.clone(doc), spec=ALPHA, run_key=key, generation=1)
     after["revision"] = 1
     transaction.prepare(
         state_root,
@@ -2175,6 +2179,31 @@ def test_commit_completes_an_unfinished_transaction_before_reading(state_root):
     transaction.commit(state_root, "txn-repoint")
     refreshed = registry.update(state_root, lambda d: d)
     assert registry.current_run_key(refreshed, ALPHA) == key
+    assert transaction.pending(state_root) == []
+
+
+def test_init_completes_an_unfinished_transaction_before_reading(tmp_path):
+    """`init` is a project entry point too, and unlike `commit` it has no compare-and-swap gate
+    to catch a stale read — so it must recover before reading, and that must be tested through
+    `init` itself."""
+    state_root = str(tmp_path / ".conductor")
+    registry.init(state_root, workstation_id=WORKSTATION, repo_identity=IDENTITY)
+    doc = registry.load(state_root)
+    key = runkey.run_key(ALPHA)
+    after = registry.register(schema.clone(doc), spec=ALPHA, run_key=key, generation=1)
+    after["revision"] = 1
+    transaction.prepare(
+        state_root,
+        "txn-init",
+        [{"path": registry.registry_path(state_root), "before": doc, "after": after}],
+    )
+    transaction.commit(state_root, "txn-init")  # committed but NOT applied — the crash state
+    # No other registry call may precede this init(): any earlier call would recover the
+    # transaction itself, and the test would pass whether or not init() was fixed.
+    recovered = registry.init(
+        state_root, workstation_id=WORKSTATION, repo_identity=IDENTITY
+    )
+    assert registry.current_run_key(recovered, ALPHA) == key  # the RETURNED doc, not a re-read
     assert transaction.pending(state_root) == []
 
 
@@ -2249,6 +2278,11 @@ def init(state_root: str, *, workstation_id: str, repo_identity: dict) -> dict:
     """Create the registry if absent; return the existing one otherwise. Never overwrites, so a
     second caller cannot reset the workstation identity or drop mappings."""
     with locks.hold(lock_path(state_root), kind="project"):
+        # Recover BEFORE reading, like `commit`. This is a project entry point, and unlike
+        # `commit` it has no compare-and-swap gate to catch a stale read — an idempotent
+        # get-or-create called after a crash left a committed-but-unapplied journal would
+        # otherwise hand the caller the pre-recovery document and never notice.
+        transaction.recover(state_root)
         existing = load(state_root)
         if existing is not None:
             return schema.validate_project(existing)
