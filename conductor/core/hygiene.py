@@ -34,12 +34,22 @@ class TrackedStateError(RuntimeError):
 
 
 def _git(repo_root: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", repo_root, *args],
-        capture_output=True,
-        text=True,
-        timeout=_GIT_TIMEOUT,
-    )
+    """Run a read-only git query. Wraps failures that never produce a ``CompletedProcess`` at
+    all — a missing ``git`` binary or a hung process — into ``TrackedStateError`` so every
+    failure from this module carries the same message contract: the repository, the operation,
+    and (since none of these commands write anything) that no write occurred. A non-zero exit
+    code that git itself returns is a ``CompletedProcess`` and is classified by each caller."""
+    try:
+        return subprocess.run(
+            ["git", "-C", repo_root, *args],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise TrackedStateError(
+            f"git {' '.join(args)} could not run in {repo_root}: {exc}; no write occurred"
+        ) from exc
 
 
 def tracked_state_paths(repo_root: str) -> list[str]:

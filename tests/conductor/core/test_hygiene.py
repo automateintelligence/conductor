@@ -9,6 +9,7 @@ it."""
 from __future__ import annotations
 
 import os
+import subprocess
 
 import pytest
 
@@ -56,11 +57,18 @@ def test_ensure_local_exclude_makes_both_paths_ignored(git_repo):
 
 
 def test_ensure_local_exclude_is_idempotent(git_repo):
-    hygiene.ensure_local_exclude(str(git_repo))
     exclude = os.path.join(str(git_repo), ".git", "info", "exclude")
-    first = open(exclude, encoding="utf-8").read()
     hygiene.ensure_local_exclude(str(git_repo))
-    assert open(exclude, encoding="utf-8").read() == first
+    first = open(exclude, encoding="utf-8").read()
+    # Discriminating, not just stable: a no-op implementation would also produce byte-identical
+    # reads across both calls (git's own info/exclude template, untouched). Assert the lines
+    # were actually written, and that the second call adds no duplicate of them.
+    assert first.count("/.conductor/") == 1
+    assert first.count("/.worktrees/") == 1
+    hygiene.ensure_local_exclude(str(git_repo))
+    second = open(exclude, encoding="utf-8").read()
+    assert second.count("/.conductor/") == 1
+    assert second.count("/.worktrees/") == 1
 
 
 def test_ensure_local_exclude_preserves_existing_exclude_content(git_repo):
@@ -81,14 +89,64 @@ def test_ensure_local_exclude_is_a_no_op_when_gitignore_already_covers_them(
     git(git_repo, "commit", "-qm", "ignore run state")
     hygiene.ensure_local_exclude(str(git_repo))
     exclude = os.path.join(str(git_repo), ".git", "info", "exclude")
+    # This is the discriminating assertion: a no-op implementation also leaves .conductor/
+    # ignored (the committed .gitignore already covers it), so checking is_ignored() alone here
+    # cannot fail. Only "nothing was written to info/exclude" proves the no-op branch was taken.
     assert (
         not os.path.exists(exclude)
         or "/.conductor/" not in open(exclude, encoding="utf-8").read()
     )
-    assert hygiene.is_ignored(str(git_repo), ".conductor/project.json")
 
 
 def test_a_non_repository_reports_the_git_failure(tmp_path):
     with pytest.raises(hygiene.TrackedStateError) as excinfo:
         hygiene.assert_state_paths_untracked(str(tmp_path))
     assert "git ls-files" in str(excinfo.value)
+
+
+def test_a_missing_git_binary_fails_closed_with_the_message_contract(
+    monkeypatch, git_repo
+):
+    def _raise(*_args, **_kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(hygiene.subprocess, "run", _raise)
+    with pytest.raises(hygiene.TrackedStateError) as excinfo:
+        hygiene.assert_state_paths_untracked(str(git_repo))
+    message = str(excinfo.value)
+    assert "git" in message
+    assert str(git_repo) in message
+
+
+def test_is_ignored_raises_rather_than_reporting_not_ignored_on_a_git_error(
+    monkeypatch, git_repo
+):
+    def _fake_run(*_args, **_kwargs):
+        return subprocess.CompletedProcess(
+            [], returncode=128, stdout="", stderr="fatal: boom"
+        )
+
+    monkeypatch.setattr(hygiene.subprocess, "run", _fake_run)
+    with pytest.raises(hygiene.TrackedStateError) as excinfo:
+        hygiene.is_ignored(str(git_repo), ".conductor/project.json")
+    assert "check-ignore" in str(excinfo.value)
+
+
+def test_ensure_local_exclude_raises_closed_when_the_recheck_still_finds_them_not_ignored(
+    git_repo, git
+):
+    # Write the exclude rules first, then commit a .gitignore that negates them. Working-tree
+    # .gitignore files are consulted after .git/info/exclude and the last matching pattern wins,
+    # so this genuinely un-ignores both probes without touching info/exclude again — exercising
+    # the post-write recheck failure the brief calls the load-bearing branch of this function.
+    hygiene.ensure_local_exclude(str(git_repo))
+    (git_repo / ".gitignore").write_text("!.conductor/\n!.worktrees/\n")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-qm", "negate the local exclude")
+    exclude = os.path.join(str(git_repo), ".git", "info", "exclude")
+    with pytest.raises(hygiene.TrackedStateError) as excinfo:
+        hygiene.ensure_local_exclude(str(git_repo))
+    message = str(excinfo.value)
+    assert ".conductor/project.json" in message
+    assert ".worktrees/conductor/probe/integration" in message
+    assert exclude in message
