@@ -69,7 +69,7 @@
 | File | Covers |
 | --- | --- |
 | `tests/conductor/core/__init__.py` | package marker |
-| `tests/conductor/core/conftest.py` | the `git_repo` fixture (a real isolated repository) |
+| `tests/conductor/conftest.py` | the `git_env` / `git` / `git_repo` fixtures (a real isolated repository). Lives at `tests/conductor/`, **not** `tests/conductor/core/`, so Tasks 13 and 14 in `tests/conductor/` see it too — a conftest applies to its own directory and every subdirectory, which removes any need for `pytest_plugins` |
 | `tests/conductor/core/test_atomic.py` | Task 1 |
 | `tests/conductor/core/test_locks.py` | Task 2 |
 | `tests/conductor/core/test_runkey.py` | Task 3 |
@@ -2701,7 +2701,7 @@ git commit -m "conductor/core/runstate.py:1-200 — per-run run.json under state
 
 **Files:**
 - Create: `conductor/core/resolve.py`
-- Create: `tests/conductor/core/conftest.py`
+- Create: `tests/conductor/conftest.py` — note the location: `tests/conductor/`, **not** `tests/conductor/core/`. A conftest applies to its own directory and all subdirectories, so putting it one level up lets Tasks 11, 13 and 14 (which live in `tests/conductor/`) use the same fixtures without `pytest_plugins`, which pytest deprecates outside the rootdir conftest.
 - Modify: `conductor/resume_script.py:58-77`
 - Test: `tests/conductor/core/test_resolve.py`
 
@@ -2720,10 +2720,11 @@ git commit -m "conductor/core/runstate.py:1-200 — per-run run.json under state
 
 - [ ] **Step 1: Write the shared git fixture**
 
-Create `tests/conductor/core/conftest.py`:
+Create `tests/conductor/conftest.py` (one level **above** `core/`, so every test under
+`tests/conductor/` inherits these fixtures):
 
 ```python
-"""Shared fixtures for conductor.core tests.
+"""Shared fixtures for the conductor test suite.
 
 Conductor resolves its canonical state root from git plumbing (``--git-common-dir``) so that
 starting from a linked worktree finds the same root as the main checkout. Mocking git would test
@@ -3131,7 +3132,7 @@ Expected: clean.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add conductor/core/resolve.py conductor/resume_script.py tests/conductor/core/conftest.py tests/conductor/core/test_resolve.py
+git add conductor/core/resolve.py conductor/resume_script.py tests/conductor/conftest.py tests/conductor/core/test_resolve.py
 git commit -m "conductor/core/resolve.py:1-160, conductor/resume_script.py:58-70 — run resolution
 
 - canonical state root from --git-common-dir; a linked worktree finds the main checkout's root
@@ -3432,8 +3433,10 @@ Append to `tests/conductor/test_gate_paths.py`:
 
 ```python
 # --- run-key mode: the key alone governs (design §"Project and run identity") --------------
-
-import pytest
+#
+# `pytest`, `os` and `subprocess` are already imported at the top of this file, and the
+# `git_repo` fixture comes from tests/conductor/conftest.py (Task 9) — do not re-import or
+# redefine either.
 
 from conductor.core import resolve as core_resolve
 from conductor.core import runkey, runstate, schema
@@ -3537,15 +3540,14 @@ def test_run_key_mode_requires_the_run_document(tmp_path):
     assert "runstate.load" in str(excinfo.value)
 
 
-def test_gate_for_run_loads_the_document_and_resolves(tmp_path, git_repo_for_gate):
-    root, state_root = git_repo_for_gate
-    spec = "docs/specs/alpha.md"
-    doc = _run_doc(spec)
-    runstate.create(state_root, doc["run_key"], doc)
+def test_gate_for_run_loads_the_document_and_resolves(git_repo):
+    root = str(git_repo)
+    doc = _run_doc("docs/specs/alpha.md")
+    runstate.create(core_resolve.state_root(root), doc["run_key"], doc)
     res = core_resolve.resolve(run_key=doc["run_key"], start=root)
     gate = core_resolve.gate_for_run(res)
     assert gate.source == "run_key"
-    assert gate.directory == os.path.join(root, "assertions", doc["run_key"])
+    assert gate.directory == os.path.join(res.repo_root, "assertions", doc["run_key"])
 
 
 def test_legacy_mode_is_unchanged_when_no_run_key_is_given(tmp_path):
@@ -3557,38 +3559,8 @@ def test_legacy_mode_is_unchanged_when_no_run_key_is_given(tmp_path):
     assert res.directory == str(tmp_path / "assertions" / "alpha")
 ```
 
-Add the `git_repo_for_gate` fixture at the top of the same file (this file has no `conftest.py` in scope for `git_repo`):
-
-```python
-@pytest.fixture
-def git_repo_for_gate(tmp_path):
-    """A minimal real repository plus its canonical state root, for gate_for_run."""
-    root = tmp_path / "repo"
-    (root / "docs" / "specs").mkdir(parents=True)
-    (root / "docs" / "specs" / "alpha.md").write_text("# alpha\n")
-    env = {
-        **os.environ,
-        "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"),
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_AUTHOR_NAME": "Conductor Test",
-        "GIT_AUTHOR_EMAIL": "test@example.invalid",
-        "GIT_COMMITTER_NAME": "Conductor Test",
-        "GIT_COMMITTER_EMAIL": "test@example.invalid",
-    }
-    subprocess.run(
-        ["git", "init", "-q", "-b", "main", str(root)],
-        check=True, capture_output=True, env=env, timeout=30,
-    )
-    subprocess.run(
-        ["git", "-C", str(root), "add", "-A"],
-        check=True, capture_output=True, env=env, timeout=30,
-    )
-    subprocess.run(
-        ["git", "-C", str(root), "commit", "-qm", "init"],
-        check=True, capture_output=True, env=env, timeout=30,
-    )
-    return str(root), os.path.join(str(root), ".conductor")
-```
+No new fixture is needed: `git_repo` comes from `tests/conductor/conftest.py`, created in Task 9,
+which covers this directory.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -4267,7 +4239,9 @@ from conductor.core import registry, resolve, runkey, runstate
 ROOT = Path(__file__).resolve().parents[2]
 CONDUCTOR = str(ROOT / "bin" / "conductor")
 
-pytest_plugins = ["tests.conductor.core.conftest"]
+# The git_env / git / git_repo fixtures come from tests/conductor/conftest.py (Task 9), which
+# covers this directory. Do not add `pytest_plugins` — pytest only honours it in the rootdir
+# conftest, and a nested reference is deprecated.
 
 
 def _run(root, *args):
@@ -4697,32 +4671,48 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="start the next generation for a spec whose generations have all ended",
     )
-    new.add_argument("--project", default=None, help=argparse.SUPPRESS)
+    new.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     listing = sub.add_parser("list", help="list runs")
     listing.add_argument("--all", action="store_true", help="include inactive runs")
     listing.add_argument("--json", action="store_true", help="machine-readable output")
-    listing.add_argument("--project", default=None, help=argparse.SUPPRESS)
+    listing.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     show = sub.add_parser("show", help="print a run record")
     show.add_argument("--run", required=True, help="run key")
-    show.add_argument("--project", default=None, help=argparse.SUPPRESS)
+    show.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     resolving = sub.add_parser("resolve", help="print the run key this invocation means")
     resolving.add_argument("--run", default=None, help="run key (optional)")
-    resolving.add_argument("--project", default=None, help=argparse.SUPPRESS)
+    resolving.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     gate = sub.add_parser("gate-dir", help="print a run's done-gate directory")
     gate.add_argument("--run", default=None, help="run key (optional)")
-    gate.add_argument("--project", default=None, help=argparse.SUPPRESS)
+    gate.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     move = sub.add_parser("repoint-spec", help="point a run at a moved spec")
     move.add_argument("--run", required=True, help="run key")
     move.add_argument("new_path", help="the spec's new repository-relative path")
-    move.add_argument("--project", default=None, help=argparse.SUPPRESS)
+    move.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     return parser
+```
 
+> **`argparse.SUPPRESS` is load-bearing, not decoration.** `--project` is accepted both before
+> and after the subcommand. With `default=None` on the subparser, argparse writes that `None`
+> over a value already parsed by the top-level parser, so `conductor run --project /repo new
+> spec.md` would silently fall back to the current directory. `SUPPRESS` makes the subparser set
+> the attribute only when the flag is actually present, so both orders work. Verified:
+>
+> ```
+> before-subcmd, sub default=None : None      <-- the bug
+> before-subcmd, sub SUPPRESS     : /repo
+> after-subcmd,  sub SUPPRESS     : /repo
+> neither,       sub SUPPRESS     : None
+> ```
 
+Continuing `conductor/run_cmd.py`:
+
+```python
 _HANDLERS = {
     "new": cmd_new,
     "list": cmd_list,
@@ -4866,7 +4856,9 @@ import pytest
 from conductor import run_cmd
 from conductor.core import registry, resolve, runkey, runstate
 
-pytest_plugins = ["tests.conductor.core.conftest"]
+# The git_env / git / git_repo fixtures come from tests/conductor/conftest.py (Task 9), which
+# covers this directory. Do not add `pytest_plugins` — pytest only honours it in the rootdir
+# conftest, and a nested reference is deprecated.
 
 ALPHA = "docs/specs/alpha.md"
 BETA = "docs/specs/beta.md"
