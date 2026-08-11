@@ -3725,7 +3725,14 @@ def run_gate_dir(repo_root: str, run_key: str) -> str:
 
     The run key is the SINGLE source shared by the run's integration-branch suffix
     (``conductor/run-<run-key>``) and this directory, so the two cannot diverge. ``resolve_gate``
-    verifies that equality against ``run.json`` rather than re-deriving it from ambient files."""
+    verifies that equality against ``run.json`` rather than re-deriving it from ambient files.
+
+    Refuses an unsafe key before building a path, matching ``conductor/core/runstate.py``'s
+    ``_checked``. Without this, ``run_gate_dir(root, "../x")`` returns a traversal path."""
+    if not _safe_slug(run_key):
+        raise ValueError(
+            f"unsafe run key {run_key!r}; refusing to build a gate path from it"
+        )
     return os.path.join(repo_root, "assertions", run_key)
 ```
 
@@ -3781,7 +3788,17 @@ def _resolve_gate_by_run_key(
     prefix = "assertions/"
     segment = recorded_dir[len(prefix) :] if recorded_dir.startswith(prefix) else ""
     fail: str | None = None
-    if not segment or not _safe_slug(segment):
+    if run.get("run_key") != run_key:
+        # The document must belong to the key we were asked about. Without this, a
+        # `legacy-slug-v1` record — deliberately exempt from the derived-name cross-check below,
+        # because migration retains its pre-migration names verbatim — resolves to ANOTHER RUN's
+        # gate and reports no failure. `runstate.load` is a bare read with no key check, so a
+        # tampered `run_key` field reaches here on the primary path, not only via direct misuse.
+        fail = (
+            f"run document declares run_key {run.get('run_key')!r} but was loaded for "
+            f"{run_key!r}; refusing to resolve a gate from a mis-paired record"
+        )
+    elif not segment or not _safe_slug(segment):
         fail = (
             f"run {run_key!r} records gate_dir={recorded_dir!r}, which is not "
             "'assertions/<single-safe-segment>' — repair run.json"
@@ -3807,7 +3824,19 @@ def _resolve_gate_by_run_key(
             f"run {run_key!r} records unknown identity_scheme {scheme!r}; expected "
             "'path-hash-v2' or 'legacy-slug-v1' — repair run.json"
         )
-    directory = os.path.join(root, "assertions", segment) if not fail else os.path.join(root, "assertions")
+    # Directory selection must NOT depend on `fail`. Collapsing to the flat `assertions/` on
+    # refusal points at a gate that in a real repo is present, frozen and GREEN — so a caller
+    # that read `.directory` without checking `.fail_closed` would validate the repo's own
+    # already-passing gate and could write results into it. That is the exact outcome run-key
+    # mode exists to prevent, and it is the opposite of legacy mode, which leaves `directory`
+    # alone on refusal and only falls back to flat when there is no failure.
+    if segment and _safe_slug(segment):
+        directory = os.path.join(root, "assertions", segment)
+    else:
+        # No usable segment. `__unresolved__` cannot collide with any run key or accepted legacy
+        # segment — both must start with `[a-z0-9]` — so manifest/baseline/run_dir land on a
+        # path that does not exist and an inattentive caller still fails closed.
+        directory = os.path.join(root, "assertions", "__unresolved__")
     return GateResolution(
         directory,
         os.path.join(directory, "manifest.yaml"),
