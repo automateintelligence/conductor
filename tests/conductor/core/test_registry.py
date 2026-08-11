@@ -80,7 +80,10 @@ def test_registering_a_second_nonterminal_generation_is_refused(state_root):
         state_root,
         lambda d: registry.register(d, spec=ALPHA, run_key=key, generation=1),
     )
-    with pytest.raises(schema.SchemaError):
+    # Matched on the count check's own phrase: `register` also moves `current` onto the new
+    # generation, so an unmatched `pytest.raises(SchemaError)` here passes on the `current`
+    # consistency check too and proves nothing about the invariant this test is named for.
+    with pytest.raises(schema.SchemaError, match="at most one is allowed"):
         registry.update(
             state_root,
             lambda d: registry.register(

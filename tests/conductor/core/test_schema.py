@@ -170,6 +170,14 @@ def test_project_doc_validates_and_allows_one_nonterminal_generation():
 
 
 def test_two_nonterminal_generations_for_one_spec_are_refused():
+    """``current`` names the FIRST nonterminal generation on purpose, and the assertion names the
+    count check's own phrase.
+
+    Both matter. With ``current`` set to the other generation the ``current``-consistency check
+    (which runs after this one) also refuses — and its message likewise contains "nonterminal" —
+    so the test passed whether or not the count check fired at all: raising the bound to ``> 99``
+    left it green. Here the only rule the document breaks is "at most one nonterminal
+    generation"."""
     key = runkey.run_key("docs/specs/alpha.md")
     doc = schema.new_project_doc(
         workstation_id="0123456789abcdef0123456789abcdef",
@@ -180,12 +188,15 @@ def test_two_nonterminal_generations_for_one_spec_are_refused():
             {"run_key": key, "generation": 1, "status": "active"},
             {"run_key": f"{key}-g2", "generation": 2, "status": "blocked"},
         ],
-        "current": f"{key}-g2",
+        "current": key,
         "path_history": [],
     }
     with pytest.raises(schema.SchemaError) as excinfo:
         schema.validate_project(doc)
-    assert "nonterminal" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "at most one is allowed" in message
+    assert "2 nonterminal generations" in message
+    assert f"{key}, {key}-g2" in message  # both offenders named, in order
 
 
 def test_current_must_name_the_nonterminal_generation():
