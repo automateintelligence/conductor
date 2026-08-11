@@ -63,40 +63,53 @@ def _matching_run(state_root: str, project_doc: dict, digest: str) -> str | None
     return None
 
 
-def _unfinished_generations(state_root: str, mapped: dict) -> list[str]:
-    """Run keys in one spec-path mapping whose AUTHORITATIVE record is not finished, sorted.
+def _record_statuses(state_root: str, mapped: dict) -> dict[str, str]:
+    """Each generation's AUTHORITATIVE status in one spec-path mapping, keyed by run key.
+
+    ``""`` means the record is missing or carries no status — the fail-closed value, since it is
+    never in ``schema.TERMINAL_STATUSES``.
 
     ``project.json``'s per-generation status is a MIRROR (``conductor/core/registry.py:14-17``)
-    and ``runstate.set_status`` does not touch it, so the two can skew either way and neither
-    ``registry.current_run_key`` nor ``schema.validate_project`` can be trusted to decide whether
-    a new run may start. ``run.json`` is the authority, so it decides here:
+    and NO product code updates it: ``runstate.set_status`` deliberately holds only ``state.lock``
+    (taking ``project.lock`` from there would invert the global lock order) and
+    ``registry.mirror_status`` has no caller outside this module and the tests. So the mirror
+    skews in both directions and neither ``registry.current_run_key`` nor
+    ``schema.validate_project`` can decide whether a new run may start:
 
-    * mirror says current, record says terminal/failed — NOT unfinished. Refusing on the mirror
-      would tell the operator to finish a run that is already finished, and ``--new-run`` would
-      refuse identically; ``conductor run resolve`` meanwhile reports no active run. Two verbs
-      contradicting each other about one run is worse than a missed refusal.
-    * mirror says terminal, record still active/checkpointed/blocked — unfinished. Minting a
-      second generation there would put TWO authoritatively-live runs on one spec, breaking the
-      design's central invariant somewhere ``validate_project`` cannot see, because it validates
-      the mirror.
+    * mirror says current, record says terminal/failed — the run IS finished. Refusing on the
+      mirror would tell the operator to finish a run that is already finished, while
+      ``conductor run resolve`` reports no active run. This is the DEFAULT state of a finished
+      run, not an edge case, because nothing writes the mirror when a run ends.
+    * mirror says terminal, record still active — the run is NOT finished. Minting a second
+      generation there would put two authoritatively-live runs on one spec, breaking the design's
+      central invariant somewhere ``validate_project`` cannot see, because it validates the
+      mirror.
 
-    ``awaiting-team-merge`` counts as unfinished even though ``schema.is_active`` excludes it: the
-    run is not over until ``finish`` proves its final pull request merged, and its branch and gate
-    are still live.
-
-    A MISSING record also counts: the registry names a run whose state has been removed, and
-    minting a second one over it is the opposite of fail-closed."""
-    unfinished = []
+    Read once and reused for both the refusal gate and the reconciliation ``cmd_new`` folds into
+    its after-image, so the mapping is walked a single time under ``project.lock``."""
+    statuses = {}
     for entry in mapped.get("generations", []):
         key = str(entry.get("run_key"))
         run = runstate.load(state_root, key)
-        if run is None:
-            unfinished.append(key)
-            continue
-        status = str(run.get("status", ""))
-        if schema.is_active(status) or status == "awaiting-team-merge":
-            unfinished.append(key)
-    return sorted(unfinished)
+        statuses[key] = "" if run is None else str(run.get("status", ""))
+    return statuses
+
+
+def _reconcile_mirror(project_doc: dict, statuses: dict[str, str]) -> dict:
+    """Fold every generation's authoritative status into ``project_doc``'s mirror and recompute
+    ``current``. Mutates and returns ``project_doc``; pure, takes no lock.
+
+    ``registry.mirror_status`` is the single definition of the recompute rule (the one nonterminal
+    key, else ``None``), and it is pure, so it is reused rather than restated. Only ever called
+    once every generation is terminal or failed — ``cmd_new`` refuses otherwise — so it cannot be
+    handed a status ``mirror_status`` rejects, and the recomputed ``current`` is always ``None``.
+
+    This is a WRITE path: ``cmd_new`` holds ``project.lock``, is already constructing a
+    ``project.json`` after-image, and writes it journalled alongside the new ``run.json``. A read
+    path must never do this."""
+    for run_key, status in statuses.items():
+        registry.mirror_status(project_doc, run_key, status)
+    return project_doc
 
 
 def cmd_new(args: argparse.Namespace) -> int:
@@ -134,8 +147,27 @@ def cmd_new(args: argparse.Namespace) -> int:
             )
         mapped = registry.mapping(project_doc, relative)
         # Decided against run.json, never against project.json's status mirror — see
-        # _unfinished_generations for both skew directions and what each one costs.
-        unfinished = _unfinished_generations(state_root, mapped) if mapped else []
+        # _record_statuses for both skew directions and what each one costs.
+        statuses = _record_statuses(state_root, mapped) if mapped else {}
+        unknown = sorted(key for key, status in statuses.items() if not status)
+        if unknown:
+            print(
+                f"{relative} is mapped to run(s) {', '.join(unknown)} whose record(s) are "
+                f"missing or carry no status; no write occurred. Refusing to mint a second run "
+                f"over registered state that was removed — the mapping still owns those branch "
+                f"and gate names, and neither finishing them nor --new-run can clear it. Recover "
+                f"by removing the run directory and then the mapping:\n"
+                f"  rm -r {runstate.run_dir(state_root, unknown[0])}\n"
+                f"  remove the {relative!r} entry from "
+                f"{registry.registry_path(state_root)}",
+                file=sys.stderr,
+            )
+            return EXIT_FAIL
+        unfinished = sorted(
+            key
+            for key, status in statuses.items()
+            if status not in schema.TERMINAL_STATUSES
+        )
         if unfinished:
             listing = ", ".join(unfinished)
             print(
@@ -184,8 +216,16 @@ def cmd_new(args: argparse.Namespace) -> int:
                 now=_now(),
             )
         )
+        # Reconcile BEFORE appending: every existing generation's mirror takes its record's
+        # status, so `register`'s new generation is the only nonterminal one and
+        # `validate_project` accepts the result. Without this, --new-run after a genuinely
+        # finished run is refused for "2 nonterminal generations" — the mirror still calls
+        # generation 1 active because nothing in the product ever wrote it.
         new_project = registry.register(
-            schema.clone(project_doc), spec=relative, run_key=key, generation=generation
+            _reconcile_mirror(schema.clone(project_doc), statuses),
+            spec=relative,
+            run_key=key,
+            generation=generation,
         )
         new_project["revision"] = project_doc["revision"] + 1
         schema.validate_project(new_project)

@@ -110,7 +110,14 @@ def test_new_refuses_a_spec_outside_the_repository(git_repo, capsys):
 
 def test_new_refuses_a_spec_that_does_not_exist(git_repo, capsys):
     assert _run(git_repo, "new", "docs/specs/missing.md") == 1
-    assert "does not exist" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "does not exist" in err
+    # hygiene.ensure_local_exclude has already written .git/info/exclude by this point, so the
+    # house "no write occurred" phrase would be false here; the message must scope its claim to
+    # run state and name the scaffolding it did write.
+    assert "no run state was written" in err
+    assert "git exclude" in err
+    assert "no write occurred" not in err
     assert registry.load(resolve.state_root(str(git_repo))) is None
 
 
@@ -134,21 +141,56 @@ def test_new_without_new_run_refuses_a_spec_whose_generations_all_ended(
     first = runkey.run_key("docs/specs/alpha.md")
     runstate.set_status(state_root, first, "awaiting-team-merge")
     runstate.set_status(state_root, first, "terminal")
-    registry.update(state_root, lambda d: registry.mirror_status(d, first, "terminal"))
     assert _run(git_repo, "new", "docs/specs/alpha.md") == 1
     assert "--new-run" in capsys.readouterr().err
 
 
-def test_new_run_after_a_terminal_generation_creates_generation_two(git_repo, capsys):
+def _mirror(state_root, spec):
+    """(generation statuses by run key, current) as project.json records them."""
+    project_doc = registry.load(state_root)
+    assert project_doc is not None
+    entry = registry.mapping(project_doc, spec)
+    assert entry is not None
+    return {g["run_key"]: g["status"] for g in entry["generations"]}, entry["current"]
+
+
+def test_new_run_after_a_terminal_record_creates_generation_two_and_fixes_the_mirror(
+    git_repo, capsys
+):
+    """No test-side registry.mirror_status: this is exactly the state a finished run leaves in
+    production, because runstate.set_status holds only state.lock and nothing else writes the
+    mirror. cmd_new folds each generation's authoritative status into the project.json after-image
+    it is already journalling, so --new-run works and the mirror converges on the records."""
     _run(git_repo, "new", "docs/specs/alpha.md")
     capsys.readouterr()
     state_root = resolve.state_root(str(git_repo))
     first = runkey.run_key("docs/specs/alpha.md")
     runstate.set_status(state_root, first, "awaiting-team-merge")
     runstate.set_status(state_root, first, "terminal")
-    registry.update(state_root, lambda d: registry.mirror_status(d, first, "terminal"))
+    assert _mirror(state_root, "docs/specs/alpha.md") == ({first: "active"}, first)
+
     assert _run(git_repo, "new", "docs/specs/alpha.md", "--new-run") == 0
     assert capsys.readouterr().out.strip() == f"{first}-g2"
+    statuses, current = _mirror(state_root, "docs/specs/alpha.md")
+    assert statuses == {first: "terminal", f"{first}-g2": "active"}
+    assert current == f"{first}-g2"
+
+
+def test_new_run_after_a_failed_record_creates_generation_two_and_fixes_the_mirror(
+    git_repo, capsys
+):
+    _run(git_repo, "new", "docs/specs/alpha.md")
+    capsys.readouterr()
+    state_root = resolve.state_root(str(git_repo))
+    first = runkey.run_key("docs/specs/alpha.md")
+    runstate.set_status(state_root, first, "failed")
+    assert _mirror(state_root, "docs/specs/alpha.md") == ({first: "active"}, first)
+
+    assert _run(git_repo, "new", "docs/specs/alpha.md", "--new-run") == 0
+    assert capsys.readouterr().out.strip() == f"{first}-g2"
+    statuses, current = _mirror(state_root, "docs/specs/alpha.md")
+    assert statuses == {first: "failed", f"{first}-g2": "active"}
+    assert current == f"{first}-g2"
 
 
 def test_new_refuses_a_spec_whose_content_already_belongs_to_a_run(git_repo, capsys):
@@ -193,16 +235,6 @@ def test_new_decides_on_the_record_not_a_stale_active_status_mirror(git_repo, ca
     assert "finish or fail" not in err
     assert "--new-run" in err
 
-    # And --new-run then names the real problem instead of repeating the contradiction. It does
-    # NOT succeed: registry.register would append a second generation next to one the mirror
-    # still calls active, and schema.validate_project refuses that. Making it succeed means
-    # reconciling the mirror from the records, which belongs with whoever owns status
-    # transitions, not with a read of it here. Refused before any journal, so nothing is written.
-    assert _run(git_repo, "new", "docs/specs/alpha.md", "--new-run") == 1
-    assert "nonterminal generations" in capsys.readouterr().err
-    assert runstate.load(state_root, f"{key}-g2") is None
-    assert transaction.pending(state_root) == []
-
 
 def test_new_run_refuses_while_the_record_is_live_behind_a_terminal_mirror(
     git_repo, capsys
@@ -224,6 +256,25 @@ def test_new_run_refuses_while_the_record_is_live_behind_a_terminal_mirror(
     assert _run(git_repo, "new", "docs/specs/alpha.md", "--new-run") == 1
     assert key in capsys.readouterr().err
     assert resolve.active_run_keys(state_root) == [key]
+
+
+def test_new_refuses_a_registered_run_whose_record_is_gone_without_useless_advice(
+    git_repo, capsys
+):
+    """The registry maps the spec to a run whose record has been deleted. Neither `finish`/`fail`
+    nor --new-run can act on a record that does not exist, so the refusal must not offer them."""
+    _run(git_repo, "new", "docs/specs/alpha.md")
+    capsys.readouterr()
+    state_root = resolve.state_root(str(git_repo))
+    key = runkey.run_key("docs/specs/alpha.md")
+    os.remove(runstate.run_path(state_root, key))
+
+    assert _run(git_repo, "new", "docs/specs/alpha.md", "--new-run") == 1
+    err = capsys.readouterr().err
+    assert "missing or carry no status" in err
+    assert f"rm -r {runstate.run_dir(state_root, key)}" in err
+    assert "Start a new one: finish or fail" not in err
+    assert runstate.load(state_root, f"{key}-g2") is None
 
 
 def test_new_refuses_an_orphaned_run_record_with_a_remedy_that_works(git_repo, capsys):
