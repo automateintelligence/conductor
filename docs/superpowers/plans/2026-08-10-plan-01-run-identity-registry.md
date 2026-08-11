@@ -3912,6 +3912,38 @@ git commit -m "conductor/paths.py:122-260, conductor/core/resolve.py:160-170 —
 
 **Owner note:** Plan 01 treats a busy `owner.lock` as a flat refusal (`RepointRefused`). Plan 02 replaces that with lease and liveness interpretation; the acquisition order established here does not change.
 
+> **SHIPPED IMPLEMENTATION DIFFERS FROM THE CODE BLOCK BELOW.** Review found five defects in the
+> reference code; `conductor/core/repoint.py` is the source of truth. The deltas, and why they
+> matter to Plans 02–07:
+>
+> 1. **The collision check must refuse on ANY existing mapping, not on `current_run_key`.**
+>    `current_run_key` returns `None` when a spec's generations are *all terminal* —
+>    `validate_project` requires exactly that. Using it meant repointing onto a completed run's
+>    path silently replaced that path's whole generation list with a document no validator could
+>    reject, and the archived run vanished from `run_keys`, `find_run` and `active_run_keys`.
+> 2. **`run.json` must be checked against the registry before repointing.** Nothing verified the
+>    record agreed about its own path and key, so a divergent record would be repointed and a
+>    fictional path history written. Same mis-paired-record shape Task 11 found in `resolve_gate`.
+> 3. **Every generation in the mapping moves, not just the target.** `specs[path].pop(old_rel)`
+>    moves the whole entry, so rewriting only the target's record left every sibling's `run.json`
+>    disagreeing with the registry — the exact divergence check 2 refuses to operate on. All
+>    records move inside the one transaction. Locks follow the design's rule for multi-run
+>    project operations: `owner.lock` for every key in **sorted run-key order**, then `state.lock`
+>    for every key in the same order. Do **not** assume siblings are terminal and ownerless —
+>    `repoint --run <key>` may target a terminal generation while a sibling is active.
+> 4. **A committed rename counts.** The reference `_rename_detected` diffed worktree-vs-`HEAD`, so
+>    `git mv && git commit` left nothing to find. Detection now also consults bounded history
+>    (`git log --follow --name-status --format= -M -n50`). Both paths share one `R<score>` parser
+>    and are fail-closed on a non-zero git exit.
+> 5. **The refusal message branches on whether the old path still exists.** Advising
+>    `git mv <old> <new>` when `<old>` is already gone is not an exact recovery command.
+>
+> Residual, accepted: rename detection inherits git's 50% similarity threshold, and `--follow` is
+> approximate across merges. Both degrade to the digest check and then to a refusal naming
+> `conductor run new <new_rel>` — no path degrades to a *wrong* repoint. `repoint` does not
+> refresh `spec_digest`, so after a rename-plus-edit only rename detection can authorize a
+> subsequent repoint of the same run.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/conductor/core/test_repoint.py`:
