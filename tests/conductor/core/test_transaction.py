@@ -215,7 +215,11 @@ def test_replay_never_moves_a_revision_backwards(tmp_path):
 
 def test_replay_of_a_committed_journal_is_idempotent(tmp_path):
     """The non-regression rule must not break the property it guards: the first replay writes, and
-    every replay after it sees its own result and does nothing."""
+    every replay after it sees its own result and does nothing.
+
+    NOT coverage of that rule — verbatim replay was already idempotent, so this passes with
+    ``_regresses`` reverted too. It guards the over-fix: a comparison one notch stricter (``>=``
+    where ``>`` belongs, or refusing rather than skipping) would break roll-forward entirely."""
     state_root = tmp_path / ".conductor"
     target = tmp_path / "run.json"
     atomic.write_json_atomic(str(target), {"revision": 1, "n": 1})

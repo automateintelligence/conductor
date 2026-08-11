@@ -207,10 +207,16 @@ def test_a_repointed_run_keeps_a_key_derived_from_a_path_in_its_history():
 def test_a_run_spec_path_must_be_normalized(spec_path):
     """The run key is a hash of exactly this string, so two spellings of one file are two
     identities — and a path that escapes the repository keys a run on content no other checkout
-    can reproduce."""
+    can reproduce.
+
+    Asserted on a ``legacy-slug-v1`` document deliberately. On ``path-hash-v2`` the key-derivation
+    check refuses these paths first (it calls ``is_normalized_spec_path`` itself), so a v2 document
+    proves nothing about THIS guard — it would pass with the guard removed. ``legacy-slug-v1`` skips
+    that branch, which makes it the only place the guard is load-bearing."""
+    doc = _run(spec_path=spec_path, identity_scheme="legacy-slug-v1")
     with pytest.raises(schema.SchemaError) as excinfo:
-        schema.validate_run(_run(spec_path=spec_path))
-    assert "spec_path" in str(excinfo.value) or "derived" in str(excinfo.value)
+        schema.validate_run(doc)
+    assert "not a normalized" in str(excinfo.value)
 
 
 @pytest.mark.parametrize(

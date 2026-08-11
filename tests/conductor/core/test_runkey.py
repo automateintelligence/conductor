@@ -149,7 +149,12 @@ def test_normalize_refuses_an_in_repo_symlink_that_points_outside(tmp_path):
 def test_normalize_keeps_the_link_path_for_a_symlink_inside_the_repository(tmp_path):
     """Containment is decided on the resolved path, but the KEY still comes from the link path, so
     a spec symlinked to another file in the same repository keeps its own run key rather than
-    silently adopting the target's."""
+    silently adopting the target's.
+
+    NOT coverage of the containment fix — it passes with that fix reverted too, because the old
+    lexical-first code also returned the link path. It guards the obvious OVER-fix: resolving the
+    path for the key as well as for the check, which would silently move the run key, gate
+    directory and integration branch of every symlinked spec."""
     repo = tmp_path / "repo"
     (repo / "docs" / "specs").mkdir(parents=True)
     (repo / "docs" / "specs" / "target.md").write_text("# target\n")
