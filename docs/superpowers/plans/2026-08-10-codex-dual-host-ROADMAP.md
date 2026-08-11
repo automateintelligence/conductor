@@ -98,6 +98,17 @@ list (design lines 418–427) must be a runnable check, not a prose instruction.
 recreation step (design line 414) is the highest-risk item — absolute linked-worktree metadata
 under the renamed root is what breaks.
 
+> **BLOCKING PRECONDITION — do not start Plan 00 without an explicit go-ahead.**
+> As of 2026-08-10 the owner has a live Conductor run executing out of `~/.claude/conductor`.
+> Renaming or quarantining that path while a run holds a worktree, a schedule, or a live process
+> under it is exactly the failure design lines 412–414 describe: linked-worktree metadata is
+> absolute, so the run's worktree registrations break and work completes under a quarantined
+> path. Plan 00 step 2 ("checkpoint or quiesce every in-flight run") is not a formality —
+> it is the gate. Before any step of Plan 00 runs, the owner must confirm that every run is
+> checkpointed or quiesced and no live process has its working directory or executable under the
+> old checkout. Plans 01–07 are unaffected: they are ordinary feature branches developed in
+> `.worktrees/`, and they never move, rename, or write to the checkout root.
+
 ---
 
 ## Plan 01 — Run identity, project registry, per-run state
@@ -343,6 +354,29 @@ precedence (Git → GitHub → `results.json` → `run.json` → `handoff.md`).
 fire does not advance the phase ledger; `awaiting-team-merge` removes its schedule; `finish`
 refuses until authoritative remote metadata proves the final PR merged with the right base, head
 SHA, and no review debt; failed commit/push/lease/handoff **blocks** rather than exiting clean.
+
+**Dispatch economics (owner instruction, 2026-08-10).** These bind the prompts Conductor's own
+orchestrator sends to its implementation and review subagents, not just this repo's development
+process:
+
+- **No full test suites inside a phase.** An implementation subagent runs only the focused tests
+  covering the code it changed. The full suite runs once, at the phase pull request — which is
+  also where the merge gate already runs it.
+- **Never re-run the same suite on the same task.** A reviewer does not re-run tests the
+  implementer already ran on identical code; the implementer's report is the test evidence.
+- **Scale the model to the task.** Small, well-specified transcription work gets the cheapest
+  tier for both implementation and review. Reserve the expensive tiers for architecture,
+  concurrency, and the whole-branch review.
+
+The orchestrator prompt contract in design §"Orchestrator context contract" is where these land,
+alongside the two verbatim reminders. Note that today's shipped `skills/autodev/SKILL.md` predates
+this and should be updated independently rather than waiting for Plan 05 — see the standalone
+follow-up below.
+
+**Standalone follow-up (do before Plan 05):** apply the three rules above to the existing
+`skills/autodev/SKILL.md` dispatch prose. That is a live behaviour change to a shipped skill, so
+it takes a feature branch, a PR, a codex review, and a plugin version bump — not a docs-direct
+commit.
 
 ---
 

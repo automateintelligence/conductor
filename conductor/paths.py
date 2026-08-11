@@ -16,6 +16,8 @@ import re
 import subprocess
 from typing import NamedTuple
 
+from conductor.core.names import derived_names, is_safe_segment
+
 
 def project_root() -> str:
     """The PROJECT that owns run state + the done-gate: ``$CONDUCTOR_HOME``, else the git repo
@@ -64,15 +66,16 @@ def spec_slug(spec_path: str) -> str:
     return slug
 
 
-_SAFE_SLUG = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
-
-
 def _safe_slug(s: str) -> bool:
     """Whether ``s`` is safe to use as the ``assertions/<slug>`` filesystem component: a single
     ref-safe segment (what ``spec_slug`` guarantees), with no path separators and no ``..``. An
     edited ``.conductor/run_branch`` — now a path component — that doesn't qualify (e.g.
-    ``conductor/run-../../outside``) is rejected so it cannot traverse out of the gate dir."""
-    return bool(_SAFE_SLUG.match(s)) and ".." not in s and not s.endswith(".lock")
+    ``conductor/run-../../outside``) is rejected so it cannot traverse out of the gate dir.
+
+    A thin delegation to ``names.is_safe_segment``, which is THE definition. It kept its own copy
+    of the pattern until ``schema``'s copy drifted from it (``assertions/a..b`` was writable and
+    unresolvable); the name stays because it is used a dozen times below."""
+    return is_safe_segment(s)
 
 
 def _run_branch_slug(root: str) -> str | None:
@@ -127,6 +130,22 @@ def has_namespaced_frozen_gate(repo_root: str | None = None) -> bool:
     return bool(glob.glob(os.path.join(root, "assertions", "*", ".frozen")))
 
 
+def run_gate_dir(repo_root: str, run_key: str) -> str:
+    """The done-gate directory a run key names: ``<repo>/assertions/<run-key>``.
+
+    The run key is the SINGLE source shared by the run's integration-branch suffix
+    (``conductor/run-<run-key>``) and this directory, so the two cannot diverge. ``resolve_gate``
+    verifies that equality against ``run.json`` rather than re-deriving it from ambient files.
+
+    Refuses an unsafe key instead of composing a traversal path out of it, the same way
+    ``conductor.core.runstate`` refuses one before building a state path."""
+    if not _safe_slug(run_key):
+        raise ValueError(
+            f"unsafe run key {run_key!r}; refusing to build a gate path from it"
+        )
+    return os.path.join(repo_root, "assertions", run_key)
+
+
 class GateResolution(NamedTuple):
     """The fully-resolved done-gate location + integrity verdict for one run (see
     ``resolve_gate``). ``fail_closed`` is None when the run may proceed, else the reason
@@ -137,15 +156,120 @@ class GateResolution(NamedTuple):
     baseline: str  # .frozen baseline path
     run_dir: str  # results.json dir
     slug: str | None  # the resolved slug (None = flat gate)
-    source: str  # how selected: gate_dir_env|explicit_slug|run_branch|goal|flat
+    source: str  # how selected: run_key|gate_dir_env|explicit_slug|run_branch|goal|flat
     fail_closed: str | None  # None = ok; else the §5 refuse reason
 
 
-def resolve_gate(repo_root: str | None = None) -> GateResolution:
+def _resolve_gate_by_run_key(
+    root: str, run_key: str, run: dict | None
+) -> GateResolution:
+    """Gate resolution when the invocation carries a run key. See ``resolve_gate``."""
+    if run is None:
+        raise ValueError(
+            "resolve_gate(run_key=...) needs the run document; load it with "
+            "conductor.core.runstate.load(state_root, run_key) or call "
+            "conductor.core.resolve.gate_for_run(resolution)"
+        )
+    recorded_key = run.get("run_key")
+    recorded_dir = str(run.get("gate_dir") or "")
+    recorded_branch = str(run.get("integration_branch") or "")
+    scheme = run.get("identity_scheme")
+    prefix = "assertions/"
+    segment = recorded_dir[len(prefix) :] if recorded_dir.startswith(prefix) else ""
+    fail: str | None = None
+    if recorded_key != run_key:
+        # The record must BE this run's. A legacy-slug-v1 record is exempt from the derived-name
+        # cross-check below and so its recorded names are trusted verbatim; without this check a
+        # mis-paired load would hand this key ANOTHER run's gate directory — exactly the
+        # "validate some other run's already-green gate" outcome run-key mode exists to prevent.
+        fail = (
+            f"run.json declares run_key {recorded_key!r} but the gate was resolved for "
+            f"{run_key!r}; the wrong run's record was loaded"
+        )
+    elif not segment or not _safe_slug(segment):
+        fail = (
+            f"run {run_key!r} records gate_dir={recorded_dir!r}, which is not "
+            "'assertions/<single-safe-segment>' — repair run.json"
+        )
+    elif scheme == "path-hash-v2":
+        # names.derived_names is THE definition of both formats — never re-write the literals
+        # here. conductor/branches.py:1-15 records what happened the last time two callers each
+        # derived `conductor/run-<...>` independently: they drifted.
+        want_dir, want_branch = derived_names(run_key)
+        if recorded_dir != want_dir:
+            fail = (
+                f"run {run_key!r} records gate_dir={recorded_dir!r}, expected {want_dir!r}; the "
+                "run key is the single source of the gate dir and the integration branch — "
+                "repair run.json"
+            )
+        elif recorded_branch != want_branch:
+            fail = (
+                f"run {run_key!r} records integration_branch={recorded_branch!r}, expected "
+                f"{want_branch!r}; the run key is the single source of both — repair run.json"
+            )
+    elif scheme != "legacy-slug-v1":
+        fail = (
+            f"run {run_key!r} records unknown identity_scheme {scheme!r}; expected "
+            "'path-hash-v2' or 'legacy-slug-v1' — repair run.json"
+        )
+    if fail is None and segment and _safe_slug(segment):
+        directory = os.path.join(root, "assertions", segment)
+    else:
+        # ANY identity failure lands here, not just a missing segment. A well-formed segment is
+        # not evidence the record is the right one: the mismatch branch above fires precisely
+        # when run.json belongs to a DIFFERENT run, and that run's gate_dir is a perfectly safe
+        # slug naming its real, frozen, green gate. Trusting the segment there would hand a
+        # caller that ignored fail_closed someone else's passing gate — the same class of bug as
+        # dodging onto the flat gate, one directory over.
+        #
+        # The failure must also not point at the flat gate: in a repo that has one, `assertions/`
+        # is itself a real, frozen, green gate. Note this is the OPPOSITE of legacy mode, which
+        # never redirects on failure — it keeps whatever it already resolved, and reaches flat
+        # only when fail_closed is None. `__unresolved__` cannot collide with any run key (keys
+        # must start with [a-z0-9]), so manifest/baseline/run_dir all land on a path that does
+        # not exist, and a caller that ignores fail_closed still fails closed.
+        directory = os.path.join(root, "assertions", "__unresolved__")
+    return GateResolution(
+        directory,
+        os.path.join(directory, "manifest.yaml"),
+        os.path.join(directory, ".frozen"),
+        os.path.join(directory, "run"),
+        run_key,
+        "run_key",
+        fail,
+    )
+
+
+def resolve_gate(
+    repo_root: str | None = None,
+    *,
+    run_key: str | None = None,
+    run: dict | None = None,
+) -> GateResolution:
     """THE gate-resolution policy — the single decision function for WHERE this run's done-gate
     lives and WHETHER it is dodging a frozen gate. ``gate_dir`` / ``manifest_path`` /
     ``baseline_path`` / ``run_dir`` / ``unresolved_frozen_gate`` all delegate here, and the
     runner + ``gate freeze|verify`` call it directly, so the policy cannot drift across callers.
+
+    RUN-KEY MODE (``run_key`` given, ``source == "run_key"``). The key alone determines the gate:
+    legacy ``.conductor/run_branch``, legacy ``.conductor/goal.md``, and the ambient
+    ``CONDUCTOR_GATE_DIR`` / ``CONDUCTOR_GATE_SLUG`` / ``CONDUCTOR_MANIFEST`` /
+    ``CONDUCTOR_FREEZE_BASELINE`` variables are IGNORED rather than consulted as fallback
+    (design §"Project and run identity"). ``run`` is the loaded ``run.json``; the resolver
+    verifies from it that the record is this run's and that the recorded ``gate_dir`` and
+    ``integration_branch`` agree with the key, so a hand-edited or half-migrated record fails
+    closed instead of validating some other run's already-green gate. A ``legacy-slug-v1`` run
+    keeps the names migration recorded. ``resolve_gate`` never loads the document itself — that
+    would make ``paths`` import ``conductor.core.runstate``, whose ``runkey`` already imports
+    ``paths.spec_slug``; ``conductor.core.resolve.gate_for_run`` is the one place that pairs a
+    loaded record with this resolver. On refusal the gate NEVER collapses onto the flat
+    ``assertions/`` — it keeps the segment the record claimed while that is safe, else
+    ``assertions/__unresolved__`` — because in a repo that has one the flat gate is real, frozen
+    and green, and a caller reading ``directory`` without checking ``fail_closed`` would then
+    validate (or write results into) exactly the wrong gate.
+
+    LEGACY MODE (no ``run_key``) is everything below and is unchanged. Plan 03 retires it once
+    every run is migrated.
 
     DIRECTORY precedence (``source``):
       1. ``$CONDUCTOR_GATE_DIR``  -> that dir                              (``gate_dir_env``)
@@ -178,6 +302,8 @@ def resolve_gate(repo_root: str | None = None) -> GateResolution:
     A repo with no frozen gate at all, and a run whose run_branch/goal.md agree, is never
     affected."""
     root = repo_root or project_root()
+    if run_key is not None:
+        return _resolve_gate_by_run_key(root, run_key, run)
     flat = os.path.join(root, "assertions")
     env_dir = os.environ.get("CONDUCTOR_GATE_DIR")
     env_slug = os.environ.get("CONDUCTOR_GATE_SLUG")

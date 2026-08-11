@@ -18,6 +18,8 @@ from pathlib import Path
 import pytest
 
 from conductor import branches, paths
+from conductor.core import resolve as core_resolve
+from conductor.core import runkey, runstate, schema
 
 ROOT = Path(__file__).resolve().parents[2]
 CONDUCTOR = str(ROOT / "bin" / "conductor")
@@ -972,6 +974,289 @@ def test_resolve_gate_policy_matrix(tmp_path, monkeypatch, row):
     assert paths.baseline_path(str(tmp_path)) == g.baseline
     assert paths.run_dir(str(tmp_path)) == g.run_dir
     assert paths.unresolved_frozen_gate(str(tmp_path)) is (g.fail_closed is not None)
+
+
+# --- run-key mode: the key alone governs (design §"Project and run identity") --------------
+#
+# `pytest`, `os` and `subprocess` are imported at the top of this file, as are the
+# `conductor.core` modules these tests use; the `git_repo` fixture comes from
+# tests/conductor/conftest.py. The expected names are restated as literals on purpose — a test
+# that computed them with `derived_names` (the helper under test) would assert nothing.
+
+_NOW = "2026-08-10T12:00:00+00:00"
+
+
+def _run_doc(spec, *, generation=1, identity_scheme="path-hash-v2", **overrides):
+    key = runkey.run_key(spec, generation)
+    doc = schema.new_run_doc(
+        run_key=key,
+        generation=generation,
+        spec_path=spec,
+        workstation_id="0123456789abcdef0123456789abcdef",
+        integration_branch=f"conductor/run-{key}",
+        gate_dir=f"assertions/{key}",
+        spec_digest="a" * 64,
+        now=_NOW,
+        identity_scheme=identity_scheme,
+    )
+    doc.update(overrides)
+    return doc
+
+
+def test_run_gate_dir_is_assertions_slash_run_key(tmp_path):
+    key = runkey.run_key("docs/specs/alpha.md")
+    assert paths.run_gate_dir(str(tmp_path), key) == str(tmp_path / "assertions" / key)
+
+
+def test_run_gate_dir_refuses_an_unsafe_run_key(tmp_path):
+    # A helper that composes a filesystem path from a key must refuse a key that escapes the
+    # gate root, exactly as runstate._checked does before building a state path — otherwise the
+    # traversal is latent until the first caller passes a tampered key.
+    for bad in ("../x", "a/b", "..", ".lock", "x.lock", "", "-leading", "/abs"):
+        with pytest.raises(ValueError) as excinfo:
+            paths.run_gate_dir(str(tmp_path), bad)
+        assert repr(bad) in str(excinfo.value), bad
+
+
+def test_run_key_mode_ignores_ambient_files_and_environment(tmp_path, monkeypatch):
+    spec = "docs/specs/alpha.md"
+    doc = _run_doc(spec)
+    key = doc["run_key"]
+    _write(tmp_path, ".conductor/run_branch", "conductor/run-hijacked\n")
+    _write(tmp_path, ".conductor/goal.md", "docs/specs/gamma.md\n")
+    monkeypatch.setenv("CONDUCTOR_GATE_SLUG", "hijacked")
+    monkeypatch.setenv("CONDUCTOR_GATE_DIR", str(tmp_path / "elsewhere"))
+    monkeypatch.setenv(
+        "CONDUCTOR_MANIFEST", str(tmp_path / "elsewhere" / "manifest.yaml")
+    )
+    monkeypatch.setenv(
+        "CONDUCTOR_FREEZE_BASELINE", str(tmp_path / "elsewhere" / ".frozen")
+    )
+    res = paths.resolve_gate(str(tmp_path), run_key=key, run=doc)
+    assert res.source == "run_key"
+    assert res.slug == key
+    assert res.directory == str(tmp_path / "assertions" / key)
+    assert res.manifest == str(tmp_path / "assertions" / key / "manifest.yaml")
+    assert res.baseline == str(tmp_path / "assertions" / key / ".frozen")
+    assert res.run_dir == str(tmp_path / "assertions" / key / "run")
+    assert res.fail_closed is None
+
+
+def test_two_run_keys_resolve_to_distinct_gates(tmp_path):
+    alpha, beta = _run_doc("docs/specs/alpha.md"), _run_doc("docs/specs/beta.md")
+    first = paths.resolve_gate(str(tmp_path), run_key=alpha["run_key"], run=alpha)
+    second = paths.resolve_gate(str(tmp_path), run_key=beta["run_key"], run=beta)
+    assert first.directory != second.directory
+    assert first.manifest != second.manifest
+    assert first.baseline != second.baseline
+    assert first.run_dir != second.run_dir
+
+
+def test_a_later_generation_gets_its_own_gate(tmp_path):
+    first = _run_doc("docs/specs/alpha.md", generation=1)
+    second = _run_doc("docs/specs/alpha.md", generation=2)
+    assert paths.resolve_gate(
+        str(tmp_path), run_key=first["run_key"], run=first
+    ).directory != (
+        paths.resolve_gate(
+            str(tmp_path), run_key=second["run_key"], run=second
+        ).directory
+    )
+
+
+def test_gate_dir_disagreeing_with_the_run_key_fails_closed(tmp_path):
+    doc = _run_doc("docs/specs/alpha.md", gate_dir="assertions/some-other-run")
+    res = paths.resolve_gate(str(tmp_path), run_key=doc["run_key"], run=doc)
+    assert res.fail_closed and "gate_dir" in res.fail_closed
+    assert "run.json" in res.fail_closed
+
+
+def test_integration_branch_disagreeing_with_the_run_key_fails_closed(tmp_path):
+    doc = _run_doc(
+        "docs/specs/alpha.md", integration_branch="conductor/run-something-else"
+    )
+    res = paths.resolve_gate(str(tmp_path), run_key=doc["run_key"], run=doc)
+    assert res.fail_closed and "integration_branch" in res.fail_closed
+
+
+def test_an_unsafe_recorded_gate_dir_never_becomes_a_path(tmp_path):
+    doc = _run_doc("docs/specs/alpha.md")
+    doc["gate_dir"] = "assertions/../../outside"
+    res = paths.resolve_gate(str(tmp_path), run_key=doc["run_key"], run=doc)
+    assert res.fail_closed
+    assert "outside" not in res.directory
+
+
+def test_an_unknown_identity_scheme_fails_closed(tmp_path):
+    # The scheme decides WHICH verification applies, so an unrecognised one means no
+    # verification ran at all. It must refuse rather than resolve unchecked.
+    doc = _run_doc("docs/specs/alpha.md", identity_scheme="path-hash-v3")
+    res = paths.resolve_gate(str(tmp_path), run_key=doc["run_key"], run=doc)
+    assert res.fail_closed and "identity_scheme" in res.fail_closed
+    # A refusal resolves to the inert directory, never to the segment the unverified record
+    # claimed. That segment is well-formed here, and trusting a well-formed segment is what let a
+    # mis-paired record resolve onto ANOTHER run's real, frozen, green gate.
+    assert res.directory == str(tmp_path / "assertions" / "__unresolved__")
+
+
+def test_a_run_document_for_another_run_fails_closed(tmp_path):
+    # A legacy-slug-v1 record is exempt from the derived-name cross-check and so its recorded
+    # names are trusted verbatim. If the resolver did not also check that the document IS this
+    # run's, a mis-paired load would hand this key the OTHER run's gate — precisely the
+    # "validate some other run's already-green gate" outcome run-key mode exists to prevent.
+    other = _run_doc("docs/specs/beta.md", identity_scheme="legacy-slug-v1")
+    other["gate_dir"] = "assertions/self-enforcement"
+    other["integration_branch"] = "conductor/run-self-enforcement"
+    mine = runkey.run_key("docs/specs/alpha.md")
+    res = paths.resolve_gate(str(tmp_path), run_key=mine, run=other)
+    assert res.fail_closed and "run_key" in res.fail_closed
+    # the verdict names BOTH keys, so the operator can see which record was loaded
+    assert mine in res.fail_closed and other["run_key"] in res.fail_closed
+    # And the resolved directory is the inert one. `assertions/self-enforcement` is a real,
+    # frozen, green gate in this repository: a caller that read `directory` without checking
+    # `fail_closed` would validate against it and pass. Setting fail_closed while still handing
+    # back the other run's gate is the whole bug, so the directory is asserted, not just the
+    # verdict.
+    assert res.directory == str(tmp_path / "assertions" / "__unresolved__")
+    assert res.manifest.startswith(res.directory)
+    assert res.baseline.startswith(res.directory)
+
+
+def _failing_run_key_cases():
+    """Every way run-key mode refuses, as (label, run_key, run document) rows."""
+    wrong_record = _run_doc("docs/specs/beta.md", identity_scheme="legacy-slug-v1")
+    wrong_record["gate_dir"] = "assertions/self-enforcement"
+    wrong_record["integration_branch"] = "conductor/run-self-enforcement"
+    unsafe_dir = _run_doc("docs/specs/alpha.md")
+    unsafe_dir["gate_dir"] = "assertions/../../outside"
+    absent_dir = _run_doc("docs/specs/alpha.md", gate_dir="somewhere/else")
+    bad_gate_dir = _run_doc("docs/specs/alpha.md", gate_dir="assertions/some-other-run")
+    bad_branch = _run_doc(
+        "docs/specs/alpha.md", integration_branch="conductor/run-something-else"
+    )
+    unknown_scheme = _run_doc("docs/specs/alpha.md", identity_scheme="path-hash-v3")
+    return [
+        ("wrong run's record", runkey.run_key("docs/specs/alpha.md"), wrong_record),
+        ("unsafe gate_dir", unsafe_dir["run_key"], unsafe_dir),
+        ("gate_dir outside assertions/", absent_dir["run_key"], absent_dir),
+        ("gate_dir mismatch", bad_gate_dir["run_key"], bad_gate_dir),
+        ("integration_branch mismatch", bad_branch["run_key"], bad_branch),
+        ("unknown identity_scheme", unknown_scheme["run_key"], unknown_scheme),
+    ]
+
+
+def test_no_run_key_refusal_collapses_onto_the_flat_gate(tmp_path):
+    # THE point of run-key mode. In a repo that has one — this one does — flat `assertions/` is
+    # a real, FROZEN, green gate, so a refusal that redirected there would hand a caller that
+    # read .directory without checking .fail_closed the repo's own passing gate to validate and
+    # to write results into. Legacy mode never redirects on failure (it keeps whatever it
+    # resolved, and reaches flat only when fail_closed is None); run-key mode must not either.
+    _write(tmp_path, "assertions/manifest.yaml", "assertions: []\n")
+    _write(tmp_path, "assertions/.frozen", "{}\n")
+    flat = str(tmp_path / "assertions")
+    for label, key, doc in _failing_run_key_cases():
+        res = paths.resolve_gate(str(tmp_path), run_key=key, run=doc)
+        assert res.fail_closed, label
+        assert res.directory != flat, label
+        assert res.manifest != os.path.join(flat, "manifest.yaml"), label
+        assert res.baseline != os.path.join(flat, ".frozen"), label
+        assert res.run_dir != os.path.join(flat, "run"), label
+        assert not os.path.exists(res.manifest), label
+        assert not os.path.exists(res.baseline), label
+
+
+def test_an_unusable_gate_dir_refusal_lands_on_an_inert_directory(tmp_path):
+    # With no safe segment to name, the refusal needs a path that cannot be any run's gate.
+    # A run key must start with [a-z0-9], so `__unresolved__` can never collide with one.
+    for gate_dir in ("assertions/../../outside", "somewhere/else", "assertions/"):
+        doc = _run_doc("docs/specs/alpha.md")
+        doc["gate_dir"] = gate_dir
+        res = paths.resolve_gate(str(tmp_path), run_key=doc["run_key"], run=doc)
+        assert res.fail_closed, gate_dir
+        assert res.directory == str(tmp_path / "assertions" / "__unresolved__"), (
+            gate_dir
+        )
+
+
+def test_a_legacy_slug_run_keeps_its_recorded_names(tmp_path):
+    doc = _run_doc("docs/specs/alpha.md", identity_scheme="legacy-slug-v1")
+    doc["gate_dir"] = "assertions/self-enforcement"
+    doc["integration_branch"] = "conductor/run-self-enforcement"
+    res = paths.resolve_gate(str(tmp_path), run_key=doc["run_key"], run=doc)
+    assert res.fail_closed is None
+    assert res.directory == str(tmp_path / "assertions" / "self-enforcement")
+
+
+_UNSAFE_LEGACY_GATE_DIRS = (
+    "assertions/a..b",  # matches the old schema regex; traverses; refused by the resolver
+    "assertions/../../outside",
+    "assertions/x/y",
+    "assertions/x.lock",
+    "assertions/",
+    "assertions/.hidden",
+    "elsewhere/alpha",
+)
+
+
+@pytest.mark.parametrize("gate_dir", _UNSAFE_LEGACY_GATE_DIRS)
+def test_the_writer_and_the_resolver_agree_on_an_unsafe_legacy_gate_dir(
+    tmp_path, gate_dir
+):
+    """``legacy-slug-v1`` is EXEMPT from the derived-name cross-check, so ``schema``'s gate_dir
+    guard and ``paths``'s segment guard are the only structural validation its ``gate_dir`` ever
+    gets — and they disagreed: ``assertions/a..b`` was accepted by ``validate_run`` and refused by
+    ``resolve_gate``, a record legal to write and impossible to use. Every existing bad-gate_dir
+    test uses ``path-hash-v2``, where the derived-name check fires and masks both guards, so this
+    is the only place either one is pinned. Both now delegate to ``names.is_safe_segment``."""
+    doc = _run_doc("docs/specs/alpha.md", identity_scheme="legacy-slug-v1")
+    doc["gate_dir"] = gate_dir
+    doc["integration_branch"] = "conductor/run-self-enforcement"
+
+    with pytest.raises(schema.SchemaError) as excinfo:
+        schema.validate_run(doc)
+    assert "gate_dir" in str(excinfo.value)
+
+    res = paths.resolve_gate(str(tmp_path), run_key=doc["run_key"], run=doc)
+    assert res.fail_closed and "gate_dir" in res.fail_closed
+    assert res.directory == str(tmp_path / "assertions" / "__unresolved__")
+
+
+def test_the_writer_and_the_resolver_agree_on_a_safe_legacy_gate_dir(tmp_path):
+    """The control for the refusals above: a migrated run's non-derived-but-safe segment is
+    accepted by BOTH, so neither guard is simply refusing everything ``legacy-slug-v1``."""
+    doc = _run_doc("docs/specs/alpha.md", identity_scheme="legacy-slug-v1")
+    doc["gate_dir"] = "assertions/self-enforcement"
+    doc["integration_branch"] = "conductor/run-self-enforcement"
+    assert schema.validate_run(doc) is doc
+    res = paths.resolve_gate(str(tmp_path), run_key=doc["run_key"], run=doc)
+    assert res.fail_closed is None
+    assert res.directory == str(tmp_path / "assertions" / "self-enforcement")
+
+
+def test_run_key_mode_requires_the_run_document(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        paths.resolve_gate(str(tmp_path), run_key="alpha-1a2b3c4d")
+    assert "runstate.load" in str(excinfo.value)
+
+
+def test_gate_for_run_loads_the_document_and_resolves(git_repo):
+    root = str(git_repo)
+    doc = _run_doc("docs/specs/alpha.md")
+    runstate.create(core_resolve.state_root(root), doc["run_key"], doc)
+    res = core_resolve.resolve(run_key=doc["run_key"], start=root)
+    gate = core_resolve.gate_for_run(res)
+    assert gate.source == "run_key"
+    assert gate.directory == os.path.join(res.repo_root, "assertions", doc["run_key"])
+
+
+def test_legacy_mode_is_unchanged_when_no_run_key_is_given(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    _write(tmp_path, ".conductor/run_branch", "conductor/run-alpha\n")
+    _write(tmp_path, ".conductor/goal.md", "docs/specs/alpha.md\n")
+    _write(tmp_path, "assertions/alpha/manifest.yaml", "assertions: []\n")
+    res = paths.resolve_gate(str(tmp_path))
+    assert res.source == "run_branch"
+    assert res.directory == str(tmp_path / "assertions" / "alpha")
 
 
 if __name__ == "__main__":

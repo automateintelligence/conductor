@@ -45,6 +45,7 @@
 | `conductor/core/__init__.py` | empty package marker |
 | `conductor/core/atomic.py` | durable writes: temp + flush + fsync + replace + directory fsync; JSON helpers |
 | `conductor/core/locks.py` | `flock`-based advisory locks and the global lock-order invariant |
+| `conductor/core/names.py` | THE definition of the two names a run key determines: `assertions/<key>` and `conductor/run-<key>`. A leaf module — imports nothing from `paths` or `runkey`, so `paths.py` can use it without a cycle (`runkey` already imports `paths.spec_slug`) |
 | `conductor/core/runkey.py` | spec-path normalization, path hash, run key, generation suffixes |
 | `conductor/core/schema.py` | `project.json` / `run.json` shapes, the status and review-policy vocabularies, status transitions |
 | `conductor/core/workstation.py` | the random host-neutral installation ID shared by both adapters |
@@ -69,7 +70,7 @@
 | File | Covers |
 | --- | --- |
 | `tests/conductor/core/__init__.py` | package marker |
-| `tests/conductor/core/conftest.py` | the `git_repo` fixture (a real isolated repository) |
+| `tests/conductor/conftest.py` | the `git_env` / `git` / `git_repo` fixtures (a real isolated repository). Lives at `tests/conductor/`, **not** `tests/conductor/core/`, so Tasks 13 and 14 in `tests/conductor/` see it too — a conftest applies to its own directory and every subdirectory, which removes any need for `pytest_plugins` |
 | `tests/conductor/core/test_atomic.py` | Task 1 |
 | `tests/conductor/core/test_locks.py` | Task 2 |
 | `tests/conductor/core/test_runkey.py` | Task 3 |
@@ -625,6 +626,37 @@ def test_normalize_refuses_a_path_outside_the_repository(tmp_path):
     assert "outside the repository" in str(excinfo.value)
 
 
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform has no symlinks")
+def test_normalize_rescues_a_repository_reached_through_a_symlink_alias(tmp_path):
+    """`root` is realpath'd but an absolute spec path is not, so a repo reached through a
+    symlinked alias would otherwise report an in-repo file as outside."""
+    actual = tmp_path / "actual"
+    (actual / "docs" / "specs").mkdir(parents=True)
+    (actual / "docs" / "specs" / "alpha.md").write_text("# alpha\n")
+    alias = tmp_path / "alias"
+    os.symlink(actual, alias)
+    through_alias = runkey.normalize_spec_path(
+        str(alias), str(alias / "docs" / "specs" / "alpha.md")
+    )
+    through_real = runkey.normalize_spec_path(
+        str(actual), str(actual / "docs" / "specs" / "alpha.md")
+    )
+    assert through_alias == through_real == "docs/specs/alpha.md"
+    assert runkey.run_key(through_alias) == runkey.run_key(through_real)
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform has no symlinks")
+def test_the_symlink_retry_does_not_weaken_the_outside_repository_guard(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "alpha.md").write_text("# alpha\n")
+    with pytest.raises(ValueError) as excinfo:
+        runkey.normalize_spec_path(str(root), str(outside / "alpha.md"))
+    assert "outside the repository" in str(excinfo.value)
+
+
 def test_is_safe_run_key_accepts_generated_keys_and_rejects_traversal():
     assert runkey.is_safe_run_key(runkey.run_key("docs/specs/alpha.md", 3))
     assert not runkey.is_safe_run_key("../outside")
@@ -670,7 +702,14 @@ from conductor.paths import spec_slug
 HASH_LEN = 8
 
 _KEY_RE = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
-_GEN_RE = re.compile(r"-g([2-9]\d*)\Z")
+# Generation 1 carries no suffix, so only 2 and up are encoded — but the range is on the WHOLE
+# number, not its first digit. `[2-9]\d*` would silently parse -g10, -g11, -g17 as generation 1.
+_GEN_RE = re.compile(r"-g([1-9]\d*)\Z")
+
+
+def _escapes_repo(relative: str) -> bool:
+    """Whether a computed relative path leaves the repository root."""
+    return relative == ".." or relative.startswith(".." + os.sep)
 
 
 def normalize_spec_path(repo_root: str, spec_path: str) -> str:
@@ -686,7 +725,16 @@ def normalize_spec_path(repo_root: str, spec_path: str) -> str:
         else os.path.normpath(os.path.join(root, spec_path))
     )
     relative = os.path.relpath(absolute, root)
-    if relative == ".." or relative.startswith(".." + os.sep):
+    if _escapes_repo(relative):
+        # The caller may have reached the repository through a symlinked alias (a symlinked
+        # home, /tmp on macOS, a WSL mount): ``root`` is realpath'd but an absolute
+        # ``spec_path`` is not, so relpath would compare a resolved path against an unresolved
+        # one and report a file inside the repo as outside. Resolve once and retry before
+        # refusing. A spec that is ITSELF a symlink still keeps its in-repo path — this runs
+        # only on the refusal path, so it rescues an alias and never relocates a spec that
+        # already resolved inside the repository.
+        relative = os.path.relpath(os.path.realpath(absolute), root)
+    if _escapes_repo(relative):
         raise ValueError(
             f"spec path is outside the repository: {spec_path!r} is not under {root!r}"
         )
@@ -721,7 +769,7 @@ def is_safe_run_key(key: str) -> bool:
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `pytest tests/conductor/core/test_runkey.py -q`
-Expected: PASS (11 passed)
+Expected: PASS (12 passed)
 
 - [ ] **Step 5: Lint and typecheck**
 
@@ -1216,6 +1264,23 @@ def validate_run(doc: dict) -> dict:
             f"gate_dir {gate_dir!r} must be 'assertions/<single-safe-segment>' relative to the "
             "repository root"
         )
+    if doc["identity_scheme"] == "path-hash-v2":
+        # The run key is the SINGLE source of both derived names, so a record whose identity and
+        # derived paths have diverged is a corrupt record, not a valid variant. Scheme-conditional
+        # on purpose: a `legacy-slug-v1` run migrated by Plan 03 deliberately retains the gate
+        # directory and branch names it had BEFORE migration, which need not follow the derived
+        # form — an unconditional check would make every migrated run unvalidatable.
+        want_gate = f"assertions/{key}"
+        if gate_dir != want_gate:
+            raise SchemaError(
+                f"gate_dir {gate_dir!r} disagrees with run_key {key!r}; expected {want_gate!r}"
+            )
+        want_branch = f"conductor/run-{key}"
+        if doc["integration_branch"] != want_branch:
+            raise SchemaError(
+                f"integration_branch {doc['integration_branch']!r} disagrees with run_key "
+                f"{key!r}; expected {want_branch!r}"
+            )
     for field in ("path_history", "phase_ids", "phase_reviews", "dispatches"):
         if not isinstance(doc[field], list):
             raise SchemaError(f"{field} must be a list, got {type(doc[field]).__name__}")
@@ -1282,6 +1347,12 @@ def validate_project(doc: dict) -> dict:
                 raise SchemaError(f"specs[{spec_path!r}] has status {status!r}")
             if status not in TERMINAL_STATUSES:
                 nonterminal.append(key)
+        if len(numbers) != len(set(numbers)):
+            duplicates = sorted({n for n in numbers if numbers.count(n) > 1})
+            raise SchemaError(
+                f"specs[{spec_path!r}] has duplicate generation number(s) "
+                f"{duplicates}; each generation appears at most once"
+            )
         if numbers != sorted(numbers):
             raise SchemaError(f"specs[{spec_path!r}].generations must be in ascending order")
         if len(nonterminal) > 1:
@@ -2094,7 +2165,11 @@ def test_commit_completes_an_unfinished_transaction_before_reading(state_root):
     before reading mappings, so a crash cannot leave a silently split identity."""
     doc = registry.load(state_root)
     key = runkey.run_key(ALPHA)
-    after = registry.register(dict(doc), spec=ALPHA, run_key=key, generation=1)
+    # schema.clone, NOT dict(doc): a shallow copy leaves after["specs"] aliasing doc["specs"],
+    # so register() mutates both and the journal's before/after images become identical apart
+    # from `revision`. The test would then pass even if recover() rolled a committed journal
+    # BACKWARD — it would be asserting nothing about the direction it claims to check.
+    after = registry.register(schema.clone(doc), spec=ALPHA, run_key=key, generation=1)
     after["revision"] = 1
     transaction.prepare(
         state_root,
@@ -2104,6 +2179,31 @@ def test_commit_completes_an_unfinished_transaction_before_reading(state_root):
     transaction.commit(state_root, "txn-repoint")
     refreshed = registry.update(state_root, lambda d: d)
     assert registry.current_run_key(refreshed, ALPHA) == key
+    assert transaction.pending(state_root) == []
+
+
+def test_init_completes_an_unfinished_transaction_before_reading(tmp_path):
+    """`init` is a project entry point too, and unlike `commit` it has no compare-and-swap gate
+    to catch a stale read — so it must recover before reading, and that must be tested through
+    `init` itself."""
+    state_root = str(tmp_path / ".conductor")
+    registry.init(state_root, workstation_id=WORKSTATION, repo_identity=IDENTITY)
+    doc = registry.load(state_root)
+    key = runkey.run_key(ALPHA)
+    after = registry.register(schema.clone(doc), spec=ALPHA, run_key=key, generation=1)
+    after["revision"] = 1
+    transaction.prepare(
+        state_root,
+        "txn-init",
+        [{"path": registry.registry_path(state_root), "before": doc, "after": after}],
+    )
+    transaction.commit(state_root, "txn-init")  # committed but NOT applied — the crash state
+    # No other registry call may precede this init(): any earlier call would recover the
+    # transaction itself, and the test would pass whether or not init() was fixed.
+    recovered = registry.init(
+        state_root, workstation_id=WORKSTATION, repo_identity=IDENTITY
+    )
+    assert registry.current_run_key(recovered, ALPHA) == key  # the RETURNED doc, not a re-read
     assert transaction.pending(state_root) == []
 
 
@@ -2178,6 +2278,11 @@ def init(state_root: str, *, workstation_id: str, repo_identity: dict) -> dict:
     """Create the registry if absent; return the existing one otherwise. Never overwrites, so a
     second caller cannot reset the workstation identity or drop mappings."""
     with locks.hold(lock_path(state_root), kind="project"):
+        # Recover BEFORE reading, like `commit`. This is a project entry point, and unlike
+        # `commit` it has no compare-and-swap gate to catch a stale read — an idempotent
+        # get-or-create called after a crash left a committed-but-unapplied journal would
+        # otherwise hand the caller the pre-recovery document and never notice.
+        transaction.recover(state_root)
         existing = load(state_root)
         if existing is not None:
             return schema.validate_project(existing)
@@ -2701,7 +2806,7 @@ git commit -m "conductor/core/runstate.py:1-200 — per-run run.json under state
 
 **Files:**
 - Create: `conductor/core/resolve.py`
-- Create: `tests/conductor/core/conftest.py`
+- Create: `tests/conductor/conftest.py` — note the location: `tests/conductor/`, **not** `tests/conductor/core/`. A conftest applies to its own directory and all subdirectories, so putting it one level up lets Tasks 11, 13 and 14 (which live in `tests/conductor/`) use the same fixtures without `pytest_plugins`, which pytest deprecates outside the rootdir conftest.
 - Modify: `conductor/resume_script.py:58-77`
 - Test: `tests/conductor/core/test_resolve.py`
 
@@ -2720,10 +2825,11 @@ git commit -m "conductor/core/runstate.py:1-200 — per-run run.json under state
 
 - [ ] **Step 1: Write the shared git fixture**
 
-Create `tests/conductor/core/conftest.py`:
+Create `tests/conductor/conftest.py` (one level **above** `core/`, so every test under
+`tests/conductor/` inherits these fixtures):
 
 ```python
-"""Shared fixtures for conductor.core tests.
+"""Shared fixtures for the conductor test suite.
 
 Conductor resolves its canonical state root from git plumbing (``--git-common-dir``) so that
 starting from a linked worktree finds the same root as the main checkout. Mocking git would test
@@ -3004,8 +3110,12 @@ def repo_root(start: str | None = None) -> str:
     """The MAIN checkout root for any path inside the repository.
 
     ``--git-common-dir`` is identical from the owner checkout and from a linked run worktree;
-    ``--show-toplevel`` is not, which is why it is not used here."""
-    base = start or os.environ.get("CONDUCTOR_HOME") or os.getcwd()
+    ``--show-toplevel`` is not, which is why it is not used here.
+
+    ``start is not None`` rather than a truthiness test: an explicitly supplied ``""`` must not
+    fall through to the ambient ``CONDUCTOR_HOME``. Silently resolving a different repository
+    than the caller named is the one failure this module exists to eliminate."""
+    base = start if start is not None else (os.environ.get("CONDUCTOR_HOME") or os.getcwd())
     common = subprocess.run(
         ["git", "-C", base, "rev-parse", "--path-format=absolute", "--git-common-dir"],
         check=True,
@@ -3045,8 +3155,34 @@ def repo_identity(root: str) -> dict:
     }
 
 
+def recover_pending(state_root: str) -> list[str]:
+    """Complete or reverse any unfinished transaction. Returns the journal ids handled.
+
+    CALL THIS FROM AN ENTRY POINT, BEFORE ACQUIRING ANY LOCK. It takes ``project.lock`` itself,
+    so a caller already holding ``project``, ``owner`` or ``state`` gets ``LockOrderError``.
+
+    The leaf reads below (``active_run_keys``, ``resolve``) deliberately do NOT call this. If
+    they did, they would inherit that lock-order constraint and become unsafe to call from
+    inside any lock — and the failure would only appear when a journal happened to be pending,
+    i.e. during crash recovery, which is the worst time to discover it. The design scopes the
+    recover-before-read rule to entry points, not to every leaf read, so recovery lives here and
+    the leaves stay pure.
+
+    ``transaction.pending`` is checked BEFORE the lock so a pure read of a project that has no
+    state root creates nothing. That check-then-lock window is benign: writers hold
+    ``project.lock`` across prepare/commit/apply, so once this holds the lock no writer can be
+    mid-transaction, and a false-negative merely means the next caller recovers instead."""
+    if not transaction.pending(state_root):
+        return []
+    with locks.hold(registry.lock_path(state_root), kind="project"):
+        return transaction.recover(state_root)
+
+
 def active_run_keys(root: str) -> list[str]:
     """Run keys whose RUN RECORD says active, checkpointed, or blocked, sorted.
+
+    A pure read: takes no lock, so it is safe to call from anywhere, including from inside a
+    held lock. See ``recover_pending`` for why recovery is not done here.
 
     Reads ``run.json`` rather than the registry's status mirror: the mirror exists for the
     new-generation policy and cheap listing, and a stale mirror must never decide which run a
@@ -3078,7 +3214,16 @@ def resolve(*, run_key: str | None = None, start: str | None = None) -> RunResol
     if len(active) == 1:
         key = active[0]
         run = runstate.load(sroot, key)
-        assert run is not None  # active_run_keys only returns keys whose record loaded
+        if run is None:
+            # A race: the record existed when active_run_keys read it and is gone now. An
+            # `assert` here would raise a bare AssertionError, which breaks the rule its two
+            # sibling branches keep — every actionable failure names the operation, the path,
+            # whether a write occurred, and the recovery command.
+            raise RunNotFound(
+                f"run {key!r} disappeared between listing and loading "
+                f"({runstate.run_path(sroot, key)}); no write occurred. Retry, or inspect with: "
+                "conductor run list --all"
+            )
         return RunResolution(sroot, root, key, runstate.run_dir(sroot, key), run)
     if not active:
         raise RunNotFound(
@@ -3131,7 +3276,7 @@ Expected: clean.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add conductor/core/resolve.py conductor/resume_script.py tests/conductor/core/conftest.py tests/conductor/core/test_resolve.py
+git add conductor/core/resolve.py conductor/resume_script.py tests/conductor/conftest.py tests/conductor/core/test_resolve.py
 git commit -m "conductor/core/resolve.py:1-160, conductor/resume_script.py:58-70 — run resolution
 
 - canonical state root from --git-common-dir; a linked worktree finds the main checkout's root
@@ -3422,7 +3567,11 @@ git commit -m "conductor/core/hygiene.py:1-150 — refuse tracked run state, est
 
 **Contract (design lines 150 and 152):** the run key is the single source shared by a new run's integration-branch suffix and its done-gate directory, and the resolver verifies this equality **from `run.json`** rather than recovering it from ambient project files. When an invocation carries a run key, that key alone determines the gate directory, manifest, freeze baseline, and results path.
 
-**Import-direction rule:** `conductor/paths.py` must **not** import `conductor.core`. `runkey` already imports `paths.spec_slug`, and a back-edge would be a cycle. `resolve_gate` therefore takes the already-loaded run document; `resolve.gate_for_run` is the one place that loads it.
+**Import-direction rule:** `conductor/paths.py` must **not** import `conductor.core.runkey`, `registry`, `runstate`, or `resolve`. `runkey` already imports `paths.spec_slug`, and a back-edge would be a cycle. `resolve_gate` therefore takes the already-loaded run document; `resolve.gate_for_run` is the one place that loads it.
+
+`conductor.core.names` is the deliberate exception and the reason it exists as its own module: it is a leaf that imports nothing from `paths` or `runkey`, so `paths.py` may import it (`from conductor.core.names import derived_names`) without forming a cycle. That is what lets all three call sites — `schema.validate_run`, `paths.resolve_gate`, and `run_cmd.cmd_new` — share one definition of the two formats instead of each carrying a literal copy.
+
+**Tests keep their literals.** The test files in this plan assert `gate_dir == f"assertions/{key}"` and `integration_branch == f"conductor/run-{key}"` directly. Do **not** rewrite those to call `derived_names` — a test that computes its expectation with the same helper it is testing asserts nothing. The independent restatement in the tests is what pins the format.
 
 **Legacy behaviour is unchanged.** With `run_key=None`, `resolve_gate` keeps its existing env → `run_branch` → `goal.md` → flat precedence and its two §5 ambient-dodge checks, so assertion A12 and every existing caller keep passing. Plan 03 removes the legacy branch after migration.
 
@@ -3432,8 +3581,10 @@ Append to `tests/conductor/test_gate_paths.py`:
 
 ```python
 # --- run-key mode: the key alone governs (design §"Project and run identity") --------------
-
-import pytest
+#
+# `pytest`, `os` and `subprocess` are already imported at the top of this file, and the
+# `git_repo` fixture comes from tests/conductor/conftest.py (Task 9) — do not re-import or
+# redefine either.
 
 from conductor.core import resolve as core_resolve
 from conductor.core import runkey, runstate, schema
@@ -3537,15 +3688,14 @@ def test_run_key_mode_requires_the_run_document(tmp_path):
     assert "runstate.load" in str(excinfo.value)
 
 
-def test_gate_for_run_loads_the_document_and_resolves(tmp_path, git_repo_for_gate):
-    root, state_root = git_repo_for_gate
-    spec = "docs/specs/alpha.md"
-    doc = _run_doc(spec)
-    runstate.create(state_root, doc["run_key"], doc)
+def test_gate_for_run_loads_the_document_and_resolves(git_repo):
+    root = str(git_repo)
+    doc = _run_doc("docs/specs/alpha.md")
+    runstate.create(core_resolve.state_root(root), doc["run_key"], doc)
     res = core_resolve.resolve(run_key=doc["run_key"], start=root)
     gate = core_resolve.gate_for_run(res)
     assert gate.source == "run_key"
-    assert gate.directory == os.path.join(root, "assertions", doc["run_key"])
+    assert gate.directory == os.path.join(res.repo_root, "assertions", doc["run_key"])
 
 
 def test_legacy_mode_is_unchanged_when_no_run_key_is_given(tmp_path):
@@ -3557,38 +3707,8 @@ def test_legacy_mode_is_unchanged_when_no_run_key_is_given(tmp_path):
     assert res.directory == str(tmp_path / "assertions" / "alpha")
 ```
 
-Add the `git_repo_for_gate` fixture at the top of the same file (this file has no `conftest.py` in scope for `git_repo`):
-
-```python
-@pytest.fixture
-def git_repo_for_gate(tmp_path):
-    """A minimal real repository plus its canonical state root, for gate_for_run."""
-    root = tmp_path / "repo"
-    (root / "docs" / "specs").mkdir(parents=True)
-    (root / "docs" / "specs" / "alpha.md").write_text("# alpha\n")
-    env = {
-        **os.environ,
-        "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"),
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_AUTHOR_NAME": "Conductor Test",
-        "GIT_AUTHOR_EMAIL": "test@example.invalid",
-        "GIT_COMMITTER_NAME": "Conductor Test",
-        "GIT_COMMITTER_EMAIL": "test@example.invalid",
-    }
-    subprocess.run(
-        ["git", "init", "-q", "-b", "main", str(root)],
-        check=True, capture_output=True, env=env, timeout=30,
-    )
-    subprocess.run(
-        ["git", "-C", str(root), "add", "-A"],
-        check=True, capture_output=True, env=env, timeout=30,
-    )
-    subprocess.run(
-        ["git", "-C", str(root), "commit", "-qm", "init"],
-        check=True, capture_output=True, env=env, timeout=30,
-    )
-    return str(root), os.path.join(str(root), ".conductor")
-```
+No new fixture is needed: `git_repo` comes from `tests/conductor/conftest.py`, created in Task 9,
+which covers this directory.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -3605,7 +3725,14 @@ def run_gate_dir(repo_root: str, run_key: str) -> str:
 
     The run key is the SINGLE source shared by the run's integration-branch suffix
     (``conductor/run-<run-key>``) and this directory, so the two cannot diverge. ``resolve_gate``
-    verifies that equality against ``run.json`` rather than re-deriving it from ambient files."""
+    verifies that equality against ``run.json`` rather than re-deriving it from ambient files.
+
+    Refuses an unsafe key before building a path, matching ``conductor/core/runstate.py``'s
+    ``_checked``. Without this, ``run_gate_dir(root, "../x")`` returns a traversal path."""
+    if not _safe_slug(run_key):
+        raise ValueError(
+            f"unsafe run key {run_key!r}; refusing to build a gate path from it"
+        )
     return os.path.join(repo_root, "assertions", run_key)
 ```
 
@@ -3661,13 +3788,26 @@ def _resolve_gate_by_run_key(
     prefix = "assertions/"
     segment = recorded_dir[len(prefix) :] if recorded_dir.startswith(prefix) else ""
     fail: str | None = None
-    if not segment or not _safe_slug(segment):
+    if run.get("run_key") != run_key:
+        # The document must belong to the key we were asked about. Without this, a
+        # `legacy-slug-v1` record — deliberately exempt from the derived-name cross-check below,
+        # because migration retains its pre-migration names verbatim — resolves to ANOTHER RUN's
+        # gate and reports no failure. `runstate.load` is a bare read with no key check, so a
+        # tampered `run_key` field reaches here on the primary path, not only via direct misuse.
+        fail = (
+            f"run document declares run_key {run.get('run_key')!r} but was loaded for "
+            f"{run_key!r}; refusing to resolve a gate from a mis-paired record"
+        )
+    elif not segment or not _safe_slug(segment):
         fail = (
             f"run {run_key!r} records gate_dir={recorded_dir!r}, which is not "
             "'assertions/<single-safe-segment>' — repair run.json"
         )
     elif scheme == "path-hash-v2":
-        want_dir, want_branch = f"assertions/{run_key}", f"conductor/run-{run_key}"
+        # names.derived_names is THE definition of both formats — never re-write the literals
+        # here. conductor/branches.py:1-15 records what happened the last time two callers each
+        # derived `conductor/run-<...>` independently: they drifted.
+        want_dir, want_branch = derived_names(run_key)
         if recorded_dir != want_dir:
             fail = (
                 f"run {run_key!r} records gate_dir={recorded_dir!r}, expected {want_dir!r}; the "
@@ -3684,7 +3824,19 @@ def _resolve_gate_by_run_key(
             f"run {run_key!r} records unknown identity_scheme {scheme!r}; expected "
             "'path-hash-v2' or 'legacy-slug-v1' — repair run.json"
         )
-    directory = os.path.join(root, "assertions", segment) if not fail else os.path.join(root, "assertions")
+    # Directory selection must NOT depend on `fail`. Collapsing to the flat `assertions/` on
+    # refusal points at a gate that in a real repo is present, frozen and GREEN — so a caller
+    # that read `.directory` without checking `.fail_closed` would validate the repo's own
+    # already-passing gate and could write results into it. That is the exact outcome run-key
+    # mode exists to prevent, and it is the opposite of legacy mode, which leaves `directory`
+    # alone on refusal and only falls back to flat when there is no failure.
+    if segment and _safe_slug(segment):
+        directory = os.path.join(root, "assertions", segment)
+    else:
+        # No usable segment. `__unresolved__` cannot collide with any run key or accepted legacy
+        # segment — both must start with `[a-z0-9]` — so manifest/baseline/run_dir land on a
+        # path that does not exist and an inattentive caller still fails closed.
+        directory = os.path.join(root, "assertions", "__unresolved__")
     return GateResolution(
         directory,
         os.path.join(directory, "manifest.yaml"),
@@ -3759,6 +3911,38 @@ git commit -m "conductor/paths.py:122-260, conductor/core/resolve.py:160-170 —
 **Locking note:** `repoint` holds `project.lock` and `state.lock` itself, so it must **not** call `registry.commit`/`registry.update`/`runstate.commit` — those take the same locks and would raise `LockOrderError` for re-entrancy. That is exactly why the transaction journal exists: `repoint` builds both after-images and writes them through `transaction`.
 
 **Owner note:** Plan 01 treats a busy `owner.lock` as a flat refusal (`RepointRefused`). Plan 02 replaces that with lease and liveness interpretation; the acquisition order established here does not change.
+
+> **SHIPPED IMPLEMENTATION DIFFERS FROM THE CODE BLOCK BELOW.** Review found five defects in the
+> reference code; `conductor/core/repoint.py` is the source of truth. The deltas, and why they
+> matter to Plans 02–07:
+>
+> 1. **The collision check must refuse on ANY existing mapping, not on `current_run_key`.**
+>    `current_run_key` returns `None` when a spec's generations are *all terminal* —
+>    `validate_project` requires exactly that. Using it meant repointing onto a completed run's
+>    path silently replaced that path's whole generation list with a document no validator could
+>    reject, and the archived run vanished from `run_keys`, `find_run` and `active_run_keys`.
+> 2. **`run.json` must be checked against the registry before repointing.** Nothing verified the
+>    record agreed about its own path and key, so a divergent record would be repointed and a
+>    fictional path history written. Same mis-paired-record shape Task 11 found in `resolve_gate`.
+> 3. **Every generation in the mapping moves, not just the target.** `specs[path].pop(old_rel)`
+>    moves the whole entry, so rewriting only the target's record left every sibling's `run.json`
+>    disagreeing with the registry — the exact divergence check 2 refuses to operate on. All
+>    records move inside the one transaction. Locks follow the design's rule for multi-run
+>    project operations: `owner.lock` for every key in **sorted run-key order**, then `state.lock`
+>    for every key in the same order. Do **not** assume siblings are terminal and ownerless —
+>    `repoint --run <key>` may target a terminal generation while a sibling is active.
+> 4. **A committed rename counts.** The reference `_rename_detected` diffed worktree-vs-`HEAD`, so
+>    `git mv && git commit` left nothing to find. Detection now also consults bounded history
+>    (`git log --follow --name-status --format= -M -n50`). Both paths share one `R<score>` parser
+>    and are fail-closed on a non-zero git exit.
+> 5. **The refusal message branches on whether the old path still exists.** Advising
+>    `git mv <old> <new>` when `<old>` is already gone is not an exact recovery command.
+>
+> Residual, accepted: rename detection inherits git's 50% similarity threshold, and `--follow` is
+> approximate across merges. Both degrade to the digest check and then to a refusal naming
+> `conductor run new <new_rel>` — no path degrades to a *wrong* repoint. `repoint` does not
+> refresh `spec_digest`, so after a rename-plus-edit only rename detection can authorize a
+> subsequent repoint of the same run.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -4240,6 +4424,65 @@ conductor run repoint-spec --run <run-key> <new-relative-path> [--project <root>
 
 **Scope boundary:** `run new` creates the registry entry, the run directory, and `run.json`. It does **not** create branches or worktrees (Plan 06), install a schedule (Plan 05), or record hosts (Plan 04). `/conductor:start` composes those once those plans land.
 
+**Every verb is an entry point and MUST call `resolve.recover_pending(state_root)` first.** This is not optional bookkeeping — it is the other half of a decision made in Task 9. `resolve()` and `active_run_keys()` are deliberately pure lock-free reads, so that Plan 02's takeover and Plan 12's `repoint` can call them while holding `owner.lock`. The cost of that purity is that **nothing recovers an unfinished transaction unless an entry point does it**, and a committed-but-unapplied journal makes a run invisible: a bare command then resolves to a different run and lands work on the wrong branch.
+
+So `main()` calls `resolve.recover_pending(...)` once, before dispatching to any handler and before any handler takes a lock. Put it in `main()` rather than in each `cmd_*` so a verb added later cannot forget it:
+
+```python
+    try:
+        root = resolve.repo_root(getattr(args, "project", None))
+        resolve.recover_pending(os.path.join(root, ".conductor"))
+    except subprocess.CalledProcessError as exc:
+        print(f"git failed resolving the project: {(exc.stderr or '').strip() or exc}", file=sys.stderr)
+        return EXIT_FAIL
+    return _HANDLERS[args.cmd](args)
+```
+
+`recover_pending` returns `[]` cheaply when no journal is pending and creates nothing when the project has no state root, so this is safe on a first-ever `run new`.
+
+**Required test:** prepare and commit a transaction registering a spec, without applying it; then invoke a CLI verb (`resolve` is the cheapest) and assert it sees the recovered run and that `transaction.pending(state_root) == []` afterwards. Verify it fails without the `recover_pending` call — a test that passes either way is the failure mode this plan has already hit twice.
+
+> **SHIPPED IMPLEMENTATION DIFFERS FROM THE CODE BLOCKS BELOW.** `conductor/run_cmd.py` is the
+> source of truth. Three deltas, all load-bearing for Plans 02–07:
+>
+> 1. **`run new` writes `project.json` and `run.json` through one journalled transaction.** The
+>    reference code called `runstate.create` and then `registry.update` — two independent atomic
+>    writes, which is precisely the hazard `conductor/core/transaction.py:1-8` was built for. A
+>    crash between them left an orphaned `run.json` the registry never learned about, and that
+>    state was a **dead end**: `run new` derives the same key and dies on `RunExists`, and
+>    `--new-run` computes generation 1 again (an unmapped path has no generations) and derives the
+>    same key too. `cmd_new` now holds `project.lock` across the read, every refusal check and the
+>    write, takes `state.lock` for the new key inside it, and drives
+>    `transaction.prepare` → `commit` → `apply`. So the crash window closes, and it is the same
+>    machinery `main()`'s `recover_pending` rolls forward. The orphan branch survives as a
+>    fail-closed refusal for a hand-placed record and names `rm -r <run dir>`, because `--new-run`
+>    genuinely cannot clear it.
+> 2. **`main()`'s `recover_pending` call lives inside the handler `try`, not in a `try` of its
+>    own.** The snippet above ends with `return _HANDLERS[args.cmd](args)` *outside* any except
+>    clause; substituted literally for Step 3's `main()` body it would drop the `RunAmbiguous` /
+>    `RunNotFound` / refusal mapping, i.e. every exit code but 0 and 64. One `try` covers the
+>    recovery and the dispatch, and the existing `subprocess.CalledProcessError` clause already
+>    reports a git failure while resolving the project.
+> 3. **The brief's `test_gate_dir_fails_closed_when_run_json_disagrees_with_the_key` could not
+>    run.** It built the corrupt record with `runstate.update`, but `schema.validate_run` refuses a
+>    `path-hash-v2` record whose `gate_dir` is not the run_key-derived one (Task 11), so the test
+>    raised `SchemaError` instead of exercising the branch. The corrupt record is now written with
+>    `atomic.write_json_atomic`, which is the only way it can arise in the field anyway — a hand
+>    edit. A second test covers the other fail-closed shape, a **mis-paired** record (run A's
+>    directory holding run B's document): its `gate_dir` segment is perfectly safe, so only the
+>    identity check catches it, and with that check removed the CLI prints B's gate directory for
+>    A's key.
+>
+> Also added, because nothing in the reference tests covered them: `--project` **before** the
+> subcommand (the whole point of `argparse.SUPPRESS`, verified to regress to `None` without it on
+> CPython 3.12.8), a non-repository project exiting 1 rather than raising, `list` on a project with
+> no registry, `show --run <unknown>` exiting 3, and the `bin/conductor` usage text.
+>
+> Residual, accepted: the byte-identical-spec refusal in `run new` matches against runs of **any**
+> status, so two genuinely distinct specs with identical bytes (two empty files, two copies of a
+> template) cannot both start a run without editing one of them. Fail-closed and rare; a `--force`
+> was not added.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/conductor/test_run_cmd.py`:
@@ -4267,7 +4510,9 @@ from conductor.core import registry, resolve, runkey, runstate
 ROOT = Path(__file__).resolve().parents[2]
 CONDUCTOR = str(ROOT / "bin" / "conductor")
 
-pytest_plugins = ["tests.conductor.core.conftest"]
+# The git_env / git / git_repo fixtures come from tests/conductor/conftest.py (Task 9), which
+# covers this directory. Do not add `pytest_plugins` — pytest only honours it in the rootdir
+# conftest, and a nested reference is deprecated.
 
 
 def _run(root, *args):
@@ -4502,6 +4747,7 @@ import sys
 from conductor import paths
 from conductor.core import (
     hygiene,
+    names,
     registry,
     repoint,
     resolve,
@@ -4584,6 +4830,7 @@ def cmd_new(args: argparse.Namespace) -> int:
             return EXIT_FAIL
     generation = registry.next_generation(project_doc, relative)
     key = runkey.run_key(relative, generation)
+    derived = names.derived_names(key)  # THE definition of both formats; never inline them here
     runstate.create(
         state_root,
         key,
@@ -4592,8 +4839,8 @@ def cmd_new(args: argparse.Namespace) -> int:
             generation=generation,
             spec_path=relative,
             workstation_id=project_doc["workstation_id"],
-            integration_branch=f"conductor/run-{key}",
-            gate_dir=f"assertions/{key}",
+            integration_branch=derived.integration_branch,
+            gate_dir=derived.gate_dir,
             spec_digest=digest,
             now=_now(),
         ),
@@ -4697,32 +4944,48 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="start the next generation for a spec whose generations have all ended",
     )
-    new.add_argument("--project", default=None, help=argparse.SUPPRESS)
+    new.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     listing = sub.add_parser("list", help="list runs")
     listing.add_argument("--all", action="store_true", help="include inactive runs")
     listing.add_argument("--json", action="store_true", help="machine-readable output")
-    listing.add_argument("--project", default=None, help=argparse.SUPPRESS)
+    listing.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     show = sub.add_parser("show", help="print a run record")
     show.add_argument("--run", required=True, help="run key")
-    show.add_argument("--project", default=None, help=argparse.SUPPRESS)
+    show.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     resolving = sub.add_parser("resolve", help="print the run key this invocation means")
     resolving.add_argument("--run", default=None, help="run key (optional)")
-    resolving.add_argument("--project", default=None, help=argparse.SUPPRESS)
+    resolving.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     gate = sub.add_parser("gate-dir", help="print a run's done-gate directory")
     gate.add_argument("--run", default=None, help="run key (optional)")
-    gate.add_argument("--project", default=None, help=argparse.SUPPRESS)
+    gate.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     move = sub.add_parser("repoint-spec", help="point a run at a moved spec")
     move.add_argument("--run", required=True, help="run key")
     move.add_argument("new_path", help="the spec's new repository-relative path")
-    move.add_argument("--project", default=None, help=argparse.SUPPRESS)
+    move.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     return parser
+```
 
+> **`argparse.SUPPRESS` is load-bearing, not decoration.** `--project` is accepted both before
+> and after the subcommand. With `default=None` on the subparser, argparse writes that `None`
+> over a value already parsed by the top-level parser, so `conductor run --project /repo new
+> spec.md` would silently fall back to the current directory. `SUPPRESS` makes the subparser set
+> the attribute only when the flag is actually present, so both orders work. Verified:
+>
+> ```
+> before-subcmd, sub default=None : None      <-- the bug
+> before-subcmd, sub SUPPRESS     : /repo
+> after-subcmd,  sub SUPPRESS     : /repo
+> neither,       sub SUPPRESS     : None
+> ```
 
+Continuing `conductor/run_cmd.py`:
+
+```python
 _HANDLERS = {
     "new": cmd_new,
     "list": cmd_list,
@@ -4866,7 +5129,9 @@ import pytest
 from conductor import run_cmd
 from conductor.core import registry, resolve, runkey, runstate
 
-pytest_plugins = ["tests.conductor.core.conftest"]
+# The git_env / git / git_repo fixtures come from tests/conductor/conftest.py (Task 9), which
+# covers this directory. Do not add `pytest_plugins` — pytest only honours it in the rootdir
+# conftest, and a nested reference is deprecated.
 
 ALPHA = "docs/specs/alpha.md"
 BETA = "docs/specs/beta.md"
@@ -5013,7 +5278,9 @@ git commit -m "tests/conductor/test_multi_run_isolation.py:1-165 — two runs in
 
 ## Definition of done for this plan
 
-- [ ] `pytest -q` green, with the pre-existing 565 passed / 1 skipped still passing.
+- [x] `pytest -q` green. **Shipped: 835 passed, 1 skipped** (baseline at the merge base was
+      565 passed / 1 skipped; this plan added 270 tests). Residuals and the constraints Plans
+      02–07 inherit are recorded in `docs/reviews/2026-08-10-plan-01-residuals.md`.
 - [ ] `./bin/conductor gate verify` clean — assertions A1–A16 unchanged and unweakened.
 - [ ] `ruff check .` clean; `ruff format --check` clean on every file this plan created or modified.
 - [ ] `pyright .` reports no new errors.
