@@ -236,6 +236,54 @@ def test_init_completes_an_unfinished_transaction_before_reading(tmp_path):
     assert transaction.pending(state_root) == []
 
 
+def test_a_refusal_after_recovery_does_not_claim_no_write_occurred(state_root):
+    """``commit`` recovers before it validates, and ``recover`` WRITES — after-images land and
+    the journal is removed, irreversibly. A refusal that follows it therefore cannot print the
+    house "no write occurred" phrase: project.json genuinely changed and the journal is genuinely
+    gone, so an operator told nothing happened would go looking for a document that has moved.
+
+    ``registry.commit`` stands in for all three recover-then-refuse sites (the other two are
+    ``run_cmd.cmd_new`` and ``repoint.repoint``); all three take the phrase from the one
+    ``transaction.write_status``."""
+    key = runkey.run_key(ALPHA)
+    before = registry.load(state_root)
+    after = registry.register(
+        schema.clone(before), spec=ALPHA, run_key=key, generation=1
+    )
+    after["revision"] = 1
+    transaction.prepare(
+        state_root,
+        "txn-register-alpha",
+        [
+            {
+                "path": registry.registry_path(state_root),
+                "before": before,
+                "after": after,
+            }
+        ],
+    )
+    transaction.commit(state_root, "txn-register-alpha")
+
+    # Stale expectation: recovery moves the revision 0 -> 1, so the CAS refuses.
+    with pytest.raises(registry.RevisionConflict) as excinfo:
+        registry.commit(state_root, schema.clone(before), expect_revision=0)
+    message = str(excinfo.value)
+    assert "txn-register-alpha" in message
+    assert "no further write occurred" in message
+    assert "no write occurred" not in message
+    # And the write the message admits to really did happen.
+    assert registry.current_run_key(registry.load(state_root), ALPHA) == key
+    assert transaction.pending(state_root) == []
+
+
+def test_a_refusal_with_nothing_recovered_keeps_the_plain_phrase(state_root):
+    """The control: no journal pending, so the honest phrase is the plain one. Without this a
+    fix for the case above could simply print the qualified phrase unconditionally."""
+    with pytest.raises(registry.RevisionConflict) as excinfo:
+        registry.commit(state_root, registry.load(state_root), expect_revision=99)
+    assert "no write occurred" in str(excinfo.value)
+
+
 def test_the_mutate_callback_cannot_alter_the_on_disk_snapshot(state_root):
     def mutate(doc):
         doc["specs"]["docs/specs/ghost.md"] = {"generations": [], "current": None}

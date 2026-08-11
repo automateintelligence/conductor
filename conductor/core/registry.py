@@ -66,17 +66,20 @@ def commit(state_root: str, doc: dict, *, expect_revision: int) -> dict:
     Completes or reverses any unfinished transaction first, then validates, then bumps the
     revision. Raises ``RevisionConflict`` without writing when the document moved."""
     with locks.hold(lock_path(state_root), kind="project"):
-        transaction.recover(state_root)
+        # `recover` WRITES — after-images landed, journal removed — so the refusals below cannot
+        # claim "no write occurred" when it handled anything. `write_status` is the one place
+        # that decides which phrase is true.
+        status = transaction.write_status(transaction.recover(state_root))
         current = load(state_root)
         if current is None:
             raise RegistryMissing(
-                f"no project registry at {registry_path(state_root)}; no write occurred. "
+                f"no project registry at {registry_path(state_root)}; {status}. "
                 "Create one with: conductor run new <spec.md>"
             )
         if current["revision"] != expect_revision:
             raise RevisionConflict(
                 f"project.json moved from revision {expect_revision} to {current['revision']} "
-                f"at {registry_path(state_root)}; no write occurred. Re-read and retry."
+                f"at {registry_path(state_root)}; {status}. Re-read and retry."
             )
         proposed = dict(doc)
         proposed["revision"] = expect_revision + 1

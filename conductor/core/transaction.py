@@ -139,12 +139,29 @@ def pending(state_root: str) -> list[str]:
     return sorted(n[: -len(".json")] for n in names if n.endswith(".json"))
 
 
+def write_status(handled: list[str], *, phrase: str = "no write occurred") -> str:
+    """The failure-report write-status field for a refusal that ran ``recover`` first.
+
+    Every refusal in this package states whether a write occurred. ``recover`` writes: it rolls
+    committed after-images forward and removes the journal, irreversibly. A caller that recovered
+    and then refused therefore cannot say "no write occurred" — the operator would go looking for
+    an unchanged ``project.json`` that has in fact changed. Given ``recover``'s return value, this
+    is the phrase to use: the plain ``phrase`` when nothing was recovered, and a qualified one
+    naming the completed transactions when something was."""
+    if not handled:
+        return phrase
+    return f"no further write occurred (transaction(s) {', '.join(handled)} were completed first)"
+
+
 def recover(state_root: str) -> list[str]:
     """Complete or reverse every unfinished transaction; return the ids handled, sorted.
 
     Called by every project entry point *before* reading mappings. A journal that cannot be
     parsed raises rather than being skipped — an unreadable journal means the split-identity
-    question is unanswerable, which is a fail-closed condition, not a clean state."""
+    question is unanswerable, which is a fail-closed condition, not a clean state.
+
+    The return value is not decorative: a caller that recovers and then REFUSES must report the
+    write status honestly, which ``write_status`` derives from exactly this list."""
     handled: list[str] = []
     for txn_id in pending(state_root):
         doc = _load_journal(state_root, txn_id)

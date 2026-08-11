@@ -138,12 +138,16 @@ def cmd_new(args: argparse.Namespace) -> int:
     # the checks ran against is the document the transaction replaces. `registry.init` above
     # takes and releases the same lock, hence the re-read here rather than reusing its return.
     with locks.hold(registry.lock_path(state_root), kind="project"):
-        transaction.recover(state_root)
+        # `recover` WRITES — committed after-images land and the journal is removed — so the
+        # refusals below cannot claim "no write occurred" when it handled anything.
+        # `transaction.write_status` is the one place that decides which phrase is true.
+        handled = transaction.recover(state_root)
+        write_status = transaction.write_status(handled)
         project_doc = registry.load(state_root)
         if project_doc is None:
             raise registry.RegistryMissing(
                 f"no project registry at {registry.registry_path(state_root)} immediately after "
-                "creating one; no write occurred. Re-run the command."
+                f"creating one; {write_status}. Re-run the command."
             )
         mapped = registry.mapping(project_doc, relative)
         # Decided against run.json, never against project.json's status mirror — see
@@ -153,7 +157,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         if unknown:
             print(
                 f"{relative} is mapped to run(s) {', '.join(unknown)} whose record(s) are "
-                f"missing or carry no status; no write occurred. Refusing to mint a second run "
+                f"missing or carry no status; {write_status}. Refusing to mint a second run "
                 f"over registered state that was removed — the mapping still owns those branch "
                 f"and gate names, and neither finishing them nor --new-run can clear it. Recover "
                 f"by removing the run directory and then the mapping:\n"
@@ -171,7 +175,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         if unfinished:
             listing = ", ".join(unfinished)
             print(
-                f"{relative} already has the unfinished run(s) {listing}; no write occurred.\n"
+                f"{relative} already has the unfinished run(s) {listing}; {write_status}.\n"
                 f"  Inspect:         conductor run show --run {unfinished[0]}\n"
                 f"  Start a new one: finish or fail {listing}, then "
                 f"conductor run new {relative} --new-run",
@@ -180,8 +184,8 @@ def cmd_new(args: argparse.Namespace) -> int:
             return EXIT_FAIL
         if mapped is not None and not args.new_run:
             print(
-                f"{relative} has {len(mapped['generations'])} completed generation(s); no write "
-                f"occurred.\n  Start the next one with: conductor run new {relative} --new-run",
+                f"{relative} has {len(mapped['generations'])} completed generation(s); "
+                f"{write_status}.\n  Start the next one with: conductor run new {relative} --new-run",
                 file=sys.stderr,
             )
             return EXIT_FAIL
@@ -194,7 +198,7 @@ def cmd_new(args: argparse.Namespace) -> int:
             if twin is not None:
                 print(
                     f"{relative} is byte-identical to the spec of run {twin!r}, which is mapped "
-                    f"to a different path; no write occurred. This is a move, not a new run:\n"
+                    f"to a different path; {write_status}. This is a move, not a new run:\n"
                     f"  conductor run repoint-spec --run {twin} {relative}",
                     file=sys.stderr,
                 )
@@ -236,12 +240,20 @@ def cmd_new(args: argparse.Namespace) -> int:
                 # Unreachable through the registry: a mapped path is refused above, and a new
                 # generation gets a new key. So a record here that project.json does not know
                 # about is an orphan, and --new-run cannot clear it — say what will.
+                # Same write-status rule, different plain phrase: this refusal follows
+                # ensure_local_exclude and registry.init, so even with nothing recovered it
+                # cannot claim the bare "no write occurred".
+                scaffolding = transaction.write_status(
+                    handled,
+                    phrase=(
+                        "no run state was written — only the repository's local git exclude "
+                        "and the project registry, both idempotent scaffolding"
+                    ),
+                )
                 print(
                     f"run {key!r} has a record at {runstate.run_path(state_root, key)} but is "
-                    f"not registered in {registry.registry_path(state_root)}; no run state was "
-                    f"written — only the repository's local git exclude and the project "
-                    f"registry, both idempotent scaffolding. Remove the orphaned record and "
-                    f"retry:\n"
+                    f"not registered in {registry.registry_path(state_root)}; {scaffolding}. "
+                    f"Remove the orphaned record and retry:\n"
                     f"  rm -r {runstate.run_dir(state_root, key)}\n"
                     f"  conductor run new {relative}",
                     file=sys.stderr,

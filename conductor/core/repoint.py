@@ -176,17 +176,20 @@ def repoint(
         )
     retry = f"conductor run repoint-spec --run {run_key} {new_rel}"
     with locks.hold(registry.lock_path(state_root), kind="project"):
-        transaction.recover(state_root)
+        # `recover` WRITES (after-images landed, journal removed), so every refusal from here on
+        # reports `status` rather than the bare phrase — the two refusals above run before it and
+        # keep theirs.
+        status = transaction.write_status(transaction.recover(state_root))
         project_doc = registry.load(state_root)
         if project_doc is None:
             raise registry.RegistryMissing(
-                f"no project registry at {registry.registry_path(state_root)}; no write occurred. "
+                f"no project registry at {registry.registry_path(state_root)}; {status}. "
                 "Create one with: conductor run new <spec.md>"
             )
         found = registry.find_run(project_doc, run_key)
         if found is None:
             raise RepointRefused(
-                f"run {run_key!r} is not registered under {state_root}; no write occurred. "
+                f"run {run_key!r} is not registered under {state_root}; {status}. "
                 "List known runs with: conductor run list --all"
             )
         old_rel, _generation_entry = found
@@ -212,7 +215,7 @@ def repoint(
                     )
                     raise RepointRefused(
                         f"run {key!r} has a live owner holding "
-                        f"{runstate.owner_lock_path(state_root, key)}{shares}; no write occurred. "
+                        f"{runstate.owner_lock_path(state_root, key)}{shares}; {status}. "
                         f"Stop the worker or wait for it to exit, then retry: {retry}"
                     ) from exc
             for key in keys:
@@ -229,7 +232,7 @@ def repoint(
                 if doc is None:
                     raise RepointRefused(
                         f"run {key!r} is registered at {old_rel} but has no record at "
-                        f"{runstate.run_path(state_root, key)}; no write occurred. It moves with "
+                        f"{runstate.run_path(state_root, key)}; {status}. It moves with "
                         f"run {run_key!r}, so the whole repoint is refused. List known runs "
                         "with: conductor run list --all"
                     )
@@ -237,8 +240,8 @@ def repoint(
                     raise RepointRefused(
                         f"run {key!r} disagrees with the registry: project.json maps it to "
                         f"{old_rel!r}, while {runstate.run_path(state_root, key)} records "
-                        f"run_key {doc.get('run_key')!r} at {doc.get('spec_path')!r}; no write "
-                        f"occurred, including for run {run_key!r}. Reconcile them before "
+                        f"run_key {doc.get('run_key')!r} at {doc.get('spec_path')!r}; {status}, "
+                        f"including for run {run_key!r}. Reconcile them before "
                         f"repointing — inspect both with: conductor run show --run {key}"
                     )
                 runs[key] = doc
@@ -252,7 +255,7 @@ def repoint(
                 )
                 raise RepointRefused(
                     f"refusing to repoint run {run_key!r} onto {new_rel}: it is already mapped "
-                    f"to run(s) {', '.join(mapped)}; no write occurred — replacing that mapping "
+                    f"to run(s) {', '.join(mapped)}; {status} — replacing that mapping "
                     f"would drop its generation history, terminal or not. Inspect it with: "
                     f"conductor run show --run {shown}"
                 )
@@ -272,7 +275,7 @@ def repoint(
                 raise RepointRefused(
                     f"{old_rel} and {new_rel} are not the same spec: git records no rename "
                     f"between them, staged or committed, and {new_rel} does not match the digest "
-                    f"approved for run {run_key!r}; no write occurred. {remedy}"
+                    f"approved for run {run_key!r}; {status}. {remedy}"
                 )
             new_project = schema.clone(project_doc)
             moved = new_project["specs"].pop(old_rel)
