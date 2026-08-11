@@ -5,7 +5,44 @@ from __future__ import annotations
 import ast
 import pathlib
 
-from conductor.core.names import DerivedNames, derived_names
+import pytest
+
+from conductor import paths
+from conductor.core import runkey, schema
+from conductor.core.names import DerivedNames, derived_names, is_safe_segment
+
+# The safe-segment rule, stated once and asserted against every wrapper. `..` is the case that
+# matters most: the character class permits dots, so `a..b` MATCHES the pattern and still
+# traverses — which is how `schema`'s independent copy came to accept `assertions/a..b` while
+# `paths` refused it. `paths._safe_slug` and `runkey.is_safe_run_key` were also identical by
+# coincidence rather than construction, with nothing pinning them equal.
+_SEGMENT_CASES = (
+    ("alpha-1a2b3c4d", True),
+    ("alpha-1a2b3c4d-g2", True),
+    ("a", True),
+    ("0", True),
+    ("a.b_c-d", True),  # dot, underscore and hyphen are all inside the class
+    ("a..b", False),  # matches the pattern, traverses anyway
+    ("..", False),
+    ("../outside", False),
+    ("a/b", False),
+    ("", False),
+    ("-leading", False),
+    (".leading", False),
+    ("Upper", False),
+    ("alpha.lock", False),
+)
+
+
+@pytest.mark.parametrize("segment,expected", _SEGMENT_CASES)
+def test_every_wrapper_of_the_segment_rule_agrees_with_it(segment, expected):
+    """One case list, four predicates: the definition plus every wrapper that delegates to it.
+    Asserting the wrappers rather than only the definition is the point — a wrapper that stopped
+    delegating, or drifted back to its own copy, fails here."""
+    assert is_safe_segment(segment) is expected, segment
+    assert paths._safe_slug(segment) is expected, segment
+    assert runkey.is_safe_run_key(segment) is expected, segment
+    assert schema._is_safe_gate_dir(f"assertions/{segment}") is expected, segment
 
 
 def test_derived_names_returns_expected_literals():

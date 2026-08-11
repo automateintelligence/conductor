@@ -1177,6 +1177,52 @@ def test_a_legacy_slug_run_keeps_its_recorded_names(tmp_path):
     assert res.directory == str(tmp_path / "assertions" / "self-enforcement")
 
 
+_UNSAFE_LEGACY_GATE_DIRS = (
+    "assertions/a..b",  # matches the old schema regex; traverses; refused by the resolver
+    "assertions/../../outside",
+    "assertions/x/y",
+    "assertions/x.lock",
+    "assertions/",
+    "assertions/.hidden",
+    "elsewhere/alpha",
+)
+
+
+@pytest.mark.parametrize("gate_dir", _UNSAFE_LEGACY_GATE_DIRS)
+def test_the_writer_and_the_resolver_agree_on_an_unsafe_legacy_gate_dir(
+    tmp_path, gate_dir
+):
+    """``legacy-slug-v1`` is EXEMPT from the derived-name cross-check, so ``schema``'s gate_dir
+    guard and ``paths``'s segment guard are the only structural validation its ``gate_dir`` ever
+    gets — and they disagreed: ``assertions/a..b`` was accepted by ``validate_run`` and refused by
+    ``resolve_gate``, a record legal to write and impossible to use. Every existing bad-gate_dir
+    test uses ``path-hash-v2``, where the derived-name check fires and masks both guards, so this
+    is the only place either one is pinned. Both now delegate to ``names.is_safe_segment``."""
+    doc = _run_doc("docs/specs/alpha.md", identity_scheme="legacy-slug-v1")
+    doc["gate_dir"] = gate_dir
+    doc["integration_branch"] = "conductor/run-self-enforcement"
+
+    with pytest.raises(schema.SchemaError) as excinfo:
+        schema.validate_run(doc)
+    assert "gate_dir" in str(excinfo.value)
+
+    res = paths.resolve_gate(str(tmp_path), run_key=doc["run_key"], run=doc)
+    assert res.fail_closed and "gate_dir" in res.fail_closed
+    assert res.directory == str(tmp_path / "assertions" / "__unresolved__")
+
+
+def test_the_writer_and_the_resolver_agree_on_a_safe_legacy_gate_dir(tmp_path):
+    """The control for the refusals above: a migrated run's non-derived-but-safe segment is
+    accepted by BOTH, so neither guard is simply refusing everything ``legacy-slug-v1``."""
+    doc = _run_doc("docs/specs/alpha.md", identity_scheme="legacy-slug-v1")
+    doc["gate_dir"] = "assertions/self-enforcement"
+    doc["integration_branch"] = "conductor/run-self-enforcement"
+    assert schema.validate_run(doc) is doc
+    res = paths.resolve_gate(str(tmp_path), run_key=doc["run_key"], run=doc)
+    assert res.fail_closed is None
+    assert res.directory == str(tmp_path / "assertions" / "self-enforcement")
+
+
 def test_run_key_mode_requires_the_run_document(tmp_path):
     with pytest.raises(ValueError) as excinfo:
         paths.resolve_gate(str(tmp_path), run_key="alpha-1a2b3c4d")

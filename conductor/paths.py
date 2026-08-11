@@ -16,7 +16,7 @@ import re
 import subprocess
 from typing import NamedTuple
 
-from conductor.core.names import derived_names
+from conductor.core.names import derived_names, is_safe_segment
 
 
 def project_root() -> str:
@@ -66,15 +66,16 @@ def spec_slug(spec_path: str) -> str:
     return slug
 
 
-_SAFE_SLUG = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
-
-
 def _safe_slug(s: str) -> bool:
     """Whether ``s`` is safe to use as the ``assertions/<slug>`` filesystem component: a single
     ref-safe segment (what ``spec_slug`` guarantees), with no path separators and no ``..``. An
     edited ``.conductor/run_branch`` — now a path component — that doesn't qualify (e.g.
-    ``conductor/run-../../outside``) is rejected so it cannot traverse out of the gate dir."""
-    return bool(_SAFE_SLUG.match(s)) and ".." not in s and not s.endswith(".lock")
+    ``conductor/run-../../outside``) is rejected so it cannot traverse out of the gate dir.
+
+    A thin delegation to ``names.is_safe_segment``, which is THE definition. It kept its own copy
+    of the pattern until ``schema``'s copy drifted from it (``assertions/a..b`` was writable and
+    unresolvable); the name stays because it is used a dozen times below."""
+    return is_safe_segment(s)
 
 
 def _run_branch_slug(root: str) -> str | None:

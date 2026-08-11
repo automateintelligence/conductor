@@ -15,9 +15,8 @@ shape means ``validate_run`` is the only place that knows the schema.
 from __future__ import annotations
 
 import copy
-import re
 
-from conductor.core.names import derived_names
+from conductor.core.names import GATE_DIR_PREFIX, derived_names, is_safe_segment
 from conductor.core.runkey import is_safe_run_key, parse_generation
 
 SCHEMA_VERSION = 2
@@ -92,7 +91,21 @@ _RUN_REQUIRED = (
     "failed_at",
 )
 
-_GATE_DIR_RE = re.compile(r"assertions/([a-z0-9][a-z0-9._-]*)\Z")
+
+def _is_safe_gate_dir(value: object) -> bool:
+    """Whether ``value`` is ``assertions/<single-safe-segment>``.
+
+    The segment rule comes from ``names.is_safe_segment`` — the same predicate
+    ``paths._safe_slug`` guards the gate path with. It used to be a local regex here, and the two
+    had drifted: this one accepted ``assertions/a..b``, which ``paths.resolve_gate`` refuses. A
+    record legal to write and impossible to use is worse than either verdict alone, and for a
+    ``legacy-slug-v1`` run (exempt from the derived-name cross-check below) these two guards are
+    the only structural validation its ``gate_dir`` gets."""
+    return (
+        isinstance(value, str)
+        and value.startswith(GATE_DIR_PREFIX)
+        and is_safe_segment(value[len(GATE_DIR_PREFIX) :])
+    )
 
 
 class SchemaError(ValueError):
@@ -234,7 +247,7 @@ def validate_run(doc: dict) -> dict:
         if not isinstance(value, str) or not value:
             raise SchemaError(f"{field} must be a non-empty string, got {value!r}")
     gate_dir = doc["gate_dir"]
-    if not isinstance(gate_dir, str) or not _GATE_DIR_RE.match(gate_dir):
+    if not _is_safe_gate_dir(gate_dir):
         raise SchemaError(
             f"gate_dir {gate_dir!r} must be 'assertions/<single-safe-segment>' relative to the "
             "repository root"

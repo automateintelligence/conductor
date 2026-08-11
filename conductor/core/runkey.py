@@ -19,11 +19,11 @@ import os
 import pathlib
 import re
 
+from conductor.core.names import is_safe_segment
 from conductor.paths import spec_slug
 
 HASH_LEN = 8
 
-_KEY_RE = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
 _GEN_RE = re.compile(r"-g([1-9]\d*)\Z")
 
 
@@ -82,5 +82,9 @@ def parse_generation(key: str) -> int:
 
 def is_safe_run_key(key: str) -> bool:
     """Whether ``key`` is safe as a single filesystem component and git ref segment: starts
-    alphanumeric, contains only ``[a-z0-9._-]``, no separators, no ``..``, not ``*.lock``."""
-    return bool(_KEY_RE.match(key)) and ".." not in key and not key.endswith(".lock")
+    alphanumeric, contains only ``[a-z0-9._-]``, no separators, no ``..``, not ``*.lock``.
+
+    A thin delegation to ``names.is_safe_segment``, which is THE definition of that rule. This
+    used to be an independent copy of it, identical by coincidence rather than by construction;
+    ``names`` is a leaf, so both this module and ``paths`` can share it without a cycle."""
+    return is_safe_segment(key)

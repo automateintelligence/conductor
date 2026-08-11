@@ -8,6 +8,13 @@ would carry its own literal copy, which is exactly the drift ``conductor/branche
 records from review B-5: start and autodev each derived ``conductor/run-<slug>`` in prose, and
 the two diverged.
 
+It also owns the rule for what may BE one of those name components — ``is_safe_segment``. Three
+modules enforce it: ``paths`` (before joining a segment into a gate path), ``schema`` (before
+accepting a ``gate_dir`` into a record) and ``runkey`` (before accepting a run key). They used to
+carry three independent copies, and two of them had already drifted: ``schema`` accepted
+``assertions/a..b`` while ``paths`` refused it, so a record could be legal to write and
+impossible to resolve.
+
 A LEAF module on purpose. It imports nothing from ``conductor.paths`` or
 ``conductor.core.runkey`` — ``runkey`` already imports ``paths.spec_slug``, so a shared
 definition living in either of those would make ``paths.py`` unable to use it without a cycle.
@@ -15,10 +22,31 @@ definition living in either of those would make ``paths.py`` unable to use it wi
 
 from __future__ import annotations
 
+import re
 from typing import NamedTuple
 
 GATE_DIR_PREFIX = "assertions/"
 RUN_BRANCH_PREFIX = "conductor/run-"
+
+_SAFE_SEGMENT = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
+
+
+def is_safe_segment(segment: str) -> bool:
+    """Whether ``segment`` is safe as ONE filesystem component and ONE git ref segment: starts
+    alphanumeric, holds only ``[a-z0-9._-]``, contains no path separator, no ``..``, and does not
+    end in ``.lock``.
+
+    THE definition — ``paths``, ``schema`` and ``runkey`` all delegate here. Each clause earns its
+    place: the leading-alphanumeric and character-class rules keep the segment a valid ref
+    component and exclude ``/``; ``..`` is excluded separately because the character class permits
+    dots, so ``a..b`` matches the pattern yet traverses; ``*.lock`` is refused because git reserves
+    it for ref locks."""
+    return (
+        isinstance(segment, str)
+        and bool(_SAFE_SEGMENT.match(segment))
+        and ".." not in segment
+        and not segment.endswith(".lock")
+    )
 
 
 class DerivedNames(NamedTuple):
