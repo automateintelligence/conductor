@@ -23,7 +23,7 @@ from collections.abc import Iterator
 
 LOCK_ORDER = ("migration", "project", "owner", "state")
 
-_held: contextvars.ContextVar[tuple[tuple[str, int, str | None], ...]] = (
+_held: contextvars.ContextVar[tuple[tuple[str, int, str | None, str], ...]] = (
     contextvars.ContextVar("conductor_locks_held", default=())
 )
 
@@ -45,18 +45,24 @@ def _rank(kind: str) -> int:
         ) from None
 
 
-def _check_order(kind: str, rank: int, run_key: str | None) -> None:
-    for held_kind, held_rank, held_run in _held.get():
+def _check_order(kind: str, rank: int, run_key: str | None, path: str) -> None:
+    for held_kind, held_rank, held_run, held_path in _held.get():
         if held_rank > rank:
             raise LockOrderError(
                 f"lock-order violation: cannot take the {kind} lock while holding the "
                 f"{held_kind} lock; the order is {' -> '.join(LOCK_ORDER)}"
             )
-        if held_rank == rank and held_run == run_key:
+        # Re-entrancy is a property of the FILE, not of the labels attached to it. flock is per
+        # open-file-description, so what deadlocks is reopening the same lock file — whatever kind
+        # or run key the caller names it with. Keying this on (kind, run_key) got it wrong both
+        # ways: two project locks under different state roots are distinct files and were falsely
+        # refused, while the same file taken under two different kinds was allowed straight into
+        # a self-deadlock.
+        if held_path == path:
             raise LockOrderError(
                 f"re-entrant acquisition of the {kind} lock"
                 + (f" for run {run_key!r}" if run_key else "")
-                + " — flock is per open-file-description and this would deadlock"
+                + f" at {path} — flock is per open-file-description and this would deadlock"
             )
         if held_rank == rank and run_key is not None and held_run is not None:
             if run_key < held_run:
@@ -80,7 +86,8 @@ def hold(
     ``kind`` must be one of ``LOCK_ORDER``; ``run_key`` distinguishes per-run locks of the same
     kind so their sorted-order requirement can be checked."""
     rank = _rank(kind)
-    _check_order(kind, rank, run_key)
+    resolved = os.path.realpath(path)
+    _check_order(kind, rank, run_key, resolved)
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     deadline = time.monotonic() + timeout
@@ -97,7 +104,7 @@ def hold(
                         f"{kind} lock still held by another process after {timeout}s: {path}"
                     ) from None
                 time.sleep(poll)
-        token = _held.set(_held.get() + ((kind, rank, run_key),))
+        token = _held.set(_held.get() + ((kind, rank, run_key, resolved),))
         try:
             yield fd
         finally:

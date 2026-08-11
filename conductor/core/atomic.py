@@ -25,19 +25,52 @@ def _fsync_dir(directory: str) -> None:
         os.close(fd)
 
 
+def fsync_dir(directory: str) -> None:
+    """Public form of the directory fsync, for callers that publish a name themselves."""
+    _fsync_dir(directory)
+
+
+def makedirs_durably(directory: str) -> None:
+    """Create ``directory`` and fsync the entry that links each newly created level to its parent.
+
+    ``os.makedirs`` can create several levels at once. Fsyncing only the leaf — which is all the
+    write path did — leaves those links unflushed, so a crash can lose the entire new subtree and
+    with it a state file whose own bytes were faithfully fsynced. The first run of a project
+    creates ``.conductor/runs/<run-key>/`` in one call, which is exactly this shape."""
+    if os.path.isdir(directory):
+        return
+    created: list[str] = []
+    current = directory
+    while not os.path.isdir(current):
+        created.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:  # reached the filesystem root
+            break
+        current = parent
+    os.makedirs(directory, exist_ok=True)
+    # Deepest-existing ancestor outward: each level is durable only once the directory holding
+    # its entry is fsynced, so walk back down from the ancestor that already existed.
+    for path in reversed(created):
+        _fsync_dir(os.path.dirname(path) or ".")
+
+
 def write_atomic(path: str, data: str | bytes, *, mode: int = 0o644) -> None:
     """Write ``data`` to ``path`` durably. Creates missing parents. On any failure the temp
     file is removed and ``path`` keeps its previous contents."""
     payload = data.encode("utf-8") if isinstance(data, str) else data
     directory = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(directory, exist_ok=True)
+    makedirs_durably(directory)
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".conductor-tmp-")
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
+            # Set the mode BEFORE the fsync, on the same descriptor. A chmod afterwards would
+            # mutate the inode with nothing left to flush it — the directory fsync below covers
+            # the rename's entry, not the mode — so a crash could publish the file with
+            # mkstemp's private 0600 instead of the mode the caller asked for.
+            os.fchmod(handle.fileno(), mode)
             os.fsync(handle.fileno())
-        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         try:

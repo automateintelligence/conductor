@@ -9,16 +9,34 @@ recover, which is what the next entry point would do."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+from unittest import mock
 
 import pytest
 
-from conductor.core import atomic, transaction
+from conductor.core import atomic, locks, transaction
 
 
 def _entry(path, before, after):
     return {"path": str(path), "before": before, "after": after}
+
+
+def _plant_committed_journal(state_root, txn_id, *entries):
+    """Write a committed journal straight to disk, bypassing ``prepare``'s one-at-a-time guard.
+
+    Used to reconstruct a state the API no longer produces but the filesystem can still hold: a
+    journal restored from a backup, or left by a build that predates the guard."""
+    atomic.write_json_atomic(
+        transaction.journal_path(str(state_root), txn_id),
+        {
+            "schema_version": transaction.SCHEMA_VERSION,
+            "txn_id": txn_id,
+            "state": "committed",
+            "entries": [{**entry, "lock": None} for entry in entries],
+        },
+    )
 
 
 def test_prepare_writes_a_journal_without_touching_the_targets(tmp_path):
@@ -141,18 +159,104 @@ def test_recover_handles_creation_and_deletion_entries(tmp_path):
     assert not created.exists()
 
 
+def test_a_second_journal_cannot_be_prepared_while_one_is_pending(tmp_path):
+    """Two pending journals make the final image depend on replay order, and journal ids are
+    caller-supplied strings replayed in sorted order — lexicographic, not causal. Overlapping
+    entry sets would then be decided by whichever id happens to sort last, so the second
+    ``prepare`` is refused and both journals are left intact for an operator."""
+    state_root = tmp_path / ".conductor"
+    transaction.prepare(
+        str(state_root), "txn-2", [_entry(tmp_path / "b.json", None, {"n": 2})]
+    )
+    transaction.commit(str(state_root), "txn-2")
+    with pytest.raises(ValueError) as excinfo:
+        transaction.prepare(
+            str(state_root), "txn-1", [_entry(tmp_path / "a.json", None, {"n": 1})]
+        )
+    assert "txn-2" in str(excinfo.value) and "still pending" in str(excinfo.value)
+    assert transaction.pending(str(state_root)) == ["txn-2"]
+
+
 def test_recover_is_idempotent_and_processes_journals_in_sorted_order(tmp_path):
     state_root = tmp_path / ".conductor"
     first = tmp_path / "a.json"
     second = tmp_path / "b.json"
     transaction.prepare(str(state_root), "txn-2", [_entry(second, None, {"n": 2})])
     transaction.commit(str(state_root), "txn-2")
-    transaction.prepare(str(state_root), "txn-1", [_entry(first, None, {"n": 1})])
-    transaction.commit(str(state_root), "txn-1")
+    # A second journal can no longer be created through the API while the first is pending, but
+    # one can still be found on disk — a journal restored from a backup, or written by a build
+    # of Conductor that predates that guard. Recovery must still drain them deterministically.
+    _plant_committed_journal(state_root, "txn-1", _entry(first, None, {"n": 1}))
     assert transaction.recover(str(state_root)) == ["txn-1", "txn-2"]
     assert transaction.recover(str(state_root)) == []
     assert atomic.read_json(str(first)) == {"n": 1}
     assert atomic.read_json(str(second)) == {"n": 2}
+
+
+def test_replay_never_moves_a_revision_backwards(tmp_path):
+    """Verbatim replay is what makes recovery idempotent, and it is also what makes it dangerous:
+    a writer that legitimately advanced the file since the journal was written would be rolled
+    back to a revision it has already passed, and that number would then be REUSED. A stale holder
+    expecting it would pass its own compare-and-swap and clobber newer state — a lost update no
+    lock prevents, because the clobbering writer's CAS genuinely succeeded."""
+    state_root = tmp_path / ".conductor"
+    target = tmp_path / "run.json"
+    transaction.prepare(
+        str(state_root),
+        "txn-1",
+        [_entry(target, {"revision": 1, "n": 1}, {"revision": 2, "n": 2})],
+    )
+    transaction.commit(str(state_root), "txn-1")
+    # A live writer got there first and is now ahead of the journal's after image.
+    atomic.write_json_atomic(str(target), {"revision": 3, "n": 3})
+    assert transaction.recover(str(state_root)) == ["txn-1"]
+    assert atomic.read_json(str(target)) == {"revision": 3, "n": 3}
+
+
+def test_replay_of_a_committed_journal_is_idempotent(tmp_path):
+    """The non-regression rule must not break the property it guards: the first replay writes, and
+    every replay after it sees its own result and does nothing."""
+    state_root = tmp_path / ".conductor"
+    target = tmp_path / "run.json"
+    atomic.write_json_atomic(str(target), {"revision": 1, "n": 1})
+    transaction.prepare(
+        str(state_root),
+        "txn-1",
+        [_entry(target, {"revision": 1, "n": 1}, {"revision": 2, "n": 2})],
+    )
+    transaction.commit(str(state_root), "txn-1")
+    assert transaction.recover(str(state_root)) == ["txn-1"]
+    assert atomic.read_json(str(target)) == {"revision": 2, "n": 2}
+    assert transaction.recover(str(state_root)) == []
+    assert atomic.read_json(str(target)) == {"revision": 2, "n": 2}
+
+
+def test_recovery_holds_the_per_run_lock_the_journal_names(tmp_path):
+    """Recovery runs in a later process holding only ``project.lock`` and cannot derive which lock
+    guards an opaque absolute path, so the journal carries it. Without this the run's own writers
+    serialize on ``state.lock`` and never see the rewrite coming."""
+    state_root = tmp_path / ".conductor"
+    target = tmp_path / "run.json"
+    lock_path = str(tmp_path / "state.lock")
+    entry = {
+        **_entry(target, None, {"revision": 1}),
+        "lock": {"path": lock_path, "run_key": "alpha-00000000"},
+    }
+    transaction.prepare(str(state_root), "txn-1", [entry])
+    transaction.commit(str(state_root), "txn-1")
+
+    held = []
+    real_hold = locks.hold
+
+    @contextlib.contextmanager
+    def observing_hold(path, **kwargs):
+        held.append((os.path.realpath(path), kwargs.get("kind")))
+        with real_hold(path, **kwargs) as fd:
+            yield fd
+
+    with mock.patch.object(locks, "hold", observing_hold):
+        assert transaction.recover(str(state_root)) == ["txn-1"]
+    assert (os.path.realpath(lock_path), "state") in held
 
 
 def test_recover_on_a_clean_state_root_does_nothing(tmp_path):

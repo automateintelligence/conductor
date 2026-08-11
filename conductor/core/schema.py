@@ -15,9 +15,11 @@ shape means ``validate_run`` is the only place that knows the schema.
 from __future__ import annotations
 
 import copy
+import posixpath
 
 from conductor.core.names import GATE_DIR_PREFIX, derived_names, is_safe_segment
 from conductor.core.runkey import is_safe_run_key, parse_generation
+from conductor.core.runkey import run_key as derive_run_key
 
 SCHEMA_VERSION = 2
 
@@ -212,6 +214,25 @@ def _require_int(doc: dict, field: str, minimum: int) -> int:
     return value
 
 
+def is_normalized_spec_path(value: object) -> bool:
+    """Whether ``value`` is the repository-relative POSIX form ``runkey.normalize_spec_path``
+    produces: relative, forward slashes, no redundant or ``..`` segments.
+
+    Both documents key on this string — ``project.json`` uses it as a mapping key and the run key
+    is a hash of it — so two spellings of one spec are two identities. ``docs/./alpha.md`` and
+    ``docs/alpha.md`` would each get their own mapping, each allowed its own non-terminal
+    generation, defeating the one-active-run-per-spec rule; ``../outside.md`` would key a run on a
+    path no other checkout can reproduce."""
+    if not isinstance(value, str) or not value:
+        return False
+    if value.startswith("/") or "\\" in value:
+        return False
+    normalized = posixpath.normpath(value)
+    if normalized != value:
+        return False
+    return normalized != "." and normalized != ".." and not normalized.startswith("../")
+
+
 def validate_run(doc: dict) -> dict:
     """Return ``doc`` unchanged if it is a legal run record, else raise ``SchemaError``."""
     if not isinstance(doc, dict):
@@ -246,6 +267,12 @@ def validate_run(doc: dict) -> dict:
         value = doc[field]
         if not isinstance(value, str) or not value:
             raise SchemaError(f"{field} must be a non-empty string, got {value!r}")
+    if not is_normalized_spec_path(doc["spec_path"]):
+        raise SchemaError(
+            f"spec_path {doc['spec_path']!r} is not a normalized repository-relative POSIX "
+            "path; the run key is a hash of exactly this string, so an alternate spelling is a "
+            "different identity"
+        )
     gate_dir = doc["gate_dir"]
     if not _is_safe_gate_dir(gate_dir):
         raise SchemaError(
@@ -258,6 +285,32 @@ def validate_run(doc: dict) -> dict:
         # recorded identity and the on-disk paths have silently diverged. legacy-slug-v1 runs
         # (Plan 03 migration) deliberately retain their pre-migration branch/gate names, so
         # this cross-check does not apply to them; only the safety checks above do.
+        # The key must BE a derivation, not merely agree with names derived from itself. Checking
+        # only gate_dir/integration_branch against `derived_names(key)` is circular: any safe key
+        # paired with an unrelated spec_path passes, provided its gate and branch match that
+        # arbitrary key, so the scheme's central claim goes unenforced.
+        #
+        # The claim is NOT "the key derives from the current spec_path" — `repoint` deliberately
+        # keeps the key when a spec is renamed, so the gate directory and integration branch of a
+        # live run do not move under it. The key derives from the path the run was CREATED at, and
+        # `path_history` is the record of how it reached its current one. So the key must derive
+        # from some path this document itself declares. At creation `path_history` is empty and
+        # this reduces to the strict form. legacy-slug-v1 keys predate the derivation and are
+        # exempt, as they are from the name cross-check below.
+        history = doc["path_history"] if isinstance(doc["path_history"], list) else []
+        declared = [doc["spec_path"], *history]
+        if not any(
+            isinstance(path, str)
+            and is_normalized_spec_path(path)
+            and key == derive_run_key(path, generation)
+            for path in declared
+        ):
+            raise SchemaError(
+                f"run_key {key!r} is not derived from any path this run declares "
+                f"({', '.join(repr(p) for p in declared)}) at generation {generation} — "
+                "identity_scheme 'path-hash-v2' means the key IS that derivation, taken at the "
+                "path the run was created at and carried across repoints via path_history"
+            )
         names = derived_names(key)
         if gate_dir != names.gate_dir:
             raise SchemaError(
@@ -317,6 +370,11 @@ def validate_project(doc: dict) -> dict:
         raise SchemaError("specs must be a mapping of normalized spec path -> mapping")
     seen: dict[str, str] = {}
     for spec_path, mapping in specs.items():
+        if not is_normalized_spec_path(spec_path):
+            raise SchemaError(
+                f"specs key {spec_path!r} is not a normalized repository-relative POSIX path; "
+                "two spellings of one spec would each carry their own generations"
+            )
         if not isinstance(mapping, dict):
             raise SchemaError(f"specs[{spec_path!r}] must be a mapping")
         generations = mapping.get("generations")

@@ -17,6 +17,30 @@ def test_lock_order_is_the_documented_sequence():
     assert locks.LOCK_ORDER == ("migration", "project", "owner", "state")
 
 
+def test_re_entrancy_is_decided_by_the_lock_FILE_not_by_its_labels(tmp_path):
+    """What deadlocks is reopening the same file — flock is per open-file-description — whatever
+    kind or run key the caller labels it with. Keying the held-set on ``(kind, run_key)`` got this
+    wrong in both directions."""
+    shared = str(tmp_path / "shared.lock")
+    # Same file, different labels: previously allowed, and it self-deadlocks until the timeout.
+    with locks.hold(shared, kind="owner", run_key="alpha-00000000"):
+        with pytest.raises(locks.LockOrderError) as excinfo:
+            with locks.hold(shared, kind="state", run_key="beta-11111111"):
+                pass
+    assert "re-entrant" in str(excinfo.value) and shared in str(excinfo.value)
+
+
+def test_two_distinct_lock_files_of_one_kind_may_be_held_together(tmp_path):
+    """The other direction of the same mistake: two project locks under DIFFERENT state roots are
+    different files and contend with nothing, but a held-set keyed on ``(kind, run_key)`` saw two
+    entries with ``run_key=None`` at equal rank and refused the second as re-entrant."""
+    first = tmp_path / "a" / ".conductor"
+    second = tmp_path / "b" / ".conductor"
+    with locks.hold(str(first / "project.lock"), kind="project"):
+        with locks.hold(str(second / "project.lock"), kind="project"):
+            pass
+
+
 def test_locks_may_be_taken_in_increasing_order(tmp_path):
     with locks.hold(str(tmp_path / "project.lock"), kind="project"):
         with locks.hold(str(tmp_path / "owner.lock"), kind="owner"):

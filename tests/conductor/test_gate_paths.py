@@ -1093,8 +1093,10 @@ def test_an_unknown_identity_scheme_fails_closed(tmp_path):
     doc = _run_doc("docs/specs/alpha.md", identity_scheme="path-hash-v3")
     res = paths.resolve_gate(str(tmp_path), run_key=doc["run_key"], run=doc)
     assert res.fail_closed and "identity_scheme" in res.fail_closed
-    # the refusal names the directory the record CLAIMED — never the flat gate
-    assert res.directory == str(tmp_path / "assertions" / doc["run_key"])
+    # A refusal resolves to the inert directory, never to the segment the unverified record
+    # claimed. That segment is well-formed here, and trusting a well-formed segment is what let a
+    # mis-paired record resolve onto ANOTHER run's real, frozen, green gate.
+    assert res.directory == str(tmp_path / "assertions" / "__unresolved__")
 
 
 def test_a_run_document_for_another_run_fails_closed(tmp_path):
@@ -1110,6 +1112,14 @@ def test_a_run_document_for_another_run_fails_closed(tmp_path):
     assert res.fail_closed and "run_key" in res.fail_closed
     # the verdict names BOTH keys, so the operator can see which record was loaded
     assert mine in res.fail_closed and other["run_key"] in res.fail_closed
+    # And the resolved directory is the inert one. `assertions/self-enforcement` is a real,
+    # frozen, green gate in this repository: a caller that read `directory` without checking
+    # `fail_closed` would validate against it and pass. Setting fail_closed while still handing
+    # back the other run's gate is the whole bug, so the directory is asserted, not just the
+    # verdict.
+    assert res.directory == str(tmp_path / "assertions" / "__unresolved__")
+    assert res.manifest.startswith(res.directory)
+    assert res.baseline.startswith(res.directory)
 
 
 def _failing_run_key_cases():

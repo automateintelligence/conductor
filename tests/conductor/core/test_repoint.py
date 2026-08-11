@@ -156,6 +156,33 @@ def test_a_digest_match_authorizes_a_repoint_without_a_staged_rename(project, gi
     assert doc["spec_path"] == MOVED
 
 
+def test_a_digest_authorizes_only_the_generation_that_approved_it(project, git_repo):
+    """A rename is a property of the two paths and carries every generation at once. A DIGEST is
+    not — it records what ONE generation approved, while the repoint rewrites the ``run.json`` of
+    every generation in the mapping. Authorizing on the named generation alone lets a terminal
+    generation's stale digest carry an active sibling onto content that sibling never approved,
+    orphaning its real spec at a path nothing maps to."""
+    root, state_root, first = project
+    stale = hashlib.sha256((git_repo / ALPHA).read_bytes()).hexdigest()
+    _finish(state_root, first)
+    # The active sibling approved DIFFERENT content: it is the generation actually running.
+    second = _register_run(state_root, ALPHA, generation=2, digest="c" * 64)
+
+    os.makedirs(str(git_repo / "docs" / "specs" / "archive"), exist_ok=True)
+    (git_repo / MOVED).write_bytes((git_repo / ALPHA).read_bytes())
+    (git_repo / ALPHA).unlink()
+    assert stale == hashlib.sha256((git_repo / MOVED).read_bytes()).hexdigest()
+
+    before = _documents(state_root, first, second)
+    # Naming the TERMINAL generation, whose digest does match the new content.
+    with pytest.raises(repoint.RepointRefused) as excinfo:
+        repoint.repoint(state_root, repo_root=root, run_key=first, new_spec_path=MOVED)
+    message = str(excinfo.value)
+    assert second in message and "digest" in message
+    assert _documents(state_root, first, second) == before
+    assert transaction.pending(state_root) == []
+
+
 def test_an_unrelated_target_is_refused(project, git_repo, git):
     root, state_root, key = project
     (git_repo / "docs" / "specs" / "unrelated.md").write_text("# totally different\n")
@@ -363,6 +390,21 @@ def test_a_terminal_mapping_at_the_target_path_is_refused_rather_than_overwritte
     assert runstate.load(state_root, key)["spec_path"] == ALPHA
 
 
+def _diverge_spec_path(state_root, key, spec_path):
+    """Write a run record whose ``spec_path`` disagrees with the registry, bypassing validation.
+
+    ``runstate.update`` can no longer produce this state: ``schema.validate_run`` requires the run
+    key to derive from a path the document itself declares, so a divergent ``spec_path`` is
+    unwritable through the API. The divergence is still reachable in the wild — a hand-edited,
+    partially restored, or externally rewritten ``run.json`` — and ``repoint`` must still fail
+    closed on it, so the corruption is written as bytes, which is what it actually looks like."""
+    doc = runstate.load(state_root, key)
+    assert doc is not None
+    doc["spec_path"] = spec_path
+    atomic.write_json_atomic(runstate.run_path(state_root, key), doc)
+    return doc
+
+
 def test_a_run_record_that_disagrees_with_the_registry_is_refused(
     project, git_repo, git
 ):
@@ -371,9 +413,7 @@ def test_a_run_record_that_disagrees_with_the_registry_is_refused(
     the evidence of the divergence, so it fails closed and names both paths."""
     root, state_root, key = project
     _move(git_repo, git, ALPHA, MOVED)
-    runstate.update(
-        state_root, key, lambda d: {**d, "spec_path": "docs/specs/other.md"}
-    )
+    _diverge_spec_path(state_root, key, "docs/specs/other.md")
     before = runstate.load(state_root, key)
     with pytest.raises(repoint.RepointRefused) as excinfo:
         repoint.repoint(state_root, repo_root=root, run_key=key, new_spec_path=MOVED)
@@ -519,9 +559,7 @@ def test_a_divergent_sibling_generation_refuses_the_whole_repoint(
     digest = hashlib.sha256((git_repo / ALPHA).read_bytes()).hexdigest()
     _finish(state_root, first)
     second = _register_run(state_root, ALPHA, generation=2, digest=digest)
-    runstate.update(
-        state_root, first, lambda d: {**d, "spec_path": "docs/specs/other.md"}
-    )
+    _diverge_spec_path(state_root, first, "docs/specs/other.md")
     _move(git_repo, git, ALPHA, MOVED)
     before = _documents(state_root, first, second)
 

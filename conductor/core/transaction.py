@@ -16,28 +16,35 @@ Lifecycle:
 one forward (write the after images). Both directions are idempotent, so recovering twice, or
 recovering a transaction that had already half-applied, converges on the same state.
 
-LOCKING — READ THIS BEFORE ADDING A ``run.json`` WRITER. This module takes no locks. Its callers
-hold ``project.lock`` and NOTHING ELSE: ``registry.init``, ``registry.commit``,
-``resolve.recover_pending``, ``run_cmd.cmd_new`` and ``repoint.repoint`` all call ``recover``
-under the project lock alone, before they take any per-run lock. ``_write_image`` therefore
-rewrites a run record with neither that run's ``state.lock`` nor a revision check — it restores
-the journal's image verbatim, which is what makes recovery idempotent, and is also why a
-revision check could not be added here without breaking roll-forward.
+LOCKING — READ THIS BEFORE ADDING A ``run.json`` WRITER. Callers hold ``project.lock`` and
+nothing else: ``registry.init``, ``registry.commit``, ``resolve.recover_pending``,
+``run_cmd.cmd_new`` and ``repoint.repoint`` all call ``recover`` under the project lock alone,
+before they take any per-run lock. ``recover`` therefore takes the per-run ``state.lock`` itself,
+for every run its journal touches, in sorted run-key order — project -> state, the global order
+``locks._check_order`` enforces. It cannot derive those lock paths from an opaque absolute target
+path, so each entry that needs one carries it: ``{"lock": {"path": ..., "run_key": ...}}``, set by
+whoever prepared the transaction. AN ENTRY THAT WRITES A ``run.json`` WITHOUT A LOCK HINT IS A BUG
+— it will be replayed with no serialisation against that run's own writers.
 
-That is safe only because nothing in production writes ``run.json`` concurrently with recovery
-today: ``runstate.commit``/``update``/``set_status`` exist but no product code path calls them.
-ANY PLAN THAT INTRODUCES A CONCURRENT ``run.json`` WRITER MUST either take the per-run locks in
-``recover`` (in the global project -> owner -> state order ``locks._check_order`` enforces) or
-serialise that writer against recovery. Plan 02 is that plan: its heartbeat and lease writers are
-exactly the callers this note is addressed to.
+Locking alone is NOT sufficient, which is the subtler half. Replay restores an image verbatim, so
+a writer that legitimately advanced a file after the journal was written would be rolled back to a
+revision it has already passed, and that revision number would then be REUSED — a stale holder
+expecting it would pass its own compare-and-swap and clobber newer state. So ``_write_image``
+converges on the FILE rather than the journal: it applies an image only when doing so moves the
+revision forward (see ``_regresses``). Idempotence is preserved — a second replay sees its own
+result — and a genuinely-ahead file is left alone, its transaction dropped as superseded.
+
+Plan 02's heartbeat and lease writers are the first concurrent ``run.json`` writers. They inherit
+both rules: prepare with a lock hint, and never assume an unapplied journal will win.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 
-from conductor.core import atomic
+from conductor.core import atomic, locks
 
 SCHEMA_VERSION = 1
 
@@ -80,12 +87,40 @@ def _check_entries(entries: list[dict]) -> None:
             raise ValueError(
                 f"transaction entry for {path!r} is a no-op (before and after None)"
             )
+        lock = entry.get("lock")
+        if lock is not None:
+            if not isinstance(lock, dict):
+                raise ValueError(
+                    f"transaction entry 'lock' must be a mapping: {lock!r}"
+                )
+            lock_path, lock_run = lock.get("path"), lock.get("run_key")
+            if not isinstance(lock_path, str) or not os.path.isabs(lock_path):
+                raise ValueError(
+                    f"transaction entry lock path must be absolute, got {lock_path!r}"
+                )
+            if not isinstance(lock_run, str) or not lock_run:
+                raise ValueError(
+                    f"transaction entry lock needs a run_key, got {lock_run!r}"
+                )
 
 
 def prepare(state_root: str, txn_id: str, entries: list[dict]) -> str:
     """Record the intended write and fsync it. Targets are untouched. Returns the journal path."""
     _check_id(txn_id)
     _check_entries(entries)
+    # At most one journal may be pending. Every entry point recovers before it prepares, so this
+    # never fires in normal operation; when it does, two transactions are in flight against the
+    # same state root and their entry sets may overlap. Replay order would then decide the final
+    # image, and journal ids are caller-supplied strings replayed in sorted order — that is
+    # lexicographic, not causal, so the loser could be whichever id happens to sort last. Refusing
+    # keeps both journals intact for an operator instead of silently picking one.
+    outstanding = [other for other in pending(state_root) if other != txn_id]
+    if outstanding:
+        raise ValueError(
+            f"cannot prepare transaction {txn_id!r}: {', '.join(outstanding)} still pending under "
+            f"{txn_dir(state_root)}. Recover first — every entry point calls recover() before it "
+            "writes, so a journal here means another writer is mid-transaction."
+        )
     path = journal_path(state_root, txn_id)
     atomic.write_json_atomic(
         path,
@@ -94,7 +129,12 @@ def prepare(state_root: str, txn_id: str, entries: list[dict]) -> str:
             "txn_id": txn_id,
             "state": "prepared",
             "entries": [
-                {"path": e["path"], "before": e.get("before"), "after": e.get("after")}
+                {
+                    "path": e["path"],
+                    "before": e.get("before"),
+                    "after": e.get("after"),
+                    "lock": e.get("lock"),
+                }
                 for e in entries
             ],
         },
@@ -122,9 +162,34 @@ def commit(state_root: str, txn_id: str) -> None:
     atomic.write_json_atomic(journal_path(state_root, txn_id), doc)
 
 
+def _regresses(path: str, image: dict) -> bool:
+    """Whether writing ``image`` to ``path`` would move a revision BACKWARDS.
+
+    Replay restores an image verbatim — that is what makes recovery idempotent, and it is also
+    what makes it dangerous: a writer that legitimately advanced the file since the journal was
+    written would be rolled back to a revision it has already passed, and the revision number
+    would then be REUSED. A stale holder expecting that number would pass its compare-and-swap
+    and overwrite newer state, which is a lost update that no lock can prevent, because the
+    clobbering writer's own CAS succeeded.
+
+    So recovery converges on the file rather than the journal: apply the image only when it moves
+    the revision forward. Replaying twice is still a no-op (the second pass sees its own result),
+    and a reversal that finds the target already at or past its before-image is likewise a no-op.
+    When the on-disk revision is genuinely ahead, that state won a compare-and-swap against a
+    reader that had already seen the pre-transaction file, so it is the newer decision and it
+    stands; this transaction's intent is superseded and is dropped."""
+    current = atomic.read_json(path)
+    if current is None:
+        return False
+    have, want = current.get("revision"), image.get("revision")
+    return isinstance(have, int) and isinstance(want, int) and have >= want
+
+
 def _write_image(path: str, image: dict | None) -> None:
     if image is None:
         atomic.remove_durably(path)
+        return
+    if _regresses(path, image):
         return
     atomic.write_json_atomic(path, image)
 
@@ -190,10 +255,32 @@ def recover(state_root: str) -> list[str]:
     for txn_id in pending(state_root):
         doc = _load_journal(state_root, txn_id)
         forward = doc["state"] == "committed"
-        for entry in doc["entries"]:
-            _write_image(
-                entry["path"], entry.get("after") if forward else entry.get("before")
-            )
+        with contextlib.ExitStack() as stack:
+            # Hold every per-run lock the journal names, in sorted run-key order, for the whole
+            # replay. Without this, recovery rewrites run.json while holding only the caller's
+            # project.lock — the run's own writers serialize on state.lock and would never see
+            # it coming. Callers hold project.lock and nothing finer, so project -> state is the
+            # documented order; the journal carries the lock paths because this module is
+            # deliberately generic over opaque absolute paths and cannot derive them.
+            for lock in _entry_locks(doc):
+                stack.enter_context(
+                    locks.hold(lock["path"], kind="state", run_key=lock["run_key"])
+                )
+            for entry in doc["entries"]:
+                _write_image(
+                    entry["path"],
+                    entry.get("after") if forward else entry.get("before"),
+                )
         atomic.remove_durably(journal_path(state_root, txn_id))
         handled.append(txn_id)
     return handled
+
+
+def _entry_locks(doc: dict) -> list[dict]:
+    """The distinct per-run locks a journal's entries name, in sorted run-key order."""
+    by_run: dict[str, dict] = {}
+    for entry in doc["entries"]:
+        lock = entry.get("lock")
+        if isinstance(lock, dict) and isinstance(lock.get("run_key"), str):
+            by_run.setdefault(lock["run_key"], lock)
+    return [by_run[run] for run in sorted(by_run)]

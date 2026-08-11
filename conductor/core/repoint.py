@@ -259,24 +259,44 @@ def repoint(
                     f"would drop its generation history, terminal or not. Inspect it with: "
                     f"conductor run show --run {shown}"
                 )
-            if not content_identity_matches(repo_root, runs[run_key], old_rel, new_rel):
-                if os.path.exists(os.path.join(repo_root, old_rel)):
-                    remedy = (
-                        f"Stage the rename (git mv {old_rel} {new_rel}), or start a new run for "
-                        f"the new spec: conductor run new {new_rel}"
-                    )
-                else:
-                    # `git mv` is not a command the operator can still run: the old path is gone.
-                    remedy = (
-                        f"{old_rel} no longer exists, so the rename can no longer be staged — "
-                        f"restore {new_rel} to the content recorded for run {run_key!r}, or start "
-                        f"a new run for the new spec: conductor run new {new_rel}"
-                    )
-                raise RepointRefused(
-                    f"{old_rel} and {new_rel} are not the same spec: git records no rename "
-                    f"between them, staged or committed, and {new_rel} does not match the digest "
-                    f"approved for run {run_key!r}; {status}. {remedy}"
+            # A rename is a property of the two paths and authorizes every generation at once. A
+            # DIGEST is not: it records the content one generation approved, while the repoint
+            # rewrites the run.json of every generation in the mapping. Authorizing on the named
+            # generation alone lets a terminal generation's stale digest carry an active sibling
+            # onto content that sibling never approved — the sibling's real spec is then orphaned
+            # at a path nothing maps to. Each generation whose record moves has to consent.
+            if not _rename_detected(repo_root, old_rel, new_rel):
+                unapproved = next(
+                    (
+                        other
+                        for other in sorted(runs)
+                        if not _digest_matches(repo_root, runs[other], new_rel)
+                    ),
+                    None,
                 )
+                if unapproved is not None:
+                    if os.path.exists(os.path.join(repo_root, old_rel)):
+                        remedy = (
+                            f"Stage the rename (git mv {old_rel} {new_rel}), or start a new run "
+                            f"for the new spec: conductor run new {new_rel}"
+                        )
+                    else:
+                        # `git mv` is no longer a command the operator can run: old path is gone.
+                        remedy = (
+                            f"{old_rel} no longer exists, so the rename can no longer be staged — "
+                            f"restore {new_rel} to the content recorded for run {unapproved!r}, "
+                            f"or start a new run for the new spec: conductor run new {new_rel}"
+                        )
+                    moves_with = (
+                        ""
+                        if unapproved == run_key
+                        else f" It moves with run {run_key!r}, so the whole repoint is refused."
+                    )
+                    raise RepointRefused(
+                        f"{old_rel} and {new_rel} are not the same spec: git records no rename "
+                        f"between them, staged or committed, and {new_rel} does not match the "
+                        f"digest approved for run {unapproved!r}; {status}.{moves_with} {remedy}"
+                    )
             new_project = schema.clone(project_doc)
             moved = new_project["specs"].pop(old_rel)
             moved["path_history"] = [*moved.get("path_history", []), old_rel]
@@ -306,6 +326,13 @@ def repoint(
                         "path": runstate.run_path(state_root, key),
                         "before": runs[key],
                         "after": new_run,
+                        # Recovery runs in a later process that holds only project.lock and has
+                        # no way to know which lock guards this file. Name it in the journal so
+                        # replay serializes against the run's own writers.
+                        "lock": {
+                            "path": runstate.state_lock_path(state_root, key),
+                            "run_key": key,
+                        },
                     }
                 )
 

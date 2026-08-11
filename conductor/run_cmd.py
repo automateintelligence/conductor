@@ -290,6 +290,12 @@ def cmd_new(args: argparse.Namespace) -> int:
                         "path": runstate.run_path(state_root, key),
                         "before": None,
                         "after": run_doc,
+                        # Recovery holds only project.lock; the journal names the lock that
+                        # guards this file so replay serializes against the run's own writers.
+                        "lock": {
+                            "path": runstate.state_lock_path(state_root, key),
+                            "run_key": key,
+                        },
                     },
                 ],
             )

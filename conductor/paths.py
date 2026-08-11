@@ -212,16 +212,22 @@ def _resolve_gate_by_run_key(
             f"run {run_key!r} records unknown identity_scheme {scheme!r}; expected "
             "'path-hash-v2' or 'legacy-slug-v1' — repair run.json"
         )
-    if segment and _safe_slug(segment):
+    if fail is None and segment and _safe_slug(segment):
         directory = os.path.join(root, "assertions", segment)
     else:
-        # No usable segment, and the failure must not point at the flat gate: in a repo that has
-        # one, `assertions/` is a real, frozen, green gate, so a caller that ignored fail_closed
-        # would validate the wrong thing. Note this is the OPPOSITE of legacy mode, which never
-        # redirects on failure — it keeps whatever it already resolved, and reaches flat only
-        # when fail_closed is None. `__unresolved__` cannot collide with any run key (keys must
-        # start with [a-z0-9]), so manifest/baseline/run_dir all land on a path that does not
-        # exist, and a caller that ignores fail_closed still fails closed.
+        # ANY identity failure lands here, not just a missing segment. A well-formed segment is
+        # not evidence the record is the right one: the mismatch branch above fires precisely
+        # when run.json belongs to a DIFFERENT run, and that run's gate_dir is a perfectly safe
+        # slug naming its real, frozen, green gate. Trusting the segment there would hand a
+        # caller that ignored fail_closed someone else's passing gate — the same class of bug as
+        # dodging onto the flat gate, one directory over.
+        #
+        # The failure must also not point at the flat gate: in a repo that has one, `assertions/`
+        # is itself a real, frozen, green gate. Note this is the OPPOSITE of legacy mode, which
+        # never redirects on failure — it keeps whatever it already resolved, and reaches flat
+        # only when fail_closed is None. `__unresolved__` cannot collide with any run key (keys
+        # must start with [a-z0-9]), so manifest/baseline/run_dir all land on a path that does
+        # not exist, and a caller that ignores fail_closed still fails closed.
         directory = os.path.join(root, "assertions", "__unresolved__")
     return GateResolution(
         directory,

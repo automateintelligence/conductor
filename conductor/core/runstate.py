@@ -67,15 +67,25 @@ def load(state_root: str, run_key: str) -> dict | None:
     return atomic.read_json(run_path(state_root, run_key))
 
 
-def create(state_root: str, run_key: str, doc: dict) -> dict:
-    """Write a new run record. Refuses to overwrite an existing one — a new generation gets a
-    new run key, and history is never replaced."""
-    _checked(run_key)
+def _assert_doc_is_this_run(run_key: str, doc: dict) -> None:
+    """Refuse a document that belongs to a different run than the file being written.
+
+    ``schema.validate_run`` proves a document is internally consistent — its key, gate and branch
+    agree with each other. It cannot know which file the caller is about to write it to. Without
+    this check a valid record for run B passes validation and lands in run A's ``run.json``, while
+    every lock and path in the operation still refers to A."""
     if doc.get("run_key") != run_key:
         raise ValueError(
             f"run document declares run_key {doc.get('run_key')!r} but is being written as "
             f"{run_key!r}"
         )
+
+
+def create(state_root: str, run_key: str, doc: dict) -> dict:
+    """Write a new run record. Refuses to overwrite an existing one — a new generation gets a
+    new run key, and history is never replaced."""
+    _checked(run_key)
+    _assert_doc_is_this_run(run_key, doc)
     schema.validate_run(doc)
     os.makedirs(run_dir(state_root, run_key), exist_ok=True)
     with locks.hold(
@@ -93,6 +103,7 @@ def create(state_root: str, run_key: str, doc: dict) -> dict:
 def commit(state_root: str, run_key: str, doc: dict, *, expect_revision: int) -> dict:
     """Write ``doc`` if the on-disk revision still equals ``expect_revision``."""
     _checked(run_key)
+    _assert_doc_is_this_run(run_key, doc)
     with locks.hold(
         state_lock_path(state_root, run_key), kind="state", run_key=run_key
     ):

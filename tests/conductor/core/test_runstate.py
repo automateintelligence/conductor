@@ -71,6 +71,26 @@ def test_create_refuses_a_document_whose_key_disagrees(tmp_path):
         runstate.create(state_root, runkey.run_key("docs/specs/beta.md"), _doc(key))
 
 
+def test_commit_refuses_a_document_that_belongs_to_another_run(run):
+    """``create`` cross-checks the document against the key it is being written as; ``commit`` has
+    to as well. ``schema.validate_run`` proves a document is internally consistent — it cannot
+    know which file the caller is about to write it to — so without this check run B's perfectly
+    valid record passes CAS and lands in run A's ``run.json``, while every lock and path in the
+    operation still refers to A. ``update`` is safe only incidentally, because it feeds ``commit``
+    a document it read from A itself."""
+    state_root, key = run
+    other_key = runkey.run_key("docs/specs/beta.md")
+    other = _doc(other_key)
+    other["spec_path"] = "docs/specs/beta.md"
+    other["integration_branch"] = f"conductor/run-{other_key}"
+    other["gate_dir"] = f"assertions/{other_key}"
+    before = runstate.load(state_root, key)
+    with pytest.raises(ValueError) as excinfo:
+        runstate.commit(state_root, key, other, expect_revision=0)
+    assert other_key in str(excinfo.value) and key in str(excinfo.value)
+    assert runstate.load(state_root, key) == before
+
+
 def test_update_bumps_the_revision_and_refreshes_updated_at(run):
     state_root, key = run
     doc = runstate.update(state_root, key, lambda d: {**d, "current_phase": "phase-1"})

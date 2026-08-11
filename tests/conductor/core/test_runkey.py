@@ -122,6 +122,47 @@ def test_normalize_rescues_repository_accessed_through_symlink_alias(tmp_path):
     assert runkey.run_key(rel_via_alias) == runkey.run_key(rel_via_actual)
 
 
+@pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="symlink creation may require admin privileges on Windows",
+)
+def test_normalize_refuses_an_in_repo_symlink_that_points_outside(tmp_path):
+    """The reverse of the alias case, and the one deciding containment lexically leaves open: the
+    spec path is lexically inside the repository, so a check that only resolves AFTER a refusal
+    never resolves this at all. The link would key a run on content no other checkout has."""
+    repo = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    (repo / "docs" / "specs").mkdir(parents=True)
+    outside.mkdir()
+    (outside / "secret.md").write_text("# not in the repo\n")
+    os.symlink(outside / "secret.md", repo / "docs" / "specs" / "alpha.md")
+
+    with pytest.raises(ValueError) as excinfo:
+        runkey.normalize_spec_path(str(repo), "docs/specs/alpha.md")
+    assert "outside the repository" in str(excinfo.value)
+
+
+@pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="symlink creation may require admin privileges on Windows",
+)
+def test_normalize_keeps_the_link_path_for_a_symlink_inside_the_repository(tmp_path):
+    """Containment is decided on the resolved path, but the KEY still comes from the link path, so
+    a spec symlinked to another file in the same repository keeps its own run key rather than
+    silently adopting the target's."""
+    repo = tmp_path / "repo"
+    (repo / "docs" / "specs").mkdir(parents=True)
+    (repo / "docs" / "specs" / "target.md").write_text("# target\n")
+    os.symlink(
+        repo / "docs" / "specs" / "target.md", repo / "docs" / "specs" / "alias.md"
+    )
+
+    assert (
+        runkey.normalize_spec_path(str(repo), "docs/specs/alias.md")
+        == "docs/specs/alias.md"
+    )
+
+
 def test_normalize_still_refuses_genuinely_outside_paths_after_symlink_retry(tmp_path):
     """Even after the symlink rescue retry, paths genuinely outside the repository should still raise."""
     repo = tmp_path / "repo"

@@ -8,7 +8,9 @@ takeover."""
 from __future__ import annotations
 
 import getpass
+import json
 import os
+import pathlib
 import socket
 import stat
 
@@ -51,6 +53,31 @@ def test_the_installation_file_is_owner_only(tmp_path, monkeypatch):
     workstation.workstation_id()
     mode = stat.S_IMODE(os.stat(workstation.installation_file()).st_mode)
     assert mode == 0o600
+
+
+def test_the_final_name_never_exists_without_its_content(tmp_path, monkeypatch):
+    """``O_EXCL`` on the final name creates ``installation.json`` EMPTY and only then fills it. A
+    racing adapter reading in that window gets ``{}``, finds no ``workstation_id``, and mints a
+    SECOND id — the one outcome this file exists to prevent. Publishing with ``os.link`` keeps the
+    name atomic: it either does not exist or holds the whole document."""
+    monkeypatch.setenv("CONDUCTOR_CONFIG_HOME", str(tmp_path / "config"))
+    published = []
+    real_link = os.link
+
+    def observing_link(src, dst):
+        # Whatever is about to become `installation.json` must already be complete.
+        published.append(json.loads(pathlib.Path(src).read_text()))
+        return real_link(src, dst)
+
+    monkeypatch.setattr(os, "link", observing_link)
+    value = workstation.workstation_id()
+    assert published == [
+        {"schema_version": workstation.SCHEMA_VERSION, "workstation_id": value}
+    ]
+    assert (
+        json.loads(pathlib.Path(workstation.installation_file()).read_text())
+        == (published[0])
+    )
 
 
 def test_a_concurrent_creator_wins_and_both_callers_agree(tmp_path, monkeypatch):

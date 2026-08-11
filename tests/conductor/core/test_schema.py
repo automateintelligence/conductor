@@ -163,6 +163,83 @@ def test_recoverable_and_unrecoverable_transitions():
         schema.assert_transition("active", "terminal")
 
 
+def test_a_run_key_paired_with_an_unrelated_spec_path_is_refused():
+    """The scheme's claim is that the key IS a function of the spec path. Cross-checking only
+    ``gate_dir``/``integration_branch`` against ``derived_names(run_key)`` is circular — it proves
+    the key agrees with names derived from itself, which any key does. This document is internally
+    consistent in exactly that way and still has to be refused."""
+    key = runkey.run_key("docs/specs/alpha.md")
+    doc = _run(
+        run_key=key,
+        spec_path="docs/specs/beta.md",
+        gate_dir=f"assertions/{key}",
+        integration_branch=f"conductor/run-{key}",
+    )
+    with pytest.raises(schema.SchemaError) as excinfo:
+        schema.validate_run(doc)
+    assert "docs/specs/beta.md" in str(excinfo.value)
+
+
+def test_a_repointed_run_keeps_a_key_derived_from_a_path_in_its_history():
+    """``repoint`` deliberately keeps the run key when a spec is renamed, so a live run's gate
+    directory and integration branch do not move under it. The key therefore derives from the path
+    the run was CREATED at, which `path_history` still records — so the check is membership across
+    every path the document declares, not equality with the current one."""
+    original = "docs/specs/alpha.md"
+    key = runkey.run_key(original)
+    doc = _run(
+        run_key=key,
+        spec_path="docs/specs/renamed.md",
+        path_history=[original],
+        gate_dir=f"assertions/{key}",
+        integration_branch=f"conductor/run-{key}",
+    )
+    assert schema.validate_run(doc) == doc
+    # ...but an empty history leaves nothing the key can derive from, so it is refused.
+    with pytest.raises(schema.SchemaError):
+        schema.validate_run(_run(run_key=key, spec_path="docs/specs/renamed.md"))
+
+
+@pytest.mark.parametrize(
+    "spec_path",
+    ["/abs/alpha.md", "../outside.md", "docs/./alpha.md", "docs//alpha.md", "docs/"],
+)
+def test_a_run_spec_path_must_be_normalized(spec_path):
+    """The run key is a hash of exactly this string, so two spellings of one file are two
+    identities — and a path that escapes the repository keys a run on content no other checkout
+    can reproduce."""
+    with pytest.raises(schema.SchemaError) as excinfo:
+        schema.validate_run(_run(spec_path=spec_path))
+    assert "spec_path" in str(excinfo.value) or "derived" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "spec_path", ["/abs/alpha.md", "../outside.md", "docs/./alpha.md", "docs//alpha.md"]
+)
+def test_a_project_specs_key_must_be_normalized(spec_path):
+    """``specs`` keys are validated too, not just their values. ``docs/./alpha.md`` and
+    ``docs/alpha.md`` are one file but two mapping keys, and each would be allowed its own
+    nonterminal generation — the one-active-run-per-spec rule counts per key."""
+    doc = schema.new_project_doc(
+        workstation_id="0123456789abcdef0123456789abcdef",
+        repo_identity={"root_commit": "abc", "origin_url": None},
+    )
+    doc["specs"][spec_path] = {
+        "generations": [
+            {
+                "run_key": runkey.run_key("docs/specs/alpha.md"),
+                "generation": 1,
+                "status": "active",
+            }
+        ],
+        "current": runkey.run_key("docs/specs/alpha.md"),
+        "path_history": [],
+    }
+    with pytest.raises(schema.SchemaError) as excinfo:
+        schema.validate_project(doc)
+    assert "normalized" in str(excinfo.value)
+
+
 def test_project_doc_validates_and_allows_one_nonterminal_generation():
     key = runkey.run_key("docs/specs/alpha.md")
     doc = schema.new_project_doc(

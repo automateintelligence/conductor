@@ -44,20 +44,22 @@ def normalize_spec_path(repo_root: str, spec_path: str) -> str:
         if os.path.isabs(spec_path)
         else os.path.normpath(os.path.join(root, spec_path))
     )
-    relative = os.path.relpath(absolute, root)
-    if _escapes_repo(relative):
-        # The caller may have reached the repository through a symlinked alias (a
-        # symlinked home, /tmp on macOS, a WSL mount): `root` is realpath'd but an
-        # absolute spec_path is not, so relpath would compare a resolved path against
-        # an unresolved one and report a file inside the repo as outside. Resolve once
-        # and retry before refusing. A spec that is itself a symlink still keeps its
-        # in-repo path — this runs only on the refusal path, so it rescues an alias and
-        # never relocates a spec that already resolved inside the repository.
-        relative = os.path.relpath(os.path.realpath(absolute), root)
-    if _escapes_repo(relative):
+    # Containment is decided on the RESOLVED path, always. Deciding it lexically and resolving
+    # only after a refusal leaves the reverse case open: `docs/specs/alpha.md` symlinked to
+    # somewhere outside the repository is lexically inside, so it would never be resolved at all
+    # and would key a run on content no other checkout has.
+    lexical = os.path.relpath(absolute, root)
+    resolved = os.path.relpath(os.path.realpath(absolute), root)
+    if _escapes_repo(resolved):
         raise ValueError(
             f"spec path is outside the repository: {spec_path!r} is not under {root!r}"
         )
+    # Containment proven, the KEY still prefers the lexical path. A spec that is a symlink to
+    # another file inside the repository keeps its own path, so its run key does not change. The
+    # resolved form is used only to rescue the alias case — the caller reached the repository
+    # through a symlinked home, /tmp on macOS, or a WSL mount, so `root` is realpath'd while an
+    # absolute spec_path is not, and the lexical comparison reports an in-repo file as outside.
+    relative = lexical if not _escapes_repo(lexical) else resolved
     return pathlib.PurePath(relative).as_posix()
 
 
