@@ -10,23 +10,31 @@ so Plans 02–07 inherit the knowledge rather than rediscovering it.
 
 ## Constraints Plan 02 must honour
 
-**`transaction.recover` writes `run.json` holding only `project.lock`.** All five call sites
-(`registry.py:52,72`, `resolve.py:127`, `run_cmd.py:158`, `repoint.py:182`) hold `project.lock`
-alone; `_write_image` rewrites run records with neither `state.lock` nor a revision check. This
-is documented at `conductor/core/transaction.py:19-32` and is currently latent — nothing in
-production calls `runstate.commit/update/set_status`. **Plan 02's heartbeat and lease writers are
-exactly those callers.**
+**`transaction.recover` now locks and refuses to regress — both halves, closed.** This entry
+previously recorded the hazard as open and deferred it to Plan 02. A codex review escalated it
+(revision *reuse* makes it an ABA, not merely a lost update), and it was fixed here instead.
 
-Taking `state.lock` inside `recover` is necessary but *not sufficient*: the journal's after-image
-still overwrites a concurrent writer's committed revision, and that writer's own compare-and-swap
-will have succeeded, so the update is lost silently. A revision check cannot live in `recover`
-either — verbatim after-image restore is what makes recovery idempotent. **Plan 02's writers must
-be designed against recovery, not merely locked against it.**
+`recover` takes the per-run `state.lock` for every run its journal touches, in sorted run-key
+order, after the caller's `project.lock`. It cannot derive a lock path from an opaque absolute
+target path, so each entry carries one: `{"lock": {"path": ..., "run_key": ...}}`, written at
+`prepare` time by `run_cmd.cmd_new` and `repoint.repoint`. **An entry that writes a `run.json`
+without a lock hint is a bug** — it replays with no serialisation against that run's writers.
 
-(The `transaction.py` header also argues a dependency inversion. The final re-review checked the
-import graph and found no cycle would result — `registry`/`repoint`/`resolve` sit above
-`runstate`, not below. The real cost is layering: `transaction` is deliberately generic over
-opaque absolute paths. Correct conclusion, overstated reason; do not quote it as impossibility.)
+Locking alone was never sufficient, which is the half worth carrying forward. Verbatim replay is
+what makes recovery idempotent and is also what made it dangerous, so `_write_image` now converges
+on the file rather than the journal: an image is applied only when it moves the revision forward
+(`_regresses`). A second replay sees its own result; a file that is genuinely ahead is left alone
+and that transaction is dropped as superseded. **Plan 02's heartbeat and lease writers inherit
+both rules: prepare with a lock hint, and never assume an unapplied journal will win.**
+
+`prepare` additionally refuses while another journal is pending. Journal ids are caller-supplied
+strings replayed in sorted order — lexicographic, not causal — so two overlapping journals would
+have let the id that happens to sort last decide the final image.
+
+(The `transaction.py` header used to argue a dependency inversion. The import graph shows no cycle
+would result — `registry`/`repoint`/`resolve` sit above `runstate`, not below. The real cost was
+layering, and the lock-hint-in-the-journal shape is what preserved it: the module stays generic
+over opaque absolute paths and learns the locks as data.)
 
 **The registry status mirror converges only when `cmd_new` runs.** `registry.mirror_status` has
 one production caller, `run_cmd._reconcile_mirror`. A project whose runs all ended and never
@@ -34,13 +42,38 @@ starts another keeps a permanently wrong `project.json`. Plan 05's `resume`/`fin
 the mirror in the same transaction as the record. `registry.py:14-17` states the doctrine: the
 mirror never carries a decision; `run.json` is authoritative.
 
-**`locks._check_order` permits a keyed/unkeyed mix of the same kind.** No Plan 01 caller mixes
-them; Plan 02 is the first that could.
+**`locks._check_order` keyed/unkeyed mix — closed.** Re-entrancy is now decided by the resolved
+lock FILE, not by `(kind, run_key)`. The old key was wrong in both directions: two `project.lock`
+files under different state roots were falsely refused as re-entrant, and one file taken under two
+different kinds was allowed straight into a self-deadlock.
 
 **Cross-machine and lease semantics are absent by design.** Plan 01 treats a busy `owner.lock`
 as a flat refusal. The acquisition order (`project` → `owner` → `state`, run locks in sorted
 run-key order) is established and tested; Plan 02 replaces the refusal with liveness
 interpretation without changing that order.
+
+## Codex review (2026-08-11) — what it changed
+
+A four-slice codex review of the PR found eleven [P1]s. Ten were real and are fixed in
+`9d82e75`; the entries above and below are updated accordingly. Two things are worth keeping:
+
+- **One finding was wrong, and the tests are what proved it.** Codex asked for
+  `run_key == derive_run_key(spec_path, generation)`. That is false by design — `repoint`
+  deliberately keeps the key when a spec is renamed so a live run's gate and branch do not move
+  under it. Twelve `test_repoint.py` failures said so immediately. The invariant that IS true is
+  membership: the key must derive from some path the document declares, current or in
+  `path_history`, which still blocks pairing an arbitrary key with an arbitrary spec.
+- **Two fixes made a corrupt state unrepresentable, which broke tests that needed to build it.**
+  `test_repoint.py` constructed a divergent `run.json` through `runstate.update`; validation now
+  refuses that. The corruption is still reachable in the wild (hand-edited, partially restored),
+  so `_diverge_spec_path` writes the bytes directly. **When a validator closes a hole, check what
+  the negative tests were using to open it** — the cheap move is to weaken the validator.
+
+Fixed here and no longer open: the recovery lock/ABA pair, the lock re-entrancy key, the gate
+refusal resolving onto another run's real gate, `runstate.commit`'s missing key/document
+cross-check, unnormalized spec paths and `specs` keys, `runkey` containment on the resolved path,
+`atomic`'s unfsynced parent levels and post-fsync `chmod`, `workstation`'s empty-then-filled
+publish, and digest authorization spanning a whole mapping.
 
 ## Known-latent behaviour
 
@@ -68,7 +101,9 @@ interpretation without changing that order.
   resolution before Plan 05's cron callers.
 - **`repoint` never refreshes `spec_digest`**, so after a rename-plus-edit only rename detection
   can authorise a later repoint of the same run. `_committed_rename` also has no similarity floor,
-  making it a wider gate than the staged path.
+  making it a wider gate than the staged path. (Digest *authorization* was since narrowed: every
+  generation in a mapping must consent, because the whole mapping moves. Refreshing is separate
+  and still open.)
 - **Two genuinely distinct specs with identical bytes cannot both start a run** — the
   byte-identical guard matches runs of any status. As specified; no override exists.
 
