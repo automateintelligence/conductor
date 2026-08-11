@@ -126,11 +126,20 @@ def test_conflicting_legacy_files_and_environment_do_not_leak_into_either_run(
     ``.conductor/run_branch``, legacy ``.conductor/goal.md`` and the four ``CONDUCTOR_GATE_*``
     variables rather than consulting them as fallback.
 
-    Two CONTROLS make the hostility real. Without them this test would still pass if the legacy
-    files were never written or the environment never set — the failure mode that makes an
-    isolation test unfalsifiable. Control A proves the legacy files are a live input to the
-    legacy resolver; control B proves the environment overrides are too. Only then is "both runs
-    still land on their own gate" evidence of anything."""
+    THREE CONTROLS make the hostility real, one per group of hostile input, and between them they
+    cover all six. Without them this test would still pass if a legacy file were never written or
+    an environment variable name were typo'd — the failure mode that makes an isolation test
+    unfalsifiable. Only once each input is shown to steer the LEGACY resolver is "both runs still
+    land on their own gate" evidence of anything.
+
+    Control A covers ``.conductor/run_branch`` AND ``.conductor/goal.md``: the two disagree, which
+    is the §5 signature the legacy resolver refuses on, and the refusal names both slugs — so a
+    missing or unparsed file changes the verdict. Control B covers ``CONDUCTOR_GATE_DIR``,
+    ``CONDUCTOR_MANIFEST`` and ``CONDUCTOR_FREEZE_BASELINE``, each planted at a value the default
+    for that directory would never produce. Control C covers ``CONDUCTOR_GATE_SLUG``, which
+    ``CONDUCTOR_GATE_DIR`` shadows by precedence (``conductor/paths.py:307-314``), so the control
+    lifts the shadowing variable for the length of one call rather than pretending it is
+    observable underneath it."""
     root, _state_root, alpha, beta = two_runs
     legacy = os.path.join(root, ".conductor")
     os.makedirs(legacy, exist_ok=True)
@@ -140,24 +149,48 @@ def test_conflicting_legacy_files_and_environment_do_not_leak_into_either_run(
         fh.write("docs/specs/gamma.md\n")
     hijacked = os.path.join(root, "assertions", "hijacked")
     os.makedirs(hijacked, exist_ok=True)
-    # A built gate, so the legacy resolver selects it rather than falling back to flat — the
-    # point of control A is that `run_branch` really does steer legacy resolution.
+    # Built and frozen, so the legacy resolver selects this gate rather than falling back to flat,
+    # and so it reaches the run_branch-vs-goal.md comparison instead of stopping at "unfrozen".
     with open(os.path.join(hijacked, "manifest.yaml"), "w", encoding="utf-8") as fh:
         fh.write("assertions: []\n")
+    with open(os.path.join(hijacked, ".frozen"), "w", encoding="utf-8") as fh:
+        fh.write("{}\n")
 
     control_a = paths.resolve_gate(root)  # CONTROL A: no run key, no environment
     assert control_a.source == "run_branch"
     assert control_a.directory == hijacked
+    # Both legacy files are live: run_branch chose the directory, and goal.md disagreeing with it
+    # is what makes the legacy resolver refuse. The message names each file's slug.
+    assert control_a.fail_closed is not None
+    assert "hijacked" in control_a.fail_closed
+    assert paths.spec_slug(GAMMA) in control_a.fail_closed
 
-    monkeypatch.setenv("CONDUCTOR_GATE_SLUG", "hijacked")
+    hijacked_manifest = os.path.join(hijacked, "hijacked-manifest.yaml")
+    hijacked_baseline = os.path.join(hijacked, "hijacked.frozen")
+    monkeypatch.setenv("CONDUCTOR_GATE_SLUG", "hijacked-slug")
     monkeypatch.setenv("CONDUCTOR_GATE_DIR", hijacked)
-    monkeypatch.setenv("CONDUCTOR_MANIFEST", os.path.join(hijacked, "m.yaml"))
-    monkeypatch.setenv("CONDUCTOR_FREEZE_BASELINE", os.path.join(hijacked, ".frozen"))
+    monkeypatch.setenv("CONDUCTOR_MANIFEST", hijacked_manifest)
+    monkeypatch.setenv("CONDUCTOR_FREEZE_BASELINE", hijacked_baseline)
 
     control_b = paths.resolve_gate(root)  # CONTROL B: no run key, hostile environment
     assert control_b.source == "gate_dir_env"
     assert control_b.directory == hijacked
-    assert control_b.manifest == os.path.join(hijacked, "m.yaml")
+    # Both planted at values the directory's own defaults would never produce, so equality here
+    # cannot be satisfied by the variable being unset.
+    assert (
+        control_b.manifest
+        == hijacked_manifest
+        != os.path.join(hijacked, "manifest.yaml")
+    )
+    assert control_b.baseline == hijacked_baseline != os.path.join(hijacked, ".frozen")
+
+    with (
+        pytest.MonkeyPatch.context() as unshadow
+    ):  # CONTROL C: the slug, minus its shadow
+        unshadow.delenv("CONDUCTOR_GATE_DIR")
+        control_c = paths.resolve_gate(root)
+    assert control_c.source == "explicit_slug"
+    assert control_c.directory == os.path.join(root, "assertions", "hijacked-slug")
 
     for key, spec in ((alpha, ALPHA), (beta, BETA)):
         resolution = resolve.resolve(run_key=key, start=root)
@@ -321,7 +354,7 @@ def test_generation_two_of_one_spec_coexists_with_the_other_run(two_runs, capsys
 
 
 def test_a_crash_mid_registration_is_recovered_without_disturbing_the_other_runs(
-    two_runs, git_repo, capsys, monkeypatch
+    two_runs, git_repo, capsys
 ):
     """A third run crashes between ``transaction.commit`` and ``transaction.apply``: project.json
     and run.json still hold their BEFORE images, so the committed run is invisible. The next verb
@@ -333,24 +366,33 @@ def test_a_crash_mid_registration_is_recovered_without_disturbing_the_other_runs
     alpha_before = runstate.load(state_root, alpha)
     beta_before = runstate.load(state_root, beta)
     assert alpha_before is not None and beta_before is not None
-
-    monkeypatch.setattr(
-        transaction,
-        "apply",
-        lambda *a, **k: (_ for _ in ()).throw(OSError("simulated crash")),
-    )
-    with pytest.raises(OSError, match="simulated crash"):
-        run_cmd.main(["new", GAMMA, "--project", root])
-    capsys.readouterr()
-
     gamma = runkey.run_key(GAMMA)
-    project_doc = registry.load(state_root)
-    assert project_doc is not None
-    assert registry.run_keys(project_doc) == sorted([alpha, beta])  # gamma invisible
-    assert runstate.load(state_root, gamma) is None
-    assert transaction.pending(state_root) == [f"new-{gamma}"]
 
-    monkeypatch.undo()
+    # A SCOPED patch, never `monkeypatch.undo()`: the autouse isolated_conductor_env fixture and
+    # this test share one MonkeyPatch instance, so undo() would also restore CONDUCTOR_CONFIG_HOME,
+    # CONDUCTOR_HOME and the four CONDUCTOR_GATE_* variables — and the next `run new` would write
+    # the installation ID into the developer's real ~/.config.
+    with pytest.MonkeyPatch.context() as crashed:
+        crashed.setattr(
+            transaction,
+            "apply",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("simulated crash")),
+        )
+        with pytest.raises(OSError, match="simulated crash"):
+            run_cmd.main(["new", GAMMA, "--project", root])
+        capsys.readouterr()
+
+        project_doc = registry.load(state_root)
+        assert project_doc is not None
+        assert registry.run_keys(project_doc) == sorted(
+            [alpha, beta]
+        )  # gamma invisible
+        assert runstate.load(state_root, gamma) is None
+        assert transaction.pending(state_root) == [f"new-{gamma}"]
+
+    assert os.environ[
+        "CONDUCTOR_CONFIG_HOME"
+    ]  # the fixture's isolation is still in force
     assert run_cmd.main(["list", "--all", "--json", "--project", root]) == 0
     rows = {row["run_key"]: row for row in json.loads(capsys.readouterr().out)}
     assert set(rows) == {alpha, beta, gamma}
