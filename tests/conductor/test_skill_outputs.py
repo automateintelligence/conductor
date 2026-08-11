@@ -160,6 +160,16 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             "**adrs:**",
             "an adr binds the phase exactly as its",
             "never quietly build against a closed decision",
+            # The per-task test scope. Load-bearing and not self-evident: the sub-skill this
+            # step delegates to does not scope testing, so an unscoped implementer runs the whole
+            # project suite once per task. The full suite runs exactly once a phase, mechanically,
+            # inside merge-gate — never in a worker turn.
+            "never the project suite",
+            # ...and the matching prohibition at the point the instinct fires: a worker that has
+            # just finished the phase wants to verify before opening the PR, seconds before
+            # merge-gate does it for free. Pin the refusal and the gate-is-not-the-suite line.
+            "do not run the project test suite here",
+            "gate-green says nothing about the project's own tests",
         ],
         "7-escalation": [
             "escalate.file_followup",

@@ -133,8 +133,25 @@ step 3b's terminal crontab removal.
    1. `/superpowers:subagent-driven-development` to implement the phase's tasks — on a phase
       branch forked from the RUN branch (never from the default branch when a run branch is
       configured).
+      **TEST SCOPE PER TASK: the focused test file covering what THAT task changed, plus
+      lint/typecheck on the touched files. NEVER the project suite.** Say this in the dispatch
+      prompt itself, not as a correction afterwards — the sub-skill does not scope it for you, so
+      an unscoped implementer runs the whole suite once per task and the cost is N full runs a
+      phase. A reviewer never re-runs tests the implementer already ran on identical code; the
+      implementer's report IS the test evidence. The full suite runs exactly once per phase,
+      mechanically, inside `conductor merge`'s gate (step 7) — never in a worker turn.
    2. `/code-review` (self-review) per task — review against the phase's Spec sections and ADRs,
       not just the diff. 3. **commit after every task.**
+   3b. **Do NOT run the project test suite here.** You have just finished the phase and the
+      instinct is to verify everything before opening the PR — don't. It runs moments later
+      anyway: step 7's `conductor merge <pr>` invokes merge-gate, which executes
+      `CONDUCTOR_MERGE_VERIFY` (default `pytest -q`) against `refs/pull/<pr>/merge` — a machine
+      check that costs you no turns and that you cannot skip. Running it yourself first duplicates
+      that check at the price of worker turns, and on a suite of any size the duplicate dominates
+      the phase's wall-clock. Step 1's per-task focused tests plus that gate ARE the testing
+      contract; there is no third run. **`conductor assert run --level spec` is neither of them**:
+      the done-gate executes only the frozen assertion files, pinned per-file with plugin autoload
+      disabled, so gate-green says nothing about the project's own tests.
    4. **one PR per phase, base = the RUN branch** (`Closes #<phase-issue>` for traceability —
       merge-gate blocks without it, and its base leg blocks any other base with
       `base-mismatch`; run-branch merges don't auto-close issues — `phase-done` does that).
