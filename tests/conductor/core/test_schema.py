@@ -132,6 +132,20 @@ def test_a_missing_required_field_is_refused():
         schema.validate_run(doc)
 
 
+@pytest.mark.parametrize(
+    "field", ["spec_path", "spec_digest", "integration_branch", "workstation_id"]
+)
+@pytest.mark.parametrize("value", [None, "", 64, ["a" * 64]])
+def test_the_non_empty_string_fields_are_type_checked(field, value):
+    """``spec_digest`` was in the required-field list but was never type-checked, so ``None``
+    validated. ``repoint`` then compares it against a computed sha256 and refuses the move as
+    "not the same spec" — a content check silently answering the wrong question."""
+    doc = _run(**{field: value})
+    with pytest.raises(schema.SchemaError) as excinfo:
+        schema.validate_run(doc)
+    assert field in str(excinfo.value)
+
+
 def test_recoverable_and_unrecoverable_transitions():
     schema.assert_transition("active", "checkpointed")
     schema.assert_transition("active", "blocked")

@@ -67,6 +67,19 @@ def test_read_json_raises_on_malformed_content(tmp_path):
         atomic.read_json(str(target))
 
 
+@pytest.mark.parametrize("body", ["[]", '["a"]', '"a string"', "3", "null"])
+def test_read_json_raises_on_well_formed_json_that_is_not_an_object(tmp_path, body):
+    """The signature says ``dict | None`` and ``registry.load`` / ``runstate.load`` return this
+    value untouched to callers that subscript it. Without the guard a top-level array reaches
+    them as a list and fails as an AttributeError traceback naming nothing, instead of a refusal
+    naming the file."""
+    target = tmp_path / "project.json"
+    target.write_text(body)
+    with pytest.raises(ValueError) as excinfo:
+        atomic.read_json(str(target))
+    assert str(target) in str(excinfo.value)
+
+
 def test_remove_durably_deletes_an_existing_file_and_is_silent_on_absence(tmp_path):
     target = tmp_path / "to_remove.json"
     target.write_text("content\n")

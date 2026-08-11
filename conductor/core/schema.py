@@ -242,7 +242,7 @@ def validate_run(doc: dict) -> dict:
         raise SchemaError(
             f"review_policy {doc['review_policy']!r}; expected one of {REVIEW_POLICIES}"
         )
-    for field in ("spec_path", "integration_branch", "workstation_id"):
+    for field in ("spec_path", "spec_digest", "integration_branch", "workstation_id"):
         value = doc[field]
         if not isinstance(value, str) or not value:
             raise SchemaError(f"{field} must be a non-empty string, got {value!r}")

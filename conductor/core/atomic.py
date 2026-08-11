@@ -72,9 +72,18 @@ def read_json(path: str) -> dict | None:
 
     Malformed JSON raises rather than returning ``None``: an unreadable state file is a
     fail-closed condition, and silently treating it as "absent" would let a caller mint fresh
-    state on top of a corrupted run."""
+    state on top of a corrupted run. Well-formed JSON that is not an OBJECT raises for the same
+    reason — the return type says ``dict``, and ``registry.load`` / ``runstate.load`` hand this
+    value straight to callers that subscript it, so a top-level array would surface as an
+    ``AttributeError`` traceback instead of a refusal naming the file."""
     try:
         with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
+            doc = json.load(handle)
     except FileNotFoundError:
         return None
+    if not isinstance(doc, dict):
+        raise ValueError(
+            f"{path} does not hold a JSON object (found {type(doc).__name__}); refusing to read "
+            "it as state"
+        )
+    return doc
