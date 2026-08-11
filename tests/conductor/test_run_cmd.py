@@ -168,6 +168,64 @@ def test_new_refuses_a_spec_whose_content_already_belongs_to_a_run(git_repo, cap
     )
 
 
+def test_new_decides_on_the_record_not_a_stale_active_status_mirror(git_repo, capsys):
+    """project.json's per-generation status is a MIRROR and runstate.set_status does not touch
+    it. With the record terminal and the mirror still naming the run current, `new` must agree
+    with `resolve` that nothing is live — deciding on the mirror tells the operator to finish a
+    run that is already finished, and --new-run then refuses identically."""
+    _run(git_repo, "new", "docs/specs/alpha.md")
+    capsys.readouterr()
+    state_root = resolve.state_root(str(git_repo))
+    key = runkey.run_key("docs/specs/alpha.md")
+    runstate.set_status(state_root, key, "awaiting-team-merge")
+    runstate.set_status(
+        state_root, key, "terminal"
+    )  # mirror deliberately left untouched
+    project_doc = registry.load(state_root)
+    assert project_doc is not None
+    assert registry.current_run_key(project_doc, "docs/specs/alpha.md") == key
+
+    assert _run(git_repo, "resolve") == 3  # the authority: nothing is live
+    capsys.readouterr()
+    assert _run(git_repo, "new", "docs/specs/alpha.md") == 1
+    err = capsys.readouterr().err
+    assert "unfinished" not in err
+    assert "finish or fail" not in err
+    assert "--new-run" in err
+
+    # And --new-run then names the real problem instead of repeating the contradiction. It does
+    # NOT succeed: registry.register would append a second generation next to one the mirror
+    # still calls active, and schema.validate_project refuses that. Making it succeed means
+    # reconciling the mirror from the records, which belongs with whoever owns status
+    # transitions, not with a read of it here. Refused before any journal, so nothing is written.
+    assert _run(git_repo, "new", "docs/specs/alpha.md", "--new-run") == 1
+    assert "nonterminal generations" in capsys.readouterr().err
+    assert runstate.load(state_root, f"{key}-g2") is None
+    assert transaction.pending(state_root) == []
+
+
+def test_new_run_refuses_while_the_record_is_live_behind_a_terminal_mirror(
+    git_repo, capsys
+):
+    """The other skew. The mirror says terminal, so current_run_key is None and a mirror-only
+    gate lets --new-run mint a second generation — leaving TWO authoritatively-active runs for
+    one spec, which schema.validate_project cannot catch because it validates the mirror."""
+    _run(git_repo, "new", "docs/specs/alpha.md")
+    capsys.readouterr()
+    state_root = resolve.state_root(str(git_repo))
+    key = runkey.run_key("docs/specs/alpha.md")
+    registry.update(state_root, lambda d: registry.mirror_status(d, key, "terminal"))
+    project_doc = registry.load(state_root)
+    assert project_doc is not None
+    assert registry.current_run_key(project_doc, "docs/specs/alpha.md") is None
+    record = runstate.load(state_root, key)
+    assert record is not None and record["status"] == "active"
+
+    assert _run(git_repo, "new", "docs/specs/alpha.md", "--new-run") == 1
+    assert key in capsys.readouterr().err
+    assert resolve.active_run_keys(state_root) == [key]
+
+
 def test_new_refuses_an_orphaned_run_record_with_a_remedy_that_works(git_repo, capsys):
     """A run.json the registry does not know about cannot be cleared by ``--new-run``: with no
     mapping, the next generation is 1 again and derives the same key. So the refusal has to name

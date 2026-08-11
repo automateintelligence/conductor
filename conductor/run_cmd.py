@@ -63,6 +63,42 @@ def _matching_run(state_root: str, project_doc: dict, digest: str) -> str | None
     return None
 
 
+def _unfinished_generations(state_root: str, mapped: dict) -> list[str]:
+    """Run keys in one spec-path mapping whose AUTHORITATIVE record is not finished, sorted.
+
+    ``project.json``'s per-generation status is a MIRROR (``conductor/core/registry.py:14-17``)
+    and ``runstate.set_status`` does not touch it, so the two can skew either way and neither
+    ``registry.current_run_key`` nor ``schema.validate_project`` can be trusted to decide whether
+    a new run may start. ``run.json`` is the authority, so it decides here:
+
+    * mirror says current, record says terminal/failed — NOT unfinished. Refusing on the mirror
+      would tell the operator to finish a run that is already finished, and ``--new-run`` would
+      refuse identically; ``conductor run resolve`` meanwhile reports no active run. Two verbs
+      contradicting each other about one run is worse than a missed refusal.
+    * mirror says terminal, record still active/checkpointed/blocked — unfinished. Minting a
+      second generation there would put TWO authoritatively-live runs on one spec, breaking the
+      design's central invariant somewhere ``validate_project`` cannot see, because it validates
+      the mirror.
+
+    ``awaiting-team-merge`` counts as unfinished even though ``schema.is_active`` excludes it: the
+    run is not over until ``finish`` proves its final pull request merged, and its branch and gate
+    are still live.
+
+    A MISSING record also counts: the registry names a run whose state has been removed, and
+    minting a second one over it is the opposite of fail-closed."""
+    unfinished = []
+    for entry in mapped.get("generations", []):
+        key = str(entry.get("run_key"))
+        run = runstate.load(state_root, key)
+        if run is None:
+            unfinished.append(key)
+            continue
+        status = str(run.get("status", ""))
+        if schema.is_active(status) or status == "awaiting-team-merge":
+            unfinished.append(key)
+    return sorted(unfinished)
+
+
 def cmd_new(args: argparse.Namespace) -> int:
     root = resolve.repo_root(args.project)
     hygiene.assert_state_paths_untracked(root)
@@ -70,8 +106,13 @@ def cmd_new(args: argparse.Namespace) -> int:
     state_root = os.path.join(root, ".conductor")
     relative = runkey.normalize_spec_path(root, args.spec)
     if not os.path.isfile(os.path.join(root, relative)):
+        # Not "no write occurred": ensure_local_exclude ran above and may have written the
+        # repository's local git exclude. That is idempotent scaffolding, not run state, but the
+        # failure-report contract is about writes, so say which happened.
         print(
-            f"{relative} does not exist in {root}; no write occurred", file=sys.stderr
+            f"{relative} does not exist in {root}; no run state was written (only the "
+            f"repository's local git exclude was ensured).",
+            file=sys.stderr,
         )
         return EXIT_FAIL
     registry.init(
@@ -91,17 +132,20 @@ def cmd_new(args: argparse.Namespace) -> int:
                 f"no project registry at {registry.registry_path(state_root)} immediately after "
                 "creating one; no write occurred. Re-run the command."
             )
-        existing = registry.current_run_key(project_doc, relative)
-        if existing is not None:
+        mapped = registry.mapping(project_doc, relative)
+        # Decided against run.json, never against project.json's status mirror — see
+        # _unfinished_generations for both skew directions and what each one costs.
+        unfinished = _unfinished_generations(state_root, mapped) if mapped else []
+        if unfinished:
+            listing = ", ".join(unfinished)
             print(
-                f"{relative} already has the active run {existing!r}; no write occurred.\n"
-                f"  Inspect it:      conductor run show --run {existing}\n"
-                f"  Start a new one: finish or fail {existing}, then "
+                f"{relative} already has the unfinished run(s) {listing}; no write occurred.\n"
+                f"  Inspect:         conductor run show --run {unfinished[0]}\n"
+                f"  Start a new one: finish or fail {listing}, then "
                 f"conductor run new {relative} --new-run",
                 file=sys.stderr,
             )
             return EXIT_FAIL
-        mapped = registry.mapping(project_doc, relative)
         if mapped is not None and not args.new_run:
             print(
                 f"{relative} has {len(mapped['generations'])} completed generation(s); no write "
@@ -154,8 +198,10 @@ def cmd_new(args: argparse.Namespace) -> int:
                 # about is an orphan, and --new-run cannot clear it — say what will.
                 print(
                     f"run {key!r} has a record at {runstate.run_path(state_root, key)} but is "
-                    f"not registered in {registry.registry_path(state_root)}; no write occurred. "
-                    f"Remove the orphaned record and retry:\n"
+                    f"not registered in {registry.registry_path(state_root)}; no run state was "
+                    f"written — only the repository's local git exclude and the project "
+                    f"registry, both idempotent scaffolding. Remove the orphaned record and "
+                    f"retry:\n"
                     f"  rm -r {runstate.run_dir(state_root, key)}\n"
                     f"  conductor run new {relative}",
                     file=sys.stderr,
