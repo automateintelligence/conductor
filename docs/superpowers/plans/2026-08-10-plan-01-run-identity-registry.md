@@ -4442,6 +4442,47 @@ So `main()` calls `resolve.recover_pending(...)` once, before dispatching to any
 
 **Required test:** prepare and commit a transaction registering a spec, without applying it; then invoke a CLI verb (`resolve` is the cheapest) and assert it sees the recovered run and that `transaction.pending(state_root) == []` afterwards. Verify it fails without the `recover_pending` call — a test that passes either way is the failure mode this plan has already hit twice.
 
+> **SHIPPED IMPLEMENTATION DIFFERS FROM THE CODE BLOCKS BELOW.** `conductor/run_cmd.py` is the
+> source of truth. Three deltas, all load-bearing for Plans 02–07:
+>
+> 1. **`run new` writes `project.json` and `run.json` through one journalled transaction.** The
+>    reference code called `runstate.create` and then `registry.update` — two independent atomic
+>    writes, which is precisely the hazard `conductor/core/transaction.py:1-8` was built for. A
+>    crash between them left an orphaned `run.json` the registry never learned about, and that
+>    state was a **dead end**: `run new` derives the same key and dies on `RunExists`, and
+>    `--new-run` computes generation 1 again (an unmapped path has no generations) and derives the
+>    same key too. `cmd_new` now holds `project.lock` across the read, every refusal check and the
+>    write, takes `state.lock` for the new key inside it, and drives
+>    `transaction.prepare` → `commit` → `apply`. So the crash window closes, and it is the same
+>    machinery `main()`'s `recover_pending` rolls forward. The orphan branch survives as a
+>    fail-closed refusal for a hand-placed record and names `rm -r <run dir>`, because `--new-run`
+>    genuinely cannot clear it.
+> 2. **`main()`'s `recover_pending` call lives inside the handler `try`, not in a `try` of its
+>    own.** The snippet above ends with `return _HANDLERS[args.cmd](args)` *outside* any except
+>    clause; substituted literally for Step 3's `main()` body it would drop the `RunAmbiguous` /
+>    `RunNotFound` / refusal mapping, i.e. every exit code but 0 and 64. One `try` covers the
+>    recovery and the dispatch, and the existing `subprocess.CalledProcessError` clause already
+>    reports a git failure while resolving the project.
+> 3. **The brief's `test_gate_dir_fails_closed_when_run_json_disagrees_with_the_key` could not
+>    run.** It built the corrupt record with `runstate.update`, but `schema.validate_run` refuses a
+>    `path-hash-v2` record whose `gate_dir` is not the run_key-derived one (Task 11), so the test
+>    raised `SchemaError` instead of exercising the branch. The corrupt record is now written with
+>    `atomic.write_json_atomic`, which is the only way it can arise in the field anyway — a hand
+>    edit. A second test covers the other fail-closed shape, a **mis-paired** record (run A's
+>    directory holding run B's document): its `gate_dir` segment is perfectly safe, so only the
+>    identity check catches it, and with that check removed the CLI prints B's gate directory for
+>    A's key.
+>
+> Also added, because nothing in the reference tests covered them: `--project` **before** the
+> subcommand (the whole point of `argparse.SUPPRESS`, verified to regress to `None` without it on
+> CPython 3.12.8), a non-repository project exiting 1 rather than raising, `list` on a project with
+> no registry, `show --run <unknown>` exiting 3, and the `bin/conductor` usage text.
+>
+> Residual, accepted: the byte-identical-spec refusal in `run new` matches against runs of **any**
+> status, so two genuinely distinct specs with identical bytes (two empty files, two copies of a
+> template) cannot both start a run without editing one of them. Fail-closed and rare; a `--force`
+> was not added.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/conductor/test_run_cmd.py`:
