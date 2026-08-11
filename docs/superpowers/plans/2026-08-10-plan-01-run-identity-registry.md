@@ -5278,7 +5278,9 @@ git commit -m "tests/conductor/test_multi_run_isolation.py:1-165 — two runs in
 
 ## Definition of done for this plan
 
-- [ ] `pytest -q` green, with the pre-existing 565 passed / 1 skipped still passing.
+- [x] `pytest -q` green. **Shipped: 835 passed, 1 skipped** (baseline at the merge base was
+      565 passed / 1 skipped; this plan added 270 tests). Residuals and the constraints Plans
+      02–07 inherit are recorded in `docs/reviews/2026-08-10-plan-01-residuals.md`.
 - [ ] `./bin/conductor gate verify` clean — assertions A1–A16 unchanged and unweakened.
 - [ ] `ruff check .` clean; `ruff format --check` clean on every file this plan created or modified.
 - [ ] `pyright .` reports no new errors.
