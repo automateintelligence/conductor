@@ -250,6 +250,7 @@ def test_a_refusal_after_recovery_does_not_claim_no_write_occurred(state_root):
     ``transaction.write_status``."""
     key = runkey.run_key(ALPHA)
     before = registry.load(state_root)
+    assert before is not None
     after = registry.register(
         schema.clone(before), spec=ALPHA, run_key=key, generation=1
     )
@@ -275,15 +276,19 @@ def test_a_refusal_after_recovery_does_not_claim_no_write_occurred(state_root):
     assert "no further write occurred" in message
     assert "no write occurred" not in message
     # And the write the message admits to really did happen.
-    assert registry.current_run_key(registry.load(state_root), ALPHA) == key
+    recovered = registry.load(state_root)
+    assert recovered is not None
+    assert registry.current_run_key(recovered, ALPHA) == key
     assert transaction.pending(state_root) == []
 
 
 def test_a_refusal_with_nothing_recovered_keeps_the_plain_phrase(state_root):
     """The control: no journal pending, so the honest phrase is the plain one. Without this a
     fix for the case above could simply print the qualified phrase unconditionally."""
+    doc = registry.load(state_root)
+    assert doc is not None
     with pytest.raises(registry.RevisionConflict) as excinfo:
-        registry.commit(state_root, registry.load(state_root), expect_revision=99)
+        registry.commit(state_root, doc, expect_revision=99)
     assert "no write occurred" in str(excinfo.value)
 
 
