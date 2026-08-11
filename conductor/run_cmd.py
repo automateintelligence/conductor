@@ -20,6 +20,7 @@ import datetime
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 
@@ -440,10 +441,56 @@ _HANDLERS = {
 }
 
 
+def _write_failure(
+    args: argparse.Namespace, invocation: list[str], exc: OSError
+) -> str:
+    """The refusal for a filesystem error that killed an operation mid-write — ENOSPC, EIO, a
+    revoked mount, a state directory removed underneath the process.
+
+    Every other refusal in this module names the run, whether a write occurred, and the exact
+    command that recovers; an unhandled ``OSError`` escaped as a traceback carrying none of the
+    three. The journal is what makes it recoverable, so the report reads it: a COMMITTED journal
+    means the intended change survives and the next verb completes it, a prepared one means it is
+    reversed, and neither leaves a half-applied write. The transaction ids embed the run key
+    (``new-<key>``, ``repoint-<key>``), which is how an operation that never got as far as
+    resolving a key still names its run."""
+    try:
+        states = transaction.pending_states(
+            os.path.join(
+                resolve.repo_root(getattr(args, "project", None)), ".conductor"
+            )
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # The reporter must never replace the operator's real error with one of its own.
+        states = {}
+    committed = sorted(t for t, state in states.items() if state == "committed")
+    prepared = sorted(t for t, state in states.items() if state != "committed")
+    if committed:
+        journal = (
+            f"transaction(s) {', '.join(committed)} are journalled and COMMITTED — the next "
+            "conductor run verb completes them, so the intended state is not lost."
+        )
+    elif prepared:
+        journal = (
+            f"transaction(s) {', '.join(prepared)} are journalled but NOT committed — the next "
+            "conductor run verb reverses them, so no partial write survives."
+        )
+    else:
+        journal = "no transaction is pending, so no state write was left half-applied."
+    run_key = getattr(args, "run", None)
+    subject = f"run {run_key}" if run_key else f"conductor run {args.cmd}"
+    return (
+        f"{subject} failed while writing state: {exc}\n"
+        f"  {journal}\n"
+        f"  Fix the underlying error, then retry: conductor run {shlex.join(invocation)}"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
+    invocation = sys.argv[1:] if argv is None else list(argv)
     try:
-        args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+        args = parser.parse_args(invocation)
     except SystemExit as exc:
         return EXIT_USAGE if exc.code else EXIT_OK
     try:
@@ -488,6 +535,12 @@ def main(argv: list[str] | None = None) -> int:
             f"{(exc.stderr or '').strip() or exc}",
             file=sys.stderr,
         )
+        return EXIT_FAIL
+    except OSError as exc:
+        # LAST, so nothing above it is shadowed. A write that dies mid-transaction is the one
+        # failure this module cannot prevent; it can still refuse the way every other path does
+        # instead of printing a traceback that names no run, no write status and no recovery.
+        print(_write_failure(args, invocation, exc), file=sys.stderr)
         return EXIT_FAIL
 
 

@@ -538,17 +538,25 @@ def test_a_crash_between_new_s_commit_and_apply_is_recovered_by_the_next_verb(
     git_repo, capsys, monkeypatch
 ):
     """The same guarantee end to end: kill ``run new`` after its journal commits and the run is
-    still recovered — which is only true because ``new`` journals both writes together."""
+    still recovered — which is only true because ``new`` journals both writes together.
+
+    The failed write must also REFUSE rather than escape: a mid-transaction ``OSError`` (ENOSPC,
+    EIO, a revoked mount) used to reach the operator as a traceback naming no run, no write
+    status and no recovery command, and this test used to pin that by asserting the escape."""
     monkeypatch.setattr(
         transaction,
         "apply",
         lambda *a, **k: (_ for _ in ()).throw(OSError("simulated crash")),
     )
-    with pytest.raises(OSError, match="simulated crash"):
-        _run(git_repo, "new", "docs/specs/alpha.md")
-    capsys.readouterr()
-    state_root = resolve.state_root(str(git_repo))
+    assert _run(git_repo, "new", "docs/specs/alpha.md") == 1
+    err = capsys.readouterr().err
     key = runkey.run_key("docs/specs/alpha.md")
+    assert "simulated crash" in err
+    assert f"new-{key}" in err  # the transaction id, which embeds the run key
+    assert "and COMMITTED" in err  # the write status: the intended state survives
+    assert "conductor run new docs/specs/alpha.md" in err  # the retry
+    assert "Traceback" not in err
+    state_root = resolve.state_root(str(git_repo))
     # Committed, but neither file carries it yet: the run is invisible until recovery.
     project_doc = registry.load(state_root)
     assert project_doc is not None and registry.run_keys(project_doc) == []
@@ -559,6 +567,41 @@ def test_a_crash_between_new_s_commit_and_apply_is_recovered_by_the_next_verb(
     assert _run(git_repo, "resolve") == 0
     assert capsys.readouterr().out.strip() == key
     assert transaction.pending(state_root) == []
+
+
+def _raise_oserror(*_args, **_kwargs):
+    raise OSError("disk full")
+
+
+def test_a_failed_write_before_the_journal_commits_reports_the_reversal(
+    git_repo, capsys, monkeypatch
+):
+    """The other half of the write-failure report. A journal that never reached ``committed`` is
+    REVERSED by the next verb, so the message must not tell the operator their state survived —
+    the two branches say opposite things about the same failure."""
+    monkeypatch.setattr(transaction, "commit", _raise_oserror)
+    assert _run(git_repo, "new", "docs/specs/alpha.md") == 1
+    err = capsys.readouterr().err
+    key = runkey.run_key("docs/specs/alpha.md")
+    assert "disk full" in err
+    assert f"new-{key}" in err
+    assert "NOT committed" in err
+    assert "and COMMITTED" not in err
+    assert "Traceback" not in err
+
+
+def test_a_failed_write_before_anything_is_journalled_says_so(
+    git_repo, capsys, monkeypatch
+):
+    """No journal at all: nothing was left half-applied, and claiming a pending transaction
+    would send the operator looking for one."""
+    monkeypatch.setattr(transaction, "prepare", _raise_oserror)
+    assert _run(git_repo, "new", "docs/specs/alpha.md") == 1
+    err = capsys.readouterr().err
+    assert "disk full" in err
+    assert "no transaction is pending" in err
+    assert "Traceback" not in err
+    assert transaction.pending(resolve.state_root(str(git_repo))) == []
 
 
 def test_a_non_repository_project_fails_without_a_traceback(tmp_path, capsys):

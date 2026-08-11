@@ -378,9 +378,16 @@ def test_a_crash_mid_registration_is_recovered_without_disturbing_the_other_runs
             "apply",
             lambda *a, **k: (_ for _ in ()).throw(OSError("simulated crash")),
         )
-        with pytest.raises(OSError, match="simulated crash"):
-            run_cmd.main(["new", GAMMA, "--project", root])
-        capsys.readouterr()
+        # The failed write REFUSES rather than escaping: exit 1 plus the transaction id (which
+        # embeds gamma's run key), the write status and the retry. A traceback here would name
+        # none of the three, and this assertion used to be `pytest.raises(OSError)`.
+        assert run_cmd.main(["new", GAMMA, "--project", root]) == 1
+        err = capsys.readouterr().err
+        assert "simulated crash" in err
+        assert f"new-{gamma}" in err
+        assert "COMMITTED" in err
+        assert f"conductor run new {GAMMA}" in err
+        assert "Traceback" not in err
 
         project_doc = registry.load(state_root)
         assert project_doc is not None

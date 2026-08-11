@@ -153,6 +153,18 @@ def write_status(handled: list[str], *, phrase: str = "no write occurred") -> st
     return f"no further write occurred (transaction(s) {', '.join(handled)} were completed first)"
 
 
+def pending_states(state_root: str) -> dict[str, str]:
+    """Each unfinished transaction id mapped to its journal state — exactly what ``recover`` will
+    do with it: a ``committed`` one is rolled forward, a ``prepared`` one is reversed.
+
+    A failure report written after a write died mid-operation has to tell the operator which of
+    those two is waiting, because only the first one means the intended change survives."""
+    return {
+        txn_id: _load_journal(state_root, txn_id)["state"]
+        for txn_id in pending(state_root)
+    }
+
+
 def recover(state_root: str) -> list[str]:
     """Complete or reverse every unfinished transaction; return the ids handled, sorted.
 
