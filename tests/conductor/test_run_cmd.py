@@ -103,8 +103,18 @@ def test_new_refuses_when_run_state_is_already_tracked(git_repo, git, capsys):
 
 
 def test_new_refuses_a_spec_outside_the_repository(git_repo, capsys):
+    """The refusal must satisfy the same failure-report contract as every sibling: name the
+    write status and the exact retry. Normalizing the spec path is a pure computation, so it
+    runs BEFORE hygiene.ensure_local_exclude — which is why "no write occurred" is literally
+    true here and the exclude file is untouched."""
+    exclude = git_repo / ".git" / "info" / "exclude"
+    before = exclude.read_text() if exclude.exists() else None
     assert _run(git_repo, "new", "../outside.md") == 1
-    assert "outside the repository" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "outside the repository" in err
+    assert "no write occurred" in err
+    assert "conductor run new" in err
+    assert (exclude.read_text() if exclude.exists() else None) == before
     assert registry.load(resolve.state_root(str(git_repo))) is None
 
 

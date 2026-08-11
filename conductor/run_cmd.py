@@ -114,10 +114,23 @@ def _reconcile_mirror(project_doc: dict, statuses: dict[str, str]) -> dict:
 
 def cmd_new(args: argparse.Namespace) -> int:
     root = resolve.repo_root(args.project)
+    # Normalizing the spec path is a PURE computation and deliberately runs before the two
+    # hygiene calls, which write: `ensure_local_exclude` may append to the repository's local git
+    # exclude. Refusing a spec outside the repository afterwards would print "no write occurred"
+    # over a write that had already happened, and the raw ValueError carried neither the write
+    # status nor a retry command — unlike every sibling refusal here.
+    try:
+        relative = runkey.normalize_spec_path(root, args.spec)
+    except ValueError as exc:
+        print(
+            f"{exc}; no write occurred. Move the spec inside the repository first, then re-run: "
+            f"conductor run new <path-under-{root}>",
+            file=sys.stderr,
+        )
+        return EXIT_FAIL
     hygiene.assert_state_paths_untracked(root)
     hygiene.ensure_local_exclude(root)
     state_root = os.path.join(root, ".conductor")
-    relative = runkey.normalize_spec_path(root, args.spec)
     if not os.path.isfile(os.path.join(root, relative)):
         # Not "no write occurred": ensure_local_exclude ran above and may have written the
         # repository's local git exclude. That is idempotent scaffolding, not run state, but the
