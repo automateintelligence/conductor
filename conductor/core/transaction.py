@@ -16,8 +16,20 @@ Lifecycle:
 one forward (write the after images). Both directions are idempotent, so recovering twice, or
 recovering a transaction that had already half-applied, converges on the same state.
 
-This module takes no locks: it is used from inside operations that already hold ``project.lock``
-and the relevant ``state.lock``, and taking them again would be a re-entrant acquisition.
+LOCKING — READ THIS BEFORE ADDING A ``run.json`` WRITER. This module takes no locks. Its callers
+hold ``project.lock`` and NOTHING ELSE: ``registry.init``, ``registry.commit``,
+``resolve.recover_pending``, ``run_cmd.cmd_new`` and ``repoint.repoint`` all call ``recover``
+under the project lock alone, before they take any per-run lock. ``_write_image`` therefore
+rewrites a run record with neither that run's ``state.lock`` nor a revision check — it restores
+the journal's image verbatim, which is what makes recovery idempotent, and is also why a
+revision check could not be added here without breaking roll-forward.
+
+That is safe only because nothing in production writes ``run.json`` concurrently with recovery
+today: ``runstate.commit``/``update``/``set_status`` exist but no product code path calls them.
+ANY PLAN THAT INTRODUCES A CONCURRENT ``run.json`` WRITER MUST either take the per-run locks in
+``recover`` (in the global project -> owner -> state order ``locks._check_order`` enforces) or
+serialise that writer against recovery. Plan 02 is that plan: its heartbeat and lease writers are
+exactly the callers this note is addressed to.
 """
 
 from __future__ import annotations
