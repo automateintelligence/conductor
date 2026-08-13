@@ -1,8 +1,14 @@
 # conductor
 
-**Autonomous spec-completion loop for Claude Code.** State a goal, walk away, come
+**Autonomous spec-completion loop.** State a goal, walk away, come
 back to either finished work that passes a machine-checked definition of done, or a
 clear, recoverable note about why it stopped.
+
+**Hosts.** Conductor runs on **Claude Code** today. **OpenAI Codex** host support is in
+development — the design and implementation plan are written
+([design](docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md),
+[Plan 04](docs/superpowers/plans/2026-08-10-plan-04-host-adapters.md)), but the host
+adapter layer is not built yet. Installing conductor under Codex today will not work.
 
 **Survive sessions and restarts!!!**
 State grounded in GitHub. Not reliant on Claude Cloud.
