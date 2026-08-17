@@ -105,6 +105,26 @@ def _referenced_files(entry: dict, repo_root: str) -> dict:
     return files
 
 
+def _source_candidates(spec_path: str) -> list[str]:
+    """The accepted assertions-source spellings for a spec path, PREFERRED FIRST.
+
+    spec-craft (`/spec-craft:executable-assertions`) WRITES `docs/specs/<stem>.assertions.md`
+    and conductor only READS it, so the stem form is the binding one and is tried first. The
+    legacy `<spec>.md.assertions.md` form — what conductor demanded when it appended
+    `.assertions.md` to a path that already ended in `.md` — stays accepted so repos that
+    bridged the mismatch with a committed file or symlink keep resolving and keep verifying.
+
+    A path that already names an `.assertions.md` file is taken verbatim."""
+    if spec_path.endswith(".assertions.md"):
+        return [spec_path]
+    stem = spec_path[:-3] if spec_path.endswith(".md") else spec_path
+    candidates = [stem + ".assertions.md"]
+    legacy = spec_path + ".assertions.md"
+    if legacy not in candidates:
+        candidates.append(legacy)
+    return candidates
+
+
 class AmbiguousAssertionsSource(RuntimeError):
     """Multiple docs/specs/*.assertions.md and no goal names one — fail closed."""
 
@@ -153,28 +173,31 @@ def _assertions_source(
     run: a fresh clone re-resolves to something else (or to nothing) and `verify` reports
     TAMPERED. The pointer is committed next to the manifest it describes, so the baseline
     binds to the same document on every checkout, and stays unambiguous no matter how many
-    other specs the repo later grows.
+    other specs the repo later grows. A pointer naming a spec `.md` resolves under the same
+    two spellings as every other tier (`_source_candidates`).
 
     Else, precise path: parse `<project>/.conductor/goal.md` for a
-    `docs/specs/<name>.md` path and take its `.assertions.md` sibling; a goal
-    whose named spec has no `.assertions.md` sibling — or that names no spec at
-    all — fails closed. Glob `docs/specs/*.assertions.md` ONLY when no goal file
+    `docs/specs/<name>.md` path and take its assertions sibling under either
+    accepted spelling (`_source_candidates`: spec-craft's `<stem>.assertions.md`
+    first, then the legacy `<spec>.md.assertions.md`); a goal whose named spec has
+    NEITHER — or that names no spec at all — fails closed. Glob
+    `docs/specs/*.assertions.md` (which matches both spellings) ONLY when no goal file
     exists: exactly one match -> use it; multiple -> fail closed (freezing every
     spec's assertions silently would let an edit to an UNRELATED spec's
     assertions break this run's gate); none -> no source entry (old behavior)."""
     override = os.environ.get("CONDUCTOR_ASSERTIONS_SOURCE")
     if override:
-        path = (
+        base = (
             override if os.path.isabs(override) else os.path.join(repo_root, override)
         )
-        if not path.endswith(".assertions.md"):
-            path += ".assertions.md"
-        if not os.path.isfile(path):
-            raise MissingAssertionsSource(
-                f"missing-assertions-source: CONDUCTOR_ASSERTIONS_SOURCE names "
-                f"{override} but {path} does not exist"
-            )
-        return {os.path.relpath(path, repo_root): _sha256_file(path)}, "env"
+        candidates = _source_candidates(base)
+        for path in candidates:
+            if os.path.isfile(path):
+                return {os.path.relpath(path, repo_root): _sha256_file(path)}, "env"
+        raise MissingAssertionsSource(
+            f"missing-assertions-source: CONDUCTOR_ASSERTIONS_SOURCE names "
+            f"{override} but none of {', '.join(candidates)} exist"
+        )
     gate_dir = (
         os.path.dirname(manifest_path)
         if manifest_path
@@ -182,30 +205,31 @@ def _assertions_source(
     )
     declared = _read_pointer(gate_dir)
     if declared:
-        path = (
+        base = (
             declared if os.path.isabs(declared) else os.path.join(repo_root, declared)
         )
-        if not path.endswith(".assertions.md"):
-            path += ".assertions.md"
-        if not os.path.isfile(path):
-            raise MissingAssertionsSource(
-                f"missing-assertions-source: {os.path.join(gate_dir, SOURCE_POINTER)} "
-                f"names {declared} but {path} does not exist"
-            )
-        return {os.path.relpath(path, repo_root): _sha256_file(path)}, "gate"
+        candidates = _source_candidates(base)
+        for path in candidates:
+            if os.path.isfile(path):
+                return {os.path.relpath(path, repo_root): _sha256_file(path)}, "gate"
+        raise MissingAssertionsSource(
+            f"missing-assertions-source: {os.path.join(gate_dir, SOURCE_POINTER)} "
+            f"names {declared} but none of {', '.join(candidates)} exist"
+        )
     goal_path = os.path.join(repo_root, ".conductor", "goal.md")
     if os.path.isfile(goal_path):
         with open(goal_path, encoding="utf-8") as f:
             goal = f.read()
         m = re.search(r"docs/specs/[^\s`'\"]+?\.md", goal)
         if m:
-            rel = m.group(0) + ".assertions.md"
-            path = os.path.join(repo_root, rel)
-            if os.path.isfile(path):
-                return {rel: _sha256_file(path)}, "goal"
+            rels = _source_candidates(m.group(0))
+            for rel in rels:
+                path = os.path.join(repo_root, rel)
+                if os.path.isfile(path):
+                    return {rel: _sha256_file(path)}, "goal"
             raise MissingAssertionsSource(
                 f"missing-assertions-source: the goal names "
-                f"{m.group(0)} but {rel} does not exist"
+                f"{m.group(0)} but none of {', '.join(rels)} exist"
             )
         # a goal that names no spec must not silently glob an unrelated spec's
         # assertions — fail closed
