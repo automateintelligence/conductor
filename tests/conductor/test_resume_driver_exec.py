@@ -16,6 +16,7 @@ deterministic regardless of what is installed on the host.
 
 from __future__ import annotations
 
+import os
 import shutil
 import signal
 import subprocess
@@ -38,8 +39,17 @@ _DEADLINE = 20.0
 _POLL = 0.02
 
 # The fake worker writes one line per invocation here; the driver's own stdout goes to $LOG.
+#
+# FAKE_WORKER_LEAK models what an autodev phase legitimately does: leave a DETACHED
+# descendant running (a dev server, a docker helper, anything nohup'd) after the phase
+# itself returns. Every non-close-on-exec descriptor the driver held is inherited straight
+# through `worker -> setsid -> grandchild`, so this is the shape that can strand the lock.
 _FAKE_CLAUDE = """#!/usr/bin/env bash
 printf 'WORKER-FIRED cwd=%s args=%s\\n' "$PWD" "$*" >> "$FAKE_CALLS"
+if [ -n "${FAKE_WORKER_LEAK:-}" ]; then
+    setsid bash -c 'echo $$ > "$FAKE_WORKER_LEAK.pid"
+        while [ ! -f "$FAKE_WORKER_LEAK" ]; do sleep 0.05; done' </dev/null >/dev/null 2>&1 &
+fi
 if [ -n "${FAKE_WORKER_HOLD:-}" ]; then
     touch "$FAKE_WORKER_STARTED"
     while [ ! -f "$FAKE_WORKER_HOLD" ]; do sleep 0.02; done
@@ -89,6 +99,7 @@ class Rig:
     calls: Path
     home: Path
     spawned: list[subprocess.Popen] = field(default_factory=list)
+    adopted: list[int] = field(default_factory=list)
 
     def env(self, **extra: str) -> dict[str, str]:
         return {
@@ -141,6 +152,14 @@ class Rig:
         _wait_for_cwd(proc.pid, cwd)
         return proc
 
+    def adopt_pidfile(self, pidfile: Path, what: str) -> int:
+        """Register a descendant the test spawned INDIRECTLY (through the fake worker) so
+        teardown can reach it. It is not a tracked Popen — nothing else would ever reap it."""
+        _wait_for(pidfile, what)
+        pid = int(pidfile.read_text().strip())
+        self.adopted.append(pid)
+        return pid
+
     def release(self, marker: Path) -> None:
         marker.write_text("go\n")
 
@@ -153,6 +172,14 @@ class Rig:
         return [ln for ln in self.calls.read_text().splitlines() if ln.strip()]
 
     def cleanup(self) -> None:
+        for pid in self.adopted:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (
+                ProcessLookupError,
+                PermissionError,
+            ):  # pragma: no cover - defensive
+                pass
         for proc in self.spawned:
             if proc.poll() is None:
                 proc.send_signal(signal.SIGKILL)
@@ -272,6 +299,31 @@ def test_two_driver_invocations_serialize_on_the_lock(make_rig):
 
     rig.release(hold)
     assert first.wait(timeout=_DEADLINE) == 0
+
+
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
+def test_a_detached_descendant_of_a_finished_fire_does_not_hold_the_lock(make_rig):
+    """The lock descriptor must NOT be inheritable by the worker.
+
+    `exec 9>lock` opens a descriptor that is not close-on-exec, so the worker and every
+    process it spawns get it. A phase that leaves ANY detached descendant running (dev
+    server, docker helper, stray nohup) therefore keeps the locked open-file-description
+    alive after the driver logs `fire-end rc=0` and exits — and the kernel only releases a
+    flock when the LAST descriptor on that description closes. Every later fire then skips
+    `lock-held` forever, with a completed, successful-looking fire in the log."""
+    rig = make_rig("plain-host-leak")
+    leak = rig.project / "leaked-descendant"
+
+    first = rig.run(FAKE_WORKER_LEAK=str(leak))
+    assert first.returncode == 0, (first.stdout, first.stderr, rig.log_text())
+    rig.adopt_pidfile(Path(f"{leak}.pid"), "the phase's detached descendant")
+    assert "fire-end rc=0" in rig.log_text(), rig.log_text()
+
+    second = rig.run()
+
+    assert second.returncode == 0, (second.stdout, second.stderr, rig.log_text())
+    assert "skip reason=lock-held" not in rig.log_text(), rig.log_text()
+    assert len(rig.worker_calls()) == 2, rig.worker_calls()
 
 
 # ---- 4. a real fire reaches the worker and is distinguishable in the log ----

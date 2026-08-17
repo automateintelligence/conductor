@@ -32,7 +32,7 @@ import sys
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and
 # `/conductor:start` reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 5
+TEMPLATE_VERSION = 6
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
@@ -230,7 +230,7 @@ fi
 # (b) finished runs get no-op fires: exit once the spec done-gate is green.
 #     EVERY early exit logs a `skip reason=` line. A bare `exit 0` is what let a permanently
 #     blocked run look identical to a healthy no-op in resume-autodev.log for weeks.
-if "$CONDUCTOR" assert run --level spec >/dev/null 2>&1; then
+if "$CONDUCTOR" assert run --level spec >/dev/null 2>&1 9>&-; then
     printf '%s skip reason=gate-green\\n' "$(ts)" >> "$LOG"
     exit 0
 fi
@@ -272,7 +272,14 @@ for arg in "$@"; do
     prev="$arg"
 done
 printf '%s fire-start posture=%s\\n' "$(ts)" "$POSTURE" >> "$LOG"
-"$CLAUDE_BIN" -p "/conductor:autodev" "$@" >> "$LOG" 2>&1
+# `9>&-` CLOSES the lock descriptor in the worker ONLY — the driver keeps holding it for the
+# whole fire. Without it the descriptor (opened by `exec`, so NOT close-on-exec) is inherited
+# by the worker and every process it spawns; a phase that leaves ONE detached descendant
+# running (dev server, docker helper, stray nohup) keeps the locked open-file-description
+# alive after this driver exits, because the kernel only drops a flock when the LAST
+# descriptor on that description closes. Every later fire then skips `lock-held` forever
+# behind a `fire-end rc=0` that looks healthy. Do NOT "fix" that by unlocking early.
+"$CLAUDE_BIN" -p "/conductor:autodev" "$@" >> "$LOG" 2>&1 9>&-
 rc=$?
 printf '%s fire-end rc=%s\\n' "$(ts)" "$rc" >> "$LOG"
 exit "$rc"

@@ -32,6 +32,19 @@ from conductor import resume_script
 _RECENT_HOURS_ENV = "CONDUCTOR_DRIVER_RECENT_HOURS"
 _RECENT_HOURS_DEFAULT = 24.0
 _FIRE_END_RE = re.compile(r"fire-end rc=(\d+)")
+_FIRE_START = "fire-start"
+_SKIP_RE = re.compile(r"skip reason=(\S+)")
+# How long an unmatched `fire-start` may stay in flight before status calls it stalled. A
+# hung fire (a headless `-p` blocked on a permission prompt it cannot answer) and a long
+# phase produce the SAME log shape, so elapsed time is the only honest discriminator.
+_STALL_HOURS_ENV = "CONDUCTOR_DRIVER_STALL_HOURS"
+_STALL_HOURS_DEFAULT = 6.0
+# How many CONSECUTIVE lock-held skips with no fire in flight count as a stranded lock.
+# Two, not one: between winning the lock and printing `fire-start` a fire runs the whole
+# spec done-gate, so ONE heartbeat can legitimately land in that window and see lock-held
+# with nothing in the log yet. Two heartbeats (20 min apart) landing in the same few
+# seconds is not a thing; a stranded lock skips every fire from then on.
+_STRANDED_LOCK_RUN = 2
 # Only this many trailing log lines are considered "the recent tail" — the recency
 # window does the real filtering; this just bounds work on a long-lived log.
 _TAIL_LINES = 500
@@ -107,29 +120,40 @@ def _scheduled_task_matches(root: str) -> bool:
     return False
 
 
-def _recent_hours() -> float:
-    """The recency window; any malformed or non-finite override (unparseable, nan, inf,
-    non-positive) degrades to the default rather than crashing timedelta."""
-    raw = os.environ.get(_RECENT_HOURS_ENV, "")
+def _hours(env: str, default: float) -> float:
+    """A positive-hours window from the environment; any malformed or non-finite override
+    (unparseable, nan, inf, non-positive) degrades to the default rather than crashing
+    timedelta."""
+    raw = os.environ.get(env, "")
     try:
-        hours = float(raw) if raw else _RECENT_HOURS_DEFAULT
+        hours = float(raw) if raw else default
     except ValueError:
-        return _RECENT_HOURS_DEFAULT
+        return default
     if not math.isfinite(hours) or hours <= 0:
-        return _RECENT_HOURS_DEFAULT
+        return default
     return hours
+
+
+def _recent_hours() -> float:
+    return _hours(_RECENT_HOURS_ENV, _RECENT_HOURS_DEFAULT)
+
+
+def _timestamp(line: str) -> datetime.datetime | None:
+    """The line's LEADING ISO timestamp, tz-aware; None when it cannot be parsed."""
+    token = line.split(maxsplit=1)[0] if line.split() else ""
+    try:
+        ts = datetime.datetime.fromisoformat(token)
+    except ValueError:
+        return None
+    return ts.astimezone() if ts.tzinfo is None else ts
 
 
 def _is_recent(line: str, now: datetime.datetime, hours: float) -> bool:
     """A line is recent when its LEADING ISO timestamp is within the window. A
     timestamp that cannot be parsed counts as recent — fail-closed toward reporting."""
-    token = line.split(maxsplit=1)[0] if line.split() else ""
-    try:
-        ts = datetime.datetime.fromisoformat(token)
-    except ValueError:
+    ts = _timestamp(line)
+    if ts is None:
         return True
-    if ts.tzinfo is None:
-        ts = ts.astimezone()
     return (now - ts) <= datetime.timedelta(hours=hours)
 
 
@@ -142,24 +166,110 @@ def _recent_failures(lines: list[str]) -> list[str]:
         if not line.strip():
             continue
         m = _FIRE_END_RE.search(line)
-        failing = "driver-unresolved" in line or (m is not None and int(m.group(1)) != 0)
+        failing = "driver-unresolved" in line or (
+            m is not None and int(m.group(1)) != 0
+        )
         if failing and _is_recent(line, now, hours):
             failures.append(line)
     return failures
+
+
+def _blockages(lines: list[str]) -> list[str]:
+    """Stalls that NO single log line announces — read off the SEQUENCE of fire brackets
+    and `skip reason=` lines instead.
+
+    `_recent_failures` only recognises lines that declare their own failure, so a run
+    skipping EVERY fire reported "recent fires clean". Two shapes have to surface:
+
+    - STRANDED LOCK: `_STRANDED_LOCK_RUN`+ consecutive `skip reason=lock-held` with no fire
+      in flight to hold it. That is what a leaked lock descriptor looks like — a descendant
+      of a finished fire keeping the open-file-description (and its flock) alive — and what
+      a stale holder from a SIGKILLed fire's descendant looks like. Zero headless progress.
+    - A FIRE THAT NEVER ENDED: a `fire-start` with no `fire-end`, either stepped over by a
+      later lock acquisition (another `fire-start`, or a `gate-green` skip — both come
+      AFTER flock succeeds), meaning that fire died without logging its rc; or still in
+      flight past the stall window, meaning it is hung rather than merely slow.
+
+    A `fire-start` followed only by lock-held skips inside the stall window is NOT reported:
+    that is a long phase and later fires deferring to it correctly. Crying wolf there would
+    make the one signal an operator reads worthless."""
+    now = datetime.datetime.now().astimezone()
+    recent = _recent_hours()
+    stall = _hours(_STALL_HOURS_ENV, _STALL_HOURS_DEFAULT)
+    findings: list[str] = []
+    in_flight: str | None = None
+    stranded: list[str] = []
+
+    def never_ended(line: str, why: str) -> str:
+        return f"driver: a fire never logged a `fire-end` ({why}):\n{line}"
+
+    def flush_stranded() -> None:
+        # Recency is judged on the LAST skip in the run: an unbroken run that a later
+        # `fire-end` resolved, or one that stopped days ago, is history, not the signal.
+        if len(stranded) >= _STRANDED_LOCK_RUN and _is_recent(
+            stranded[-1], now, recent
+        ):
+            findings.append(
+                f"driver: {len(stranded)} consecutive fires skipped `lock-held` with no "
+                f"fire in flight to hold the lock — the run is making ZERO headless "
+                f"progress (a leaked lock descriptor or a stale holder):\n"
+                + "\n".join(stranded)
+            )
+        stranded.clear()
+
+    for line in lines:
+        if not line.strip():
+            continue
+        if _FIRE_START in line:
+            flush_stranded()
+            if in_flight is not None:
+                findings.append(never_ended(in_flight, "a later fire took the lock"))
+            in_flight = line
+        elif _FIRE_END_RE.search(line):
+            flush_stranded()
+            in_flight = None
+        elif (m := _SKIP_RE.search(line)) is not None:
+            if m.group(1) == "lock-held":
+                if in_flight is None:
+                    stranded.append(line)
+                # else: a fire holds the lock and later fires defer — healthy. Whether that
+                # fire has held it too long is the stall check below.
+            else:
+                # gate-green and every other skip happen only AFTER flock succeeds, so any
+                # fire still "in flight" per the log is gone.
+                flush_stranded()
+                if in_flight is not None:
+                    findings.append(
+                        never_ended(in_flight, "the lock was re-acquired after it")
+                    )
+                    in_flight = None
+    flush_stranded()
+    if in_flight is not None:
+        # No recency filter here, deliberately: nothing in the log RESOLVED this fire, so it
+        # is not aged-out history. The stall window is the filter, and an unparseable
+        # timestamp reports — fail-closed, same as _is_recent.
+        started = _timestamp(in_flight)
+        if started is None or (now - started) > datetime.timedelta(hours=stall):
+            findings.append(
+                never_ended(in_flight, f"still in flight after more than {stall:g}h")
+            )
+    return findings
 
 
 def status(project: str) -> int:
     """Exit 0 iff a durable driver exists for `project` AND its recent fires are clean.
     Not durable → print why, exit 1. Durable but recent failures → print each offending
     line VERBATIM (named, not just counted), exit 1. Durable with no log at all is a
-    driver with no fires yet — healthy."""
+    driver with no fires yet — healthy.
+
+    "Clean" means BOTH per-line failures (`_recent_failures`) and sequence-level blockage
+    (`_blockages`): a run that is skipping every fire, or holding a fire that never ended,
+    is not clean no matter how successful each individual line looks."""
     root = resume_script.main_root(project)
     marker = resume_script.cron_marker(root)
     # An ACTIVE crontab entry only: a commented-out/disabled line that still carries
     # the marker is not a durable driver and must not false-green the signal.
-    if any(
-        marker in ln and not ln.lstrip().startswith("#") for ln in _crontab_lines()
-    ):
+    if any(marker in ln and not ln.lstrip().startswith("#") for ln in _crontab_lines()):
         leg = "crontab marker"
     elif _scheduled_task_matches(root):
         leg = "scheduled task"
@@ -177,6 +287,7 @@ def status(project: str) -> int:
     with open(log_path, encoding="utf-8", errors="replace") as f:
         tail = f.read().splitlines()[-_TAIL_LINES:]
     failures = _recent_failures(tail)
+    blockages = _blockages(tail)
     if failures:
         print(
             f"driver: durable ({leg}) but the recent log tail shows "
@@ -184,6 +295,9 @@ def status(project: str) -> int:
         )
         for line in failures:
             print(line)
+    for finding in blockages:
+        print(finding)
+    if failures or blockages:
         return 1
     print(f"driver: durable ({leg}), recent fires clean")
     return 0
@@ -229,9 +343,7 @@ def main(argv: list[str] | None = None) -> int:
         return status(project)
     except subprocess.CalledProcessError as e:
         detail = (e.stderr or "").strip()
-        print(
-            f"cannot resolve main root for {project}: {detail or e}", file=sys.stderr
-        )
+        print(f"cannot resolve main root for {project}: {detail or e}", file=sys.stderr)
         return 1
     except resume_script.CrontabReadError as e:
         print(str(e), file=sys.stderr)
