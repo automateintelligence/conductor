@@ -204,11 +204,26 @@ def install(project: str, worktree: str, host: str | None = None) -> int:
     no-clobber guard is respected) and then the marker-tagged crontab lines.
 
     `host` records which host this run's fires spawn, BEFORE the script is rendered from that
-    recording. Omitting it leaves any existing recording alone: a re-install must never move a
-    live run onto another host as a side effect."""
+    recording. It is the caller's to state because it is only knowable one level up: the
+    `/conductor:start` skill runs ON the host, while every layer below it is a subprocess with
+    no marker it can trust (Claude exports `CLAUDECODE`/`CLAUDE_PLUGIN_ROOT`, the Codex ground
+    truth records no exported analogue, and "neither present" is indistinguishable from a plain
+    shell — so a probe here could only ever positively identify claude).
+
+    Omitting it leaves any EXISTING recording alone — a re-install must never move a live run
+    onto another host as a side effect, not even via a stray `$CONDUCTOR_HOST` in the operator's
+    shell. A run with NO recording gets one anyway, naming the host this install actually
+    rendered. Leaving it unrecorded is what let the two disagree: the render honours
+    `$CONDUCTOR_HOST`, the next reconcile runs from cron without it, and the run silently
+    regenerates back to claude."""
     root = resume_script.main_root(project)
-    if host:
-        runhost.record(root, host)
+    # Validate BEFORE anything is written: a typo'd host must not leave a driver behind.
+    chosen = (
+        base.load(host).id
+        if host
+        else (runhost.recorded(root) or runhost.resolve(root))
+    )
+    runhost.record(root, chosen)
     out = os.path.join(root, ".conductor", "resume-autodev.sh")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     rc = resume_script.main(

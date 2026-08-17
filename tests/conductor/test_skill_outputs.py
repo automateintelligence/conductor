@@ -249,6 +249,13 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
         "6-record-goal": [
             "croncreate",
             "/conductor:autodev",
+            # A1: the host the fires spawn is knowable ONLY here — the skill runs ON the host,
+            # and no subprocess below it can derive one (Claude exports CLAUDECODE/
+            # CLAUDE_PLUGIN_ROOT, the Codex ground truth records no exported analogue, and
+            # "neither marker" is indistinguishable from a plain shell). Drop `--host` from the
+            # documented invocation and a Codex start silently installs a claude driver.
+            "conductor driver install --worktree <run-worktree> --host <this-host>",
+            "you are the host",
             "verify durability",
             "flock",
             "resume-script write",

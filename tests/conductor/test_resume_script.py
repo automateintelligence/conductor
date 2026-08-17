@@ -1,6 +1,7 @@
 """Tier-B resume-driver generator: the runtime-resolution contract that fixes the 2026-07-05
 silent-stall (generation-time-pinned bins that rot on upgrade)."""
 
+import json
 import os
 import re
 import shlex
@@ -488,8 +489,16 @@ def _fire_driver(driver, home):
         "PATH": "/usr/bin:/bin",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
     }
+    # cwd is the temp HOME, never the suite's own checkout. A driver that resolves anything
+    # relative to `.` would otherwise find THIS conductor tree and pass on ambient luck — the
+    # suite runs from inside a valid install, so a wrong answer and a right one look alike.
     return subprocess.run(
-        ["bash", str(driver)], env=env, capture_output=True, text=True, timeout=30
+        ["bash", str(driver)],
+        env=env,
+        cwd=str(home),
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
 
 
@@ -1119,40 +1128,73 @@ def test_the_allowlist_regex_is_derived_from_the_declared_set_not_hand_written()
 # ---- A1: the codex driver actually fires codex (end to end, real bash) --------------------
 
 
-def _mk_codex_harness(tmp):
-    """Same shape as _mk_env_harness, for a Codex-recorded run: stub `codex` and `conductor`
-    in a temp HOME's .local/bin, and put conductor's skill tree where the driver derives it
-    from the resolved bin (<root>/bin/conductor -> <root>/skills/...)."""
+def _codex_plugin_list_json(plugins):
+    """What `codex plugin list --json` prints — the shape verified on codex-cli 0.147.0:
+    `{"installed": [{"name": ..., "source": {"source": "local", "path": ...}}]}`."""
+    return json.dumps(
+        {
+            "installed": [
+                {
+                    "pluginId": f"{name}@openai-curated",
+                    "name": name,
+                    "marketplaceName": "openai-curated",
+                    "version": "d6169bef",
+                    "installed": True,
+                    "enabled": True,
+                    "source": {"source": "local", "path": str(path)},
+                    "installPolicy": "AVAILABLE",
+                    "authPolicy": "NEVER",
+                }
+                for name, path in plugins
+            ]
+        }
+    )
+
+
+def _mk_codex_harness(tmp, *, install_conductor_plugin=True, on_path=False):
+    """A Codex-recorded run on a machine that installed conductor the way a Codex user does:
+    as a PLUGIN, whose bin is therefore NOT on PATH (skills/start/SKILL.md says exactly this).
+
+    `conductor` is deliberately absent from the temp HOME's .local/bin unless `on_path` — a
+    fixture that plants it there proves only that `command -v` works. The stub `codex` answers
+    `plugin list --json`, which is how the driver is expected to find the plugin root.
+    """
     from conductor.hosts import runhost
 
     project = tmp / "proj"
     worktree = tmp / "wt"
     home = tmp / "home"
     bindir = home / ".local" / "bin"
-    skill = home / ".local" / "skills" / "autodev"
-    for d in (project / ".conductor", worktree, bindir, skill):
+    plugin_root = tmp / "codex-cache" / "plugins" / "conductor"
+    skill = plugin_root / "skills" / "autodev"
+    for d in (project / ".conductor", worktree, bindir, skill, plugin_root / "bin"):
         d.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: autodev\n---\n")
     argv_file = tmp / "argv"
+    listed = _codex_plugin_list_json(
+        [("conductor", plugin_root)] if install_conductor_plugin else []
+    )
     codex = bindir / "codex"
     codex.write_text(
-        f'#!/bin/sh\nfor a in "$@"; do printf \'%s\\n\' "$a"; done > "{argv_file}"\nexit 0\n'
+        "#!/bin/sh\n"
+        f"if [ \"$1\" = plugin ]; then printf '%s' '{listed}'; exit 0; fi\n"
+        f'for a in "$@"; do printf \'%s\\n\' "$a"; done > "{argv_file}"\nexit 0\n'
     )
     os.chmod(codex, 0o755)
-    stub_conductor = bindir / "conductor"
+    stub_conductor = (bindir if on_path else plugin_root / "bin") / "conductor"
     stub_conductor.write_text("#!/bin/sh\nexit 1\n")  # gate not green -> proceed
     os.chmod(stub_conductor, 0o755)
     runhost.record(str(project), "codex")
     driver = project / ".conductor" / "resume-autodev.sh"
     driver.write_text(rs.render(str(project), str(worktree)))
     os.chmod(driver, 0o755)
-    return project, driver, home, argv_file
+    return project, driver, home, argv_file, stub_conductor
 
 
 def _fire_codex(tmp, name, env_line=None):
     base = tmp / name
     base.mkdir()
-    project, driver, home, argv_file = _mk_codex_harness(base)
+    project, driver, home, argv_file, _conductor = _mk_codex_harness(base)
     if env_line is not None:
         env_file = project / ".conductor" / "resume-env.sh"
         env_file.write_text(env_line + "\n")
@@ -1179,6 +1221,67 @@ def test_a_codex_run_fires_the_codex_binary_with_an_exec_invocation(tmp_path):
     assert "/conductor:autodev" not in argv, argv
 
 
+def test_a_plugin_installed_conductor_survives_a_cron_fire_with_nothing_on_path(tmp_path):
+    """The install a Codex user actually has. `skills/start/SKILL.md` states that installed
+    plugin binaries are NOT on PATH, nothing installs a shim, and nothing persists
+    CODEX_PLUGIN_ROOT — so `command -v conductor` is empty at fire time and the whole run
+    stops at the unresolved guard before Codex is ever spawned.
+
+    The prompt must name the SKILL.md inside the INSTALLED plugin root. Asserting only that it
+    ends in `/skills/autodev/SKILL.md` would pass on any tree the driver happened to find,
+    including this suite's own checkout."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "plugin-install"
+    base.mkdir()
+    project, driver, home, argv_file, conductor = _mk_codex_harness(base)
+    assert not (home / ".local" / "bin" / "conductor").exists()  # the fixture's whole point
+    proc = _fire_driver(driver, home)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 0, (proc.stdout, proc.stderr, log)
+    assert "driver-unresolved" not in log
+    assert "fire-start" in log
+    argv = argv_file.read_text().splitlines()
+    root = conductor.parent.parent
+    assert argv[-1] == f"Read {root}/skills/autodev/SKILL.md and execute it.", argv
+
+
+def test_a_codex_fire_stops_loud_when_codex_knows_of_no_conductor_plugin(tmp_path):
+    """Nothing on PATH, no CODEX_PLUGIN_ROOT, and codex reports no such plugin: the run must
+    stop at the guard with the reason logged, never spawn codex with an unresolvable prompt."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "no-plugin"
+    base.mkdir()
+    project, driver, home, argv_file, _c = _mk_codex_harness(
+        base, install_conductor_plugin=False
+    )
+    proc = _fire_driver(driver, home)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 3
+    assert "driver-unresolved codex=" in log
+    assert not argv_file.exists()
+    assert "fire-start" not in log
+
+
+def test_a_conductor_on_path_still_wins_over_the_plugin_lookup(tmp_path):
+    """A dev checkout on PATH is a supported install too, and it must not be shadowed by
+    whatever `codex plugin list` reports."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "on-path"
+    base.mkdir()
+    project, driver, home, argv_file, conductor = _mk_codex_harness(base, on_path=True)
+    skill = home / ".local" / "skills" / "autodev"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: autodev\n---\n")
+    proc = _fire_driver(driver, home)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 0, (proc.stdout, proc.stderr, log)
+    argv = argv_file.read_text().splitlines()
+    assert argv[-1] == f"Read {skill}/SKILL.md and execute it.", argv
+
+
 def test_a_codex_run_fails_loud_when_the_skill_tree_is_missing(tmp_path):
     """A prompt pointing at a nonexistent SKILL.md does not fail fast — it burns a whole
     context discovering the path is wrong. Fail before the fire, like an unresolved bin."""
@@ -1186,8 +1289,8 @@ def test_a_codex_run_fails_loud_when_the_skill_tree_is_missing(tmp_path):
         pytest.skip("bash not available")
     base = tmp_path / "noskill"
     base.mkdir()
-    project, driver, home, argv_file = _mk_codex_harness(base)
-    os.remove(home / ".local" / "skills" / "autodev" / "SKILL.md")
+    project, driver, home, argv_file, conductor = _mk_codex_harness(base)
+    os.remove(conductor.parent.parent / "skills" / "autodev" / "SKILL.md")
     proc = _fire_driver(driver, home)
     log = (project / ".conductor" / "resume-autodev.log").read_text()
     assert proc.returncode == 3
@@ -1279,10 +1382,9 @@ def test_a_codex_driver_holds_the_same_flock_and_gate_guards(tmp_path):
         pytest.skip("bash not available")
     base = tmp_path / "gate"
     base.mkdir()
-    project, driver, home, argv_file = _mk_codex_harness(base)
-    green = home / ".local" / "bin" / "conductor"
-    green.write_text("#!/bin/sh\nexit 0\n")  # done-gate green -> no-op fire
-    os.chmod(green, 0o755)
+    project, driver, home, argv_file, conductor = _mk_codex_harness(base)
+    conductor.write_text("#!/bin/sh\nexit 0\n")  # done-gate green -> no-op fire
+    os.chmod(conductor, 0o755)
     proc = _fire_driver(driver, home)
     assert proc.returncode == 0
     assert not argv_file.exists()

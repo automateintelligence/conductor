@@ -527,3 +527,55 @@ def test_cli_install_passes_the_host_through(tmp_path, monkeypatch):
         == 0
     )
     assert runhost.resolve(root) == "codex"
+
+
+def test_install_without_a_host_records_the_one_it_actually_rendered(
+    tmp_path, monkeypatch
+):
+    """An unrecorded run is the state every pre-A1 run is in, and leaving it unrecorded is
+    what let the recording and the installed script disagree. Install writes down the host it
+    just rendered — `claude` here, unchanged behaviour, now durable instead of implicit."""
+    from conductor.hosts import runhost
+
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    proj, root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    assert not os.path.exists(runhost.host_file(root))
+    assert driver.install(str(proj), str(wt)) == 0
+    assert runhost.recorded(root) == "claude"
+
+
+def test_install_without_a_host_persists_the_operator_override(tmp_path, monkeypatch):
+    """`$CONDUCTOR_HOST` steers the RENDER, so it has to steer the RECORD too. Rendering a
+    codex driver while recording nothing leaves the next reconcile — which runs without that
+    variable — regenerating a claude driver over it."""
+    from conductor.hosts import runhost
+
+    proj, root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
+    assert driver.install(str(proj), str(wt)) == 0
+    monkeypatch.delenv("CONDUCTOR_HOST")
+    assert runhost.recorded(root) == "codex"
+
+
+def test_an_ambient_override_never_moves_a_run_that_already_recorded_a_host(
+    tmp_path, monkeypatch
+):
+    """The re-install invariant, under the one input that could break it: a stray
+    `CONDUCTOR_HOST` in the operator's shell must not repoint a live run's durable host."""
+    from conductor.hosts import runhost
+
+    proj, root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    runhost.record(root, "claude")
+    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
+    assert driver.install(str(proj), str(wt)) == 0
+    monkeypatch.delenv("CONDUCTOR_HOST")
+    assert runhost.recorded(root) == "claude"

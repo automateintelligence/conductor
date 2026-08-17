@@ -45,18 +45,30 @@ def _validated(host_id: str, *, source: str) -> str:
     return host_id
 
 
+def recorded(project_root: str) -> str | None:
+    """What ``<project>/.conductor/host`` says, or ``None`` when nothing is recorded.
+
+    Separate from ``resolve`` because two callers need to tell "this run has no host yet" apart
+    from "this run is claude", and ``resolve`` deliberately cannot: it answers ``claude`` for
+    both. ``driver.install`` uses the distinction to leave a live run's host alone while still
+    writing one down for a run that has none — collapsing the two is how an ambient
+    ``$CONDUCTOR_HOST`` in an operator's shell would repoint a running project.
+    """
+    path = host_file(project_root)
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read().strip()
+    except OSError:
+        return None
+    return _validated(raw, source=path)
+
+
 def resolve(project_root: str) -> str:
     """The host id this project's run launches. Never returns an unsupported host."""
     override = os.environ.get(HOST_ENV)
     if override is not None and override.strip():
         return _validated(override.strip(), source=f"${HOST_ENV}")
-    path = host_file(project_root)
-    try:
-        with open(path, encoding="utf-8") as f:
-            recorded = f.read().strip()
-    except OSError:
-        return DEFAULT_HOST
-    return _validated(recorded, source=path)
+    return recorded(project_root) or DEFAULT_HOST
 
 
 def record(project_root: str, host_id: str) -> str:

@@ -167,12 +167,22 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    call.** Current CLI builds silently ignore `durable: true`: the response says "Session-only
    (not written to disk…)" and no `scheduled_tasks.json` appears (verified live 2026-07-02). Do
    NOT gate the OS fallback on judging that response — for an unattended run ALWAYS run
-   `conductor driver install --worktree <run-worktree>` (from the repo; project defaults to
-   `CONDUCTOR_HOME`/cwd), then `conductor driver status` to **verify durability** and surface
-   recent failed fires. `driver install` writes the resume script (via `conductor resume-script
-   write`, respecting its inline-owner-env no-clobber guard) AND the marker-tagged crontab lines
-   (via `install-cron`) in one tested step; `driver status` exits non-zero unless a durable
-   driver exists (crontab marker or a matching scheduled task) with a clean recent log tail.
+   `conductor driver install --worktree <run-worktree> --host <this-host>` (from the repo;
+   project defaults to `CONDUCTOR_HOME`/cwd), then `conductor driver status` to **verify
+   durability** and surface recent failed fires. `driver install` writes the resume script (via
+   `conductor resume-script write`, respecting its inline-owner-env no-clobber guard) AND the
+   marker-tagged crontab lines (via `install-cron`) in one tested step; `driver status` exits
+   non-zero unless a durable driver exists (crontab marker or a matching scheduled task) with a
+   clean recent log tail.
+   - **`--host` is `claude` or `codex`, and it is YOUR OWN id — you are the host** executing
+     this skill. State it; do not omit it and do not make the CLI guess. Nothing below this
+     point can work it out: `driver install` runs as a subprocess, Claude Code exports
+     `CLAUDECODE`/`CLAUDE_PLUGIN_ROOT` but the Codex ground truth records no exported
+     equivalent, so "neither variable" is indistinguishable from a plain shell. An omitted
+     `--host` therefore leaves the run on the legacy `claude` default — which on a Codex machine
+     installs a driver that fires an agent that is not there, and logs nothing about it. The
+     recorded answer lands in `<main-root>/.conductor/host` and every later fire, preflight,
+     plan-lint and merge-gate reads it from there.
    - **The resume driver is GENERATED mechanically — never hand-write it.** (`conductor
      resume-script write --project <main-root> --worktree <run-worktree> --out
      <main-root>/.conductor/resume-autodev.sh` is exactly what `driver install` runs;
