@@ -13,7 +13,10 @@ import os
 import shlex
 import subprocess
 
+import pytest
+
 from conductor import driver, resume_script
+from conductor.hosts.base import UnknownHost
 
 # ---- fixtures ----------------------------------------------------------------
 
@@ -24,9 +27,8 @@ def _now() -> str:
 
 def _ago(hours: float) -> str:
     return (
-        (datetime.datetime.now().astimezone() - datetime.timedelta(hours=hours))
-        .isoformat(timespec="seconds")
-    )
+        datetime.datetime.now().astimezone() - datetime.timedelta(hours=hours)
+    ).isoformat(timespec="seconds")
 
 
 def _mk_project(tmp):
@@ -240,7 +242,9 @@ def test_status_old_failures_outside_window_stay_zero(tmp_path, monkeypatch):
 
 def test_status_recent_hours_env_narrows_the_window(tmp_path, monkeypatch):
     proj = _durable(tmp_path, monkeypatch)
-    (proj / ".conductor" / "resume-autodev.log").write_text(f"{_ago(2)} fire-end rc=3\n")
+    (proj / ".conductor" / "resume-autodev.log").write_text(
+        f"{_ago(2)} fire-end rc=3\n"
+    )
     monkeypatch.setenv("CONDUCTOR_DRIVER_RECENT_HOURS", "1")
     assert driver.status(str(proj)) == 0
     monkeypatch.setenv("CONDUCTOR_DRIVER_RECENT_HOURS", "3")
@@ -362,3 +366,164 @@ def test_recent_hours_env_nonfinite_degrades_to_default(tmp_path, monkeypatch):
     for bad in ("nan", "inf", "-5", "0"):
         monkeypatch.setenv("CONDUCTOR_DRIVER_RECENT_HOURS", bad)
         assert driver.status(str(proj)) == 1  # default window still reports the failure
+
+
+# ---- A1: durability evidence is the RUN'S host's, not always Claude's --------------
+
+
+def _record_host(proj, host_id):
+    from conductor.hosts import runhost
+
+    return runhost.record(str(proj), host_id)
+
+
+def test_a_claude_runs_scheduled_task_still_counts_as_durable(
+    tmp_path, monkeypatch, capsys
+):
+    """The existing leg, unchanged, on the host that has it."""
+    proj, root = _mk_project(tmp_path)
+    _record_host(proj, "claude")
+    _stub_crontab(tmp_path, monkeypatch, [])
+    _isolate_scheduled_tasks(
+        tmp_path, monkeypatch, [{"prompt": "/conductor:autodev", "cwd": root}]
+    )
+    assert driver.status(str(proj)) == 0
+    assert "scheduled task" in capsys.readouterr().out
+
+
+def test_a_codex_run_does_not_read_the_claude_harness_file_to_decide_durability(
+    tmp_path, monkeypatch, capsys
+):
+    """`scheduled_tasks.json` is Claude's harness file. A Codex run that happens to sit on a
+    machine where Claude has a task registered is NOT durably driven by it — nothing fires
+    that task's prompt into codex. Counting it would false-green the one signal an operator
+    has that an unattended run will actually resume."""
+    proj, root = _mk_project(tmp_path)
+    _record_host(proj, "codex")
+    _stub_crontab(tmp_path, monkeypatch, [])
+    _isolate_scheduled_tasks(
+        tmp_path, monkeypatch, [{"prompt": "/conductor:autodev", "cwd": root}]
+    )
+    assert driver.status(str(proj)) == 1
+    out = capsys.readouterr().out
+    assert "not durable" in out.lower()
+    assert "scheduled_tasks.json" not in out
+
+
+def test_a_codex_run_is_durable_on_the_crontab_marker_alone(
+    tmp_path, monkeypatch, capsys
+):
+    proj, root = _mk_project(tmp_path)
+    _record_host(proj, "codex")
+    _stub_crontab(tmp_path, monkeypatch, _marker_lines(root))
+    _isolate_scheduled_tasks(tmp_path, monkeypatch)
+    assert driver.status(str(proj)) == 0
+    assert "crontab" in capsys.readouterr().out
+
+
+def test_the_not_durable_message_names_only_legs_this_host_actually_has(
+    tmp_path, monkeypatch, capsys
+):
+    proj, _root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    _isolate_scheduled_tasks(tmp_path, monkeypatch)
+    _record_host(proj, "claude")
+    driver.status(str(proj))
+    assert "scheduled_tasks.json" in capsys.readouterr().out
+    _record_host(proj, "codex")
+    driver.status(str(proj))
+    codex_out = capsys.readouterr().out
+    assert "scheduled_tasks.json" not in codex_out
+    assert "conductor-autodev" in codex_out  # the marker it DID look for is still named
+
+
+# ---- A1: install records the host so the fire spawns it ----------------------------
+
+
+def test_install_records_the_requested_host_and_writes_that_hosts_driver(
+    tmp_path, monkeypatch
+):
+    from conductor.hosts import runhost
+
+    proj, root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    assert driver.install(str(proj), str(wt), host="codex") == 0
+    assert runhost.resolve(root) == "codex"
+    script = (proj / ".conductor" / "resume-autodev.sh").read_text()
+    assert 'CODEX_BIN="$(command -v codex || true)"' in script
+    assert "command -v claude" not in script
+
+
+def test_install_without_a_host_leaves_an_existing_recording_alone(
+    tmp_path, monkeypatch
+):
+    """Re-installing a driver must not silently move a live run onto another host."""
+    from conductor.hosts import runhost
+
+    proj, root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    runhost.record(root, "codex")
+    assert driver.install(str(proj), str(wt)) == 0
+    assert runhost.resolve(root) == "codex"
+
+
+def test_install_refuses_an_unsupported_host_before_writing_anything(
+    tmp_path, monkeypatch, capsys
+):
+    """Both entry points refuse, and neither leaves a driver or a cron line behind. Falling
+    back to a host the operator did not ask for is the one outcome that must not happen."""
+    proj, _root = _mk_project(tmp_path)
+    written = _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+
+    # the argv boundary: a closed choice set, named in the error
+    with pytest.raises(SystemExit) as excinfo:
+        driver.main(
+            [
+                "install",
+                "--project",
+                str(proj),
+                "--worktree",
+                str(wt),
+                "--host",
+                "gemini",
+            ]
+        )
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "gemini" in err and "claude" in err and "codex" in err
+
+    # the programmatic boundary: refused before any write
+    with pytest.raises(UnknownHost):
+        driver.install(str(proj), str(wt), host="gemini")
+    assert not (proj / ".conductor" / "resume-autodev.sh").exists()
+    assert not written.exists()
+
+
+def test_cli_install_passes_the_host_through(tmp_path, monkeypatch):
+    from conductor.hosts import runhost
+
+    proj, root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    assert (
+        driver.main(
+            [
+                "install",
+                "--project",
+                str(proj),
+                "--worktree",
+                str(wt),
+                "--host",
+                "codex",
+            ]
+        )
+        == 0
+    )
+    assert runhost.resolve(root) == "codex"

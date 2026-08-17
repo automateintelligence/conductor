@@ -28,6 +28,7 @@ import subprocess
 import sys
 
 from conductor import resume_script
+from conductor.hosts import base, runhost
 
 _RECENT_HOURS_ENV = "CONDUCTOR_DRIVER_RECENT_HOURS"
 _RECENT_HOURS_DEFAULT = 24.0
@@ -52,20 +53,18 @@ def _crontab_lines() -> list[str]:
     return proc.stdout.splitlines()
 
 
-def _scheduled_tasks_file() -> str:
-    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(
-        os.path.expanduser("~"), ".claude"
-    )
-    return os.path.join(cfg, "scheduled_tasks.json")
-
-
-def _scheduled_task_matches(root: str) -> bool:
+def _scheduled_task_matches(root: str, path: str | None) -> bool:
     """Does a harness scheduled task durably drive THIS project? An entry counts only
     when its prompt is /conductor:autodev AND its cwd/project field points at `root`.
     The file merely EXISTING is not durability evidence — a stale or unrelated task
-    would false-green the health signal. Unparseable/unmatchable → False, fail-closed."""
-    path = _scheduled_tasks_file()
-    if not os.path.isfile(path):
+    would false-green the health signal. Unparseable/unmatchable → False, fail-closed.
+
+    `path` is the RUN'S host's scheduled-task file, or None for a host that has no such
+    mechanism. None means the leg does not exist for this run — not that it is empty. A Codex
+    run sitting on a machine where Claude has a task registered is not driven by that task:
+    nothing fires its prompt into codex, so counting it would false-green the only signal an
+    operator has that an unattended run will actually resume."""
+    if not path or not os.path.isfile(path):
         return False
     try:
         with open(path, encoding="utf-8") as f:
@@ -142,7 +141,9 @@ def _recent_failures(lines: list[str]) -> list[str]:
         if not line.strip():
             continue
         m = _FIRE_END_RE.search(line)
-        failing = "driver-unresolved" in line or (m is not None and int(m.group(1)) != 0)
+        failing = "driver-unresolved" in line or (
+            m is not None and int(m.group(1)) != 0
+        )
         if failing and _is_recent(line, now, hours):
             failures.append(line)
     return failures
@@ -155,18 +156,25 @@ def status(project: str) -> int:
     driver with no fires yet — healthy."""
     root = resume_script.main_root(project)
     marker = resume_script.cron_marker(root)
+    tasks_file = runhost.adapter(root).scheduled_tasks_file()
     # An ACTIVE crontab entry only: a commented-out/disabled line that still carries
     # the marker is not a durable driver and must not false-green the signal.
-    if any(
-        marker in ln and not ln.lstrip().startswith("#") for ln in _crontab_lines()
-    ):
+    if any(marker in ln and not ln.lstrip().startswith("#") for ln in _crontab_lines()):
         leg = "crontab marker"
-    elif _scheduled_task_matches(root):
+    elif _scheduled_task_matches(root, tasks_file):
         leg = "scheduled task"
     else:
+        # Name only the legs this host actually has. Reporting a missing
+        # scheduled_tasks.json entry to a Codex operator sends them looking for a file their
+        # host never reads.
+        missing = f"no crontab line carrying '{marker}'"
+        if tasks_file:
+            missing += (
+                f" and no scheduled_tasks.json entry driving {root} "
+                f"with /conductor:autodev"
+            )
         print(
-            f"driver: NOT durable — no crontab line carrying '{marker}' and no "
-            f"scheduled_tasks.json entry driving {root} with /conductor:autodev.\n"
+            f"driver: NOT durable — {missing}.\n"
             f"Install one: conductor driver install --worktree <run-worktree>"
         )
         return 1
@@ -189,11 +197,17 @@ def status(project: str) -> int:
     return 0
 
 
-def install(project: str, worktree: str) -> int:
+def install(project: str, worktree: str, host: str | None = None) -> int:
     """The fail-closed default for an unattended run — no durability judgment call:
     write the resume script (through `resume-script write`, so its inline-owner-env
-    no-clobber guard is respected) and then the marker-tagged crontab lines."""
+    no-clobber guard is respected) and then the marker-tagged crontab lines.
+
+    `host` records which host this run's fires spawn, BEFORE the script is rendered from that
+    recording. Omitting it leaves any existing recording alone: a re-install must never move a
+    live run onto another host as a side effect."""
     root = resume_script.main_root(project)
+    if host:
+        runhost.record(root, host)
     out = os.path.join(root, ".conductor", "resume-autodev.sh")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     rc = resume_script.main(
@@ -215,6 +229,13 @@ def main(argv: list[str] | None = None) -> int:
         "--worktree", required=True, help="run worktree the fires resume in"
     )
     sp.add_argument(
+        "--host",
+        default=None,
+        choices=base.HOST_IDS,
+        help="record which host the fires spawn (default: leave the run's recording alone; "
+        "an unrecorded run is claude)",
+    )
+    sp.add_argument(
         "--project",
         default=None,
         help="any path inside the repo (default: CONDUCTOR_HOME, else cwd)",
@@ -225,16 +246,19 @@ def main(argv: list[str] | None = None) -> int:
     project = args.project or os.environ.get("CONDUCTOR_HOME") or os.getcwd()
     try:
         if args.cmd == "install":
-            return install(project, args.worktree)
+            return install(project, args.worktree, args.host)
         return status(project)
     except subprocess.CalledProcessError as e:
         detail = (e.stderr or "").strip()
-        print(
-            f"cannot resolve main root for {project}: {detail or e}", file=sys.stderr
-        )
+        print(f"cannot resolve main root for {project}: {detail or e}", file=sys.stderr)
         return 1
     except resume_script.CrontabReadError as e:
         print(str(e), file=sys.stderr)
+        return 1
+    except base.UnknownHost as e:
+        # A typo'd or unsupported host: name it, never traceback, and never fall back to a
+        # host the operator did not ask for.
+        print(f"driver {args.cmd} failed: {e}", file=sys.stderr)
         return 1
     except OSError as e:
         # e.g. `crontab` binary missing on the install path — name it, never traceback.
