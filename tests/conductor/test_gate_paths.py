@@ -407,11 +407,47 @@ def test_a_trailing_slash_on_a_configured_root_is_accepted(monkeypatch):
     assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST}\n") == _DUAL_HOST
 
 
+# --- roots are normalised BEFORE dedup, so equivalent spellings are one root ------------
+#
+# Dedup was `if root not in roots`, a comparison of raw strings, so `docs/specs` and
+# `./docs/specs` both survived as separate roots. They name ONE directory, so the no-goal glob
+# then found the same file through two lexical paths and `freeze` raised
+# `AmbiguousAssertionsSource` listing that single relative path twice — an unresolvable
+# refusal, since there is no second file to delete or reconcile.
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "docs/specs:./docs/specs",  # a `.` prefix on one spelling
+        "docs/specs:docs/specs",  # the exact same spelling twice
+        "docs/specs:docs/specs/",  # trailing slash on one
+        "docs/specs:docs/./specs",  # an interior `.` segment
+        "docs/specs:docs//specs",  # a doubled separator
+    ],
+)
+def test_equivalent_root_spellings_collapse_to_one_root(monkeypatch, value):
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", value)
+    assert paths.spec_roots() == ("docs/specs",)
+
+
+def test_a_normalised_root_still_matches_prose_spelled_plainly(monkeypatch):
+    # normalising must make the odd spelling WORK, not merely deduplicate it away
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "./docs/specs")
+    assert paths.spec_roots() == ("docs/specs",)
+    assert paths.spec_from_goal_text("Implement docs/specs/alpha.md\n") == (
+        "docs/specs/alpha.md"
+    )
+
+
 @pytest.mark.parametrize(
     "value",
     [
         "/etc/specs",  # absolute: roots are repo-relative and get joined onto repo_root
         "docs/../../specs",  # traversal out of the repo
+        # normpath folds this to `.` — the `..` check MUST run before normalisation, or
+        # normalising would launder the traversal into a silently-accepted root
+        "docs/specs/../..",
         os.pathsep,  # explicitly configured, names nothing
     ],
 )

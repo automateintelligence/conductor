@@ -763,6 +763,19 @@ def test_a_bracket_metacharacter_in_a_root_matches_no_directory(tmp_path, monkey
     assert "sources" not in doc
 
 
+def test_two_spellings_of_one_root_do_not_manufacture_ambiguity(tmp_path, monkeypatch):
+    # `docs/specs` and `./docs/specs` are ONE directory holding ONE candidate; the glob used
+    # to find it twice and refuse with the same relative path listed as both candidates —
+    # a refusal the operator cannot act on, since there is no second file to reconcile
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/specs:./docs/specs")
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/fixture-spec.md.assertions.md"]
+    assert doc["sources_via"] == "glob"
+
+
 def test_a_root_whose_directory_name_really_contains_a_bracket_still_resolves(
     tmp_path, monkeypatch
 ):
