@@ -105,8 +105,13 @@ def _run_branch_slug(root: str) -> str | None:
 # repointed the gate slug and the frozen assertions source together — two independent
 # declarations that could not disagree, and so could not catch it. One resolver serves both.
 
-# GREEDY to the token's LAST `.md`, and the token ends at markdown punctuation as well as at
-# whitespace/quotes. Both halves are load-bearing.
+# The directory the prose fallback (and `freeze`'s no-goal glob) looks in, when
+# `$CONDUCTOR_SPEC_ROOTS` says nothing. Exactly the literal that was hardcoded before the
+# variable existed, so an unconfigured project is bit-for-bit unchanged.
+DEFAULT_SPEC_ROOTS = ("docs/specs",)
+
+# the path token's tail, shared by every root: greedy to the token's LAST `.md`, ending at
+# markdown punctuation as well as at whitespace/quotes. Both halves are load-bearing.
 #
 # Lazy stopped at the FIRST `.md`, so `docs/specs/foo.assertions.md.md` matched only as far as
 # `docs/specs/foo.assertions.md` and the `_ASSERTIONS_SUFFIX` check below then discarded that
@@ -117,18 +122,84 @@ def _run_branch_slug(root: str) -> str | None:
 # Greedy over an unrestricted class overshoots the other way: `[docs/specs/a.md](docs/specs/a.md)`
 # has no whitespace between the two, so one match would swallow `](` and yield
 # `docs/specs/a.md](docs/specs/a.md` as the spec. Link/bracket punctuation ends a path token.
-_SPEC_PATH_RE = re.compile(r"docs/specs/[^\s`'\"()\[\]<>]+\.md")
+_SPEC_PATH_TAIL = r"/[^\s`'\"()\[\]<>]+\.md"
 # the done-definition sibling spec-craft writes next to a spec — never a spec itself
 _ASSERTIONS_SUFFIX = ".assertions.md"
 # an explicit declaration line, e.g. `spec: docs/specs/foo.md`
 #
-# The field's value is deliberately NOT constrained to the `docs/specs/*.md` shape. The prose
-# fallback above hardcodes that root, so this field is the ONLY way a project that keeps specs
-# under `spec/` or `docs/requirements/` can name one at all. Narrowing it to match the fallback
-# would close the sole escape hatch — do not "fix" it back.
+# The field's value is deliberately NOT constrained to any configured root. The prose fallback
+# above only ever scans `spec_roots()`, so this field is the ONLY way a goal can name a spec in
+# a directory the project has not configured — and it must keep working with the variable unset,
+# which is how most projects run. Narrowing it to match the fallback would close the sole escape
+# hatch — do not "fix" it back.
 _SPEC_FIELD_RE = re.compile(
     r"^[ \t]*spec:[ \t]*(\S+)[ \t]*$", re.IGNORECASE | re.MULTILINE
 )
+
+
+class InvalidSpecRoots(ValueError):
+    """``$CONDUCTOR_SPEC_ROOTS`` is set to something that cannot name a spec directory. Its own
+    named error, not a bare ``ValueError``, so ``freeze.main`` can refuse with a greppable
+    message instead of ending `conductor gate freeze` in a traceback."""
+
+
+def spec_roots() -> tuple[str, ...]:
+    """The repo-relative directories the goal's PROSE fallback scans for specs, and that
+    ``freeze``'s no-goal glob searches for ``*.assertions.md``. ``DEFAULT_SPEC_ROOTS`` when
+    ``$CONDUCTOR_SPEC_ROOTS`` is unset or empty.
+
+    A LIST, not a single root, because one repo legitimately holds two: conductor's own specs
+    are split across ``docs/specs/`` (self-enforcement, upgrade-survival) and
+    ``docs/superpowers/specs/`` (the dual-host design), both live at once, so "move them all
+    under one root" is not an available answer. Format follows ``$CONDUCTOR_PLUGIN_DIRS`` —
+    ``os.pathsep``-separated, empty segments dropped.
+
+    Setting the variable REPLACES the default rather than extending it. An unremovable
+    ``docs/specs`` would let a stale tree manufacture ``AmbiguousSpecReference`` against specs
+    the run does not care about, with no way for the project to scope it out; a repo that wants
+    both lists both.
+
+    Read per call, never cached at import, because tests (and `/conductor:start`) set it after
+    this module is imported — the same reason ``merge_gate`` re-reads its variables per call.
+
+    Refuses (``InvalidSpecRoots``) an ABSOLUTE root — roots are joined onto the project root and
+    matched against repo-relative prose, so an absolute one silently matches nothing — a root
+    containing a ``..`` segment, which would glob outside the repo, and a value that is set but
+    names no root at all (e.g. just separators), which is a typo rather than a request to
+    disable the prose fallback."""
+    raw = os.environ.get("CONDUCTOR_SPEC_ROOTS")
+    if not raw:
+        return DEFAULT_SPEC_ROOTS
+    roots: list[str] = []
+    for part in raw.split(os.pathsep):
+        root = part.strip().rstrip("/")
+        if not root:
+            continue
+        if os.path.isabs(root) or root.startswith("~"):
+            raise InvalidSpecRoots(
+                f"invalid-spec-roots: CONDUCTOR_SPEC_ROOTS entry {part!r} is absolute; "
+                "roots are relative to the project root (e.g. 'docs/specs')"
+            )
+        if ".." in root.split("/"):
+            raise InvalidSpecRoots(
+                f"invalid-spec-roots: CONDUCTOR_SPEC_ROOTS entry {part!r} escapes the "
+                "project root; roots may not contain a '..' segment"
+            )
+        if root not in roots:
+            roots.append(root)
+    if not roots:
+        raise InvalidSpecRoots(
+            f"invalid-spec-roots: CONDUCTOR_SPEC_ROOTS is set to {raw!r} but names no "
+            "directory; unset it to use the default 'docs/specs'"
+        )
+    return tuple(roots)
+
+
+def _spec_path_re() -> re.Pattern[str]:
+    """The prose-scan pattern for the CURRENT ``spec_roots()``. Built per call for the same
+    reason ``spec_roots`` is read per call."""
+    alternation = "|".join(re.escape(root) for root in spec_roots())
+    return re.compile(f"(?:{alternation}){_SPEC_PATH_TAIL}")
 
 
 class AmbiguousSpecReference(ValueError):
@@ -142,9 +213,10 @@ def spec_from_goal_text(text: str) -> str | None:
     """THE spec a goal declares, or None when it names none.
 
     An explicit ``spec: <path>`` line wins outright — that is how a goal whose prose mentions
-    several specs states which one is the subject. Otherwise fall back to the historical
-    ``docs/specs/<name>.md`` prose scan, which stays exact for the one-spec goals already in
-    the wild. Two or more DISTINCT paths with no single declaration raise
+    several specs states which one is the subject. Otherwise fall back to the prose scan over
+    ``spec_roots()`` (``docs/specs/<name>.md`` unless the project configured otherwise), which
+    stays exact for the one-spec goals already in the wild. Two or more DISTINCT paths with no
+    single declaration raise
     ``AmbiguousSpecReference``; the same path repeated is not ambiguous.
 
     EVERY ``spec:`` field is collected, not just the first. Taking the leftmost here would
@@ -166,7 +238,7 @@ def spec_from_goal_text(text: str) -> str | None:
     if fields:
         return fields[0]
     found: list[str] = []
-    for hit in _SPEC_PATH_RE.finditer(text):
+    for hit in _spec_path_re().finditer(text):
         path = hit.group(0)
         if path.endswith(_ASSERTIONS_SUFFIX):
             # A spec's `.assertions.md` sibling is its DONE-DEFINITION, not a second spec, and
