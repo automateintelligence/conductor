@@ -171,9 +171,22 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      `docs/reviews/2026-07-05-conductor-tier-b-driver-robustness.md`). It fires `claude -p
      "/conductor:autodev"` from the RUN WORKTREE (never the owner's checkout; autodev, not start —
      a headless one-shot must do a phase, not register a cron that dies with it), guarding: (a)
-     exit if a claude process already holds the worktree/project cwd (never double-drive); (b)
-     exit once `conductor assert run --level spec` is green; (c) `flock -n
-     <project>/.conductor/resume.lock` for the whole fire.
+     `flock -n <project>/.conductor/resume.lock` held for the whole fire — the ONLY exclusion
+     between OS-driver fires; (b) exit once `conductor assert run --level spec` is green. Both
+     no-op paths log `skip reason=lock-held` / `skip reason=gate-green`, so a blocked run is
+     never silent. Contention is the ONLY flock failure that skips: locking that is broken or
+     unavailable (no `flock` binary, unopenable lock path, a filesystem that cannot lock) is
+     fail-loud — `lock-unavailable rc=<status>`, exit 6 — because it never clears on its own,
+     and `driver status` names it like `driver-unresolved`.
+     - **Only Tier B contends on that lock. Neither the in-session `CronCreate` tick registered
+       above nor a hand-run `/conductor:autodev` takes that lock**, so a Tier-A tick and a
+       Tier-B fire can run the same run branch at the same time, and nothing detects it. The
+       driver used to carry a `pgrep -f 'claude'` + `/proc/<pid>/cwd` guard aimed at this; it
+       never worked (it matched the fire's own process under any path containing `claude` —
+       i.e. every project under `~/.claude/` — and matched nothing on a Codex host) and was
+       removed rather than retuned. Anything that must exclude a driver has to contend on the
+       same lock; do not reintroduce process-name matching. If you are driving a run by hand,
+       `conductor driver status` / the crontab is the thing to check first.
    - **Machine/run-specific env goes in `<main-root>/.conductor/resume-env.sh`** (gitignored),
      which the driver sources — NEVER inline in the driver, so regeneration can't clobber it. Put
      the owner-owned `CONDUCTOR_MERGE_VERIFY` there (plus any dev-mode `CONDUCTOR_PLUGIN_DIRS` or
@@ -246,10 +259,16 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    `experiments/E5-end-to-end/recovery.md`).
    **Tell the user one limit:** recurring in-session crons **auto-expire after 7 days** —
    re-invoke `/conductor:start` to extend a longer run (the Tier-B heartbeat does this itself).
-   **Tell the user one gap:** when you resume from the owner's main checkout with a live session
-   open, the Tier-B driver's guard (a) no-ops on every fire (a claude process holds the cwd), so
-   the run makes **zero headless progress until this session goes idle or closes**. Say so
-   explicitly rather than leaving the owner to assume it is progressing.
+   **Tell the user one gap — and note it INVERTED, so do not repeat the old warning:** a live
+   session no longer blocks headless progress. The driver's only exclusion is the flock, and it
+   is taken by OS-driver fires ONLY, so the two tiers now **overlap** instead of one shutting the
+   other out: the in-session `CronCreate` tick and a cron fire can be executing the same phase on
+   the same run branch at the same time, and nothing detects it. Tell the owner plainly that one
+   run should be driven by one tier — leave the session's cron to drive while they are working in
+   it, or close the session and let Tier B drive — and that `conductor driver status` reports
+   which fires actually ran (it fails when the log shows a stranded lock or a fire that never
+   ended). Do NOT tell them a live session makes the run wait; that was the deleted
+   `pgrep`/`/proc` guard's behaviour, and it never worked even when it was there.
 7. **(Phase 2 only)** start the dispatcher loop — the supervisor that caps concurrency and assigns
    eligible phases to parallel workers. Single-loop needs no cap (`CronCreate` can't overlap fires);
    controlled parallelism is the dispatcher's job, not the cron cadence.

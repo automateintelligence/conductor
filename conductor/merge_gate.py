@@ -289,7 +289,10 @@ if __name__ == "__main__":
     try:
         pr_num = int(sys.argv[1])
     except ValueError:
-        print(f"usage: conductor merge-gate <pr> — expected an integer, got {sys.argv[1]!r}", file=sys.stderr)
+        print(
+            f"usage: conductor merge-gate <pr> — expected an integer, got {sys.argv[1]!r}",
+            file=sys.stderr,
+        )
         sys.exit(64)
     try:
         repo = _resolve_repo()

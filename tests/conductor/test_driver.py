@@ -13,6 +13,8 @@ import os
 import shlex
 import subprocess
 
+import pytest
+
 from conductor import driver, resume_script
 
 # ---- fixtures ----------------------------------------------------------------
@@ -24,9 +26,8 @@ def _now() -> str:
 
 def _ago(hours: float) -> str:
     return (
-        (datetime.datetime.now().astimezone() - datetime.timedelta(hours=hours))
-        .isoformat(timespec="seconds")
-    )
+        datetime.datetime.now().astimezone() - datetime.timedelta(hours=hours)
+    ).isoformat(timespec="seconds")
 
 
 def _mk_project(tmp):
@@ -203,6 +204,28 @@ def test_status_recent_driver_unresolved_flips_nonzero_and_is_named(
     assert bad in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "lock-unavailable rc=127 lock=/p/.conductor/resume.lock",
+        "env-unsafe mode=666 /p/.conductor/resume-env.sh",
+        "worktree-missing /p/.worktrees/run-x",
+    ],
+)
+def test_status_names_every_fail_loud_exit_the_driver_can_log(
+    tmp_path, monkeypatch, capsys, tag
+):
+    """`driver-unresolved` was the only fail-loud tag status recognised, so the driver's
+    other refusals-to-fire — locking broken or unavailable, a world-writable env file, a
+    missing worktree — exited non-zero into a log that reported "recent fires clean". Every
+    tag the template can print has to be a tag status reports."""
+    proj = _durable(tmp_path, monkeypatch)
+    bad = f"{_now()} {tag}"
+    (proj / ".conductor" / "resume-autodev.log").write_text(f"{bad}\n")
+    assert driver.status(str(proj)) == 1
+    assert bad in capsys.readouterr().out
+
+
 def test_status_recent_nonzero_fire_end_flips_nonzero_and_is_named(
     tmp_path, monkeypatch, capsys
 ):
@@ -240,7 +263,9 @@ def test_status_old_failures_outside_window_stay_zero(tmp_path, monkeypatch):
 
 def test_status_recent_hours_env_narrows_the_window(tmp_path, monkeypatch):
     proj = _durable(tmp_path, monkeypatch)
-    (proj / ".conductor" / "resume-autodev.log").write_text(f"{_ago(2)} fire-end rc=3\n")
+    (proj / ".conductor" / "resume-autodev.log").write_text(
+        f"{_ago(2)} fire-end rc=3\n"
+    )
     monkeypatch.setenv("CONDUCTOR_DRIVER_RECENT_HOURS", "1")
     assert driver.status(str(proj)) == 0
     monkeypatch.setenv("CONDUCTOR_DRIVER_RECENT_HOURS", "3")
@@ -256,6 +281,144 @@ def test_status_unparseable_timestamp_counts_as_recent(tmp_path, monkeypatch, ca
     )
     assert driver.status(str(proj)) == 1
     assert "driver-unresolved" in capsys.readouterr().out
+
+
+# ---- the skip taxonomy: a run that skips EVERY fire is not "clean" -----------------
+#
+# Every line below is a line the driver really emits. `_recent_failures` only ever looked
+# for lines that announce their own failure, so a run permanently blocked on a stranded
+# lock — or a fire that hung and never came back — reported "recent fires clean". That is
+# the same silent-block class the driver's own `skip reason=` taxonomy exists to remove,
+# one level up in the tool the operator actually reads.
+
+
+def _log(proj, *lines: str) -> None:
+    (proj / ".conductor" / "resume-autodev.log").write_text(
+        "".join(f"{ln}\n" for ln in lines)
+    )
+
+
+def test_status_reports_a_stranded_lock_when_fires_skip_with_no_fire_in_flight(
+    tmp_path, monkeypatch, capsys
+):
+    """The signature of a leaked lock descriptor: the last fire ENDED (rc=0, healthy on its
+    face), and every heartbeat since skips lock-held. Nothing holds the lock that is running
+    a fire, so the run makes zero headless progress — forever, silently, until now."""
+    proj = _durable(tmp_path, monkeypatch)
+    skips = [
+        f"{_ago(h)} skip reason=lock-held lock=/p/.conductor/resume.lock"
+        for h in (2, 1, 0)
+    ]
+    _log(
+        proj,
+        f"{_ago(3)} fire-start posture=supervised",
+        f"{_ago(3)} fire-end rc=0",
+        *skips,
+    )
+
+    assert driver.status(str(proj)) == 1
+    out = capsys.readouterr().out
+    assert "recent fires clean" not in out
+    assert "lock-held" in out
+    assert skips[-1] in out  # the evidence is NAMED, not just counted
+
+
+def test_status_stays_clean_while_a_long_phase_legitimately_holds_the_lock(
+    tmp_path, monkeypatch, capsys
+):
+    """The anti-cry-wolf case, and the reason a raw lock-held count cannot be the rule: a
+    phase that takes longer than the heartbeat SHOULD make later fires skip lock-held. The
+    log says who holds it — an unmatched `fire-start` — so this is healthy deferral."""
+    proj = _durable(tmp_path, monkeypatch)
+    _log(
+        proj,
+        f"{_ago(0.7)} fire-start posture=supervised",
+        f"{_ago(0.4)} skip reason=lock-held lock=/p/.conductor/resume.lock",
+        f"{_ago(0.1)} skip reason=lock-held lock=/p/.conductor/resume.lock",
+    )
+
+    assert driver.status(str(proj)) == 0
+    assert "recent fires clean" in capsys.readouterr().out
+
+
+def test_status_tolerates_a_single_lock_held_skip_after_a_completed_fire(
+    tmp_path, monkeypatch
+):
+    """A heartbeat CAN legitimately land in the window between a fire taking the lock and
+    printing `fire-start` — the whole spec done-gate runs in between. One skip is that
+    race; a stranded lock produces an unbroken run of them."""
+    proj = _durable(tmp_path, monkeypatch)
+    _log(
+        proj,
+        f"{_ago(1)} fire-start posture=supervised",
+        f"{_ago(1)} fire-end rc=0",
+        f"{_now()} skip reason=lock-held lock=/p/.conductor/resume.lock",
+    )
+
+    assert driver.status(str(proj)) == 0
+
+
+def test_status_reports_a_fire_start_the_lock_was_reacquired_over(
+    tmp_path, monkeypatch, capsys
+):
+    """A `fire-start` with no `fire-end`, followed by evidence the lock was taken AGAIN
+    (another fire-start, or a gate-green skip — both happen only after flock succeeds):
+    that fire died without logging its outcome. `fire-end rc=` never got to run."""
+    proj = _durable(tmp_path, monkeypatch)
+    hung = f"{_ago(2)} fire-start posture=supervised"
+    _log(proj, hung, f"{_now()} skip reason=gate-green")
+
+    assert driver.status(str(proj)) == 1
+    out = capsys.readouterr().out
+    assert "recent fires clean" not in out
+    assert hung in out
+
+
+def test_status_reports_a_fire_in_flight_past_the_stall_window(
+    tmp_path, monkeypatch, capsys
+):
+    """A headless `-p` fire BLOCKED on a permission prompt it cannot answer hangs holding
+    the lock: `fire-start`, then lock-held skips forever, no `fire-end`. Indistinguishable
+    from a long phase except by elapsed time, so time is the discriminator."""
+    proj = _durable(tmp_path, monkeypatch)
+    hung = f"{_ago(9)} fire-start posture=supervised"
+    _log(proj, hung, f"{_now()} skip reason=lock-held lock=/p/.conductor/resume.lock")
+
+    assert driver.status(str(proj)) == 1
+    assert hung in capsys.readouterr().out
+
+
+def test_status_stall_hours_env_widens_the_in_flight_tolerance(tmp_path, monkeypatch):
+    """Same override discipline as the recency window: the operator can widen it for a
+    repo whose phases genuinely run long, and a malformed value degrades to the default."""
+    proj = _durable(tmp_path, monkeypatch)
+    _log(
+        proj,
+        f"{_ago(9)} fire-start posture=supervised",
+        f"{_now()} skip reason=lock-held lock=/p/.conductor/resume.lock",
+    )
+
+    assert driver.status(str(proj)) == 1
+    monkeypatch.setenv("CONDUCTOR_DRIVER_STALL_HOURS", "24")
+    assert driver.status(str(proj)) == 0
+    monkeypatch.setenv("CONDUCTOR_DRIVER_STALL_HOURS", "not-a-number")
+    assert driver.status(str(proj)) == 1
+
+
+def test_status_ignores_a_resolved_stranded_lock_run(tmp_path, monkeypatch):
+    """History, not the current signal: a run of lock-held skips that a later `fire-end`
+    proves is over must not keep failing status forever."""
+    proj = _durable(tmp_path, monkeypatch)
+    _log(
+        proj,
+        f"{_ago(40)} skip reason=lock-held lock=/p/.conductor/resume.lock",
+        f"{_ago(39)} skip reason=lock-held lock=/p/.conductor/resume.lock",
+        f"{_ago(38)} skip reason=lock-held lock=/p/.conductor/resume.lock",
+        f"{_ago(1)} fire-start posture=supervised",
+        f"{_now()} fire-end rc=0",
+    )
+
+    assert driver.status(str(proj)) == 0
 
 
 # ---- install: fail-closed default, no durability judgment -----------------------

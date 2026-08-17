@@ -1,11 +1,13 @@
 """Tier-B resume-driver generator: the runtime-resolution contract that fixes the 2026-07-05
 silent-stall (generation-time-pinned bins that rot on upgrade)."""
 
+import hashlib
 import os
 import re
 import shlex
 import stat
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -14,9 +16,133 @@ from conductor import resume_script as rs
 PROJECT = "/home/u/programming/proj"
 WORKTREE = "/home/u/programming/proj-run-x"
 
+REPO = Path(rs.__file__).resolve().parents[1]
+
 
 def _render():
     return rs.render(PROJECT, WORKTREE)
+
+
+# ---- TEMPLATE_VERSION must name exactly one render ----
+
+# One row per template version, keyed by TEMPLATE_VERSION, valued by a digest of that
+# version's render with its own `# conductor-resume-template: vN` line REMOVED. Removing it
+# is the point: the digest then measures the SUBSTANCE of the template rather than the number
+# that names it, so a bump alone cannot change it and a text change cannot hide behind one.
+#
+# Old rows are kept, not replaced. They are what makes a DOWNGRADE fail with a specific
+# message instead of an anonymous mismatch, and they are the record of which script text each
+# installed driver's marker refers to.
+_TEMPLATE_DIGESTS = {
+    6: "6dfc579d7359c75577824e5531f2cab7b2f2d9e74cd8023fec1c57d56c069707",
+    7: "c063f3f724ca4f420760efa8586ac95a6a3e4894c335d0f2ed85ae77ca6b1226",
+}
+
+
+def _template_body(text: str) -> str:
+    return "\n".join(
+        ln
+        for ln in text.splitlines()
+        if not ln.startswith("# conductor-resume-template: v")
+    )
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_template_version_names_exactly_one_render():
+    """TEMPLATE_VERSION is the ONLY thing that makes an ALREADY-INSTALLED driver regenerate:
+    `verify` calls a script stale when the marker or the text differs, and `/conductor:start`
+    reconcile rewrites it. Ship a template fix without bumping and every existing project keeps
+    executing the script it already has — the fix ships inert, on exactly the machines it was
+    written for.
+
+    Nothing else in the suite notices. Reverting the bump left all 117 focused tests green,
+    because every other test renders fresh text and compares it against itself; only an
+    installed script can tell the difference, and no other test has one.
+
+    WHY A DIGEST AND NOT A NUMBER. `assert TEMPLATE_VERSION == 7` catches the revert and
+    nothing else: it says nothing about whether the template changed, and it must be edited on
+    every bump whether or not anything moved — so it decays into a number someone updates
+    reflexively. The digest table inverts that. It fails on the condition that actually
+    matters (text changed, version did not), and updating it IS the bump, so it cannot be
+    satisfied without making the decision it exists to force. The cost is one manual step per
+    template change — add the new row — and that step is the entire point.
+    """
+    body = _template_body(_render())
+    current = _digest(body)
+
+    assert len(set(_TEMPLATE_DIGESTS.values())) == len(_TEMPLATE_DIGESTS), (
+        "two template versions record the same render — a stale row was copied rather than "
+        "the template genuinely re-pinned"
+    )
+    assert rs.TEMPLATE_VERSION == max(_TEMPLATE_DIGESTS), (
+        f"TEMPLATE_VERSION is {rs.TEMPLATE_VERSION} but {max(_TEMPLATE_DIGESTS)} is already "
+        "recorded: a version may only go forward, or installed drivers stop regenerating."
+    )
+    assert current == _TEMPLATE_DIGESTS[rs.TEMPLATE_VERSION], (
+        f"the render changed but TEMPLATE_VERSION is still {rs.TEMPLATE_VERSION}, so every "
+        f"installed driver keeps running the old script and this change ships inert. Bump "
+        f"TEMPLATE_VERSION to {rs.TEMPLATE_VERSION + 1} and add the row "
+        f"{rs.TEMPLATE_VERSION + 1}: {current!r}"
+    )
+
+
+# ---- the driver's OWN exit statuses must be unreachable by anything else in `$?` ----
+
+_SYSEXITS = range(64, 79)  # flock's own error statuses; also conductor's own usage exit
+_SHELL_RESERVED = {
+    126: "bash: found but not executable",
+    127: "bash: command not found",
+}
+_SIGNALLED = range(128, 166)  # 128+N — killed by signal N
+
+
+def _gate_exit_contract() -> dict[int, str]:
+    """`assertions/run.py`'s documented exit codes, read from its SOURCE — importing it
+    resolves the project's gate at import time. These matter to the driver because the worker
+    runs that runner and the driver propagates the worker's rc unchanged."""
+    src = (REPO / "assertions" / "run.py").read_text(encoding="utf-8")
+    return {
+        int(value): name
+        for name, value in re.findall(r"(?m)^(EXIT_[A-Z_]+) = (\d+)$", src)
+    }
+
+
+def _render_exit_literals() -> set[int]:
+    """Every non-zero literal `exit N` the render mentions — in code AND in comments. The
+    comments here name the codes deliberately, so scanning them too keeps the documented table
+    from drifting away from the branches it describes."""
+    return {int(n) for n in re.findall(r"\bexit (\d+)\b", _render())} - {0}
+
+
+def test_the_drivers_own_exit_statuses_collide_with_nothing():
+    """A caller holding only `$?` must be able to tell the driver's own refusals apart from
+    every other producer of a status in that position. `lock-unavailable` shipped as exit 6,
+    which `assertions/run.py` already defines as EXIT_TAMPERED — and because the driver
+    propagates the worker's rc VERBATIM, a worker that ran the done-gate and passed a 6 through
+    was indistinguishable from a driver that could not lock at all.
+
+    Out of bounds for the driver, and why:
+      the gate contract   reachable through the propagated worker rc
+      64-78               sysexits: flock's own errors, and `conductor`'s usage exit
+      126, 127            bash's "not executable" / "not found"
+      128-165             killed by signal N
+    """
+    reserved: dict[int, str] = {}
+    reserved.update(_gate_exit_contract())
+    reserved.update({c: "sysexits (flock errors / conductor usage)" for c in _SYSEXITS})
+    reserved.update(_SHELL_RESERVED)
+    reserved.update({c: "killed by signal" for c in _SIGNALLED})
+
+    own = _render_exit_literals()
+    assert own, "the render emits no fail-loud exit at all"
+    clash = {code: reserved[code] for code in sorted(own) if code in reserved}
+    assert not clash, (
+        "the driver's own exit statuses must be unreachable by anything else a caller can see "
+        f"in $?; these are already taken: {clash}"
+    )
 
 
 # ---- the render bakes in NO version-pinned bin paths (the whole point) ----
@@ -48,7 +174,10 @@ def test_render_repairs_cron_path():
 def test_render_fails_loud_on_unresolvable_bin():
     s = _render()
     assert "driver-unresolved" in s
-    assert "exit 3" in s  # non-launch failure is surfaced + non-zero, never silent
+    # non-launch failure is surfaced + non-zero, never silent. The status comes from the
+    # module's own constant, not a literal: see test_the_drivers_own_exit_statuses_collide_
+    # with_nothing for why it may not be a small number.
+    assert f"exit {rs.EXIT_DRIVER_UNRESOLVED}" in s
 
 
 def test_render_does_not_export_run_branch():
@@ -240,14 +369,49 @@ def test_write_nudge_fires_on_command_prefix_temp_env(tmp_path, capsys):
     assert "unattended" in err
 
 
-def test_render_preserves_the_three_guards():
+def test_render_keeps_both_guards_as_EXECUTABLE_lines():
+    """Shape-level smoke, deliberately kept as such — and it is NOT the pin against the
+    double-drive regression; `test_render_has_no_process_name_double_drive_heuristic` below is
+    (it fails on a revert, this cannot), and the guards' actual behaviour is proven by running
+    the driver in tests/conductor/test_resume_driver_exec.py. What it still buys, after the
+    `assert "/proc/$pid/cwd" in s` fiasco — a substring check that proved text was emitted and
+    nothing about what the bash did — is one thing that suite cannot: it reads EXECUTABLE lines
+    only, so a guard commented out (or demoted to prose, which is how this file documents the
+    heuristic it deleted) fails here instead of quietly never running."""
+    code = "\n".join(
+        ln for ln in _render().splitlines() if not ln.lstrip().startswith("#")
+    )
+    # (a) one fire at a time. Scope: OS-driver vs OS-driver — the in-session CronCreate tier
+    # takes no lock, so this is not fire-vs-anything exclusion. `-E` is load-bearing, not
+    # decoration: it is what separates a held lock from locking being broken.
+    assert 'flock -n -E "$LOCK_BUSY" 9' in code
+    assert "assert run --level spec" in code  # (b) done-gate-green no-op
+    # resumes in the worktree, never the owner checkout
+    assert 'CONDUCTOR_HOME="$WORKTREE"' in code
+
+
+def test_render_has_no_process_name_double_drive_heuristic():
+    """Regression pin on the REMOVAL. A `pgrep`/`/proc/<pid>/cwd` guard cannot work here:
+    the driver `cd`s to the worktree before it would run, so its own cwd always matches, and
+    `pgrep -f claude` matches its own argv under any path containing `claude` (every project
+    under ~/.claude/). It also matched unrelated agent tool shells, and matched nothing at
+    all on a Codex host. Exclusion belongs on the lock, not on process names.
+
+    Asserts on EXECUTABLE lines only: the render deliberately keeps a comment naming the
+    removed heuristic so it is not reinvented, and that comment must not read as the code."""
+    code = "\n".join(
+        ln for ln in _render().splitlines() if not ln.lstrip().startswith("#")
+    )
+    assert "pgrep" not in code
+    assert "/proc/" not in code
+
+
+def test_render_logs_a_reason_for_every_silent_early_exit():
+    """A bare `exit 0` made a permanently blocked run indistinguishable from a healthy
+    no-op fire in resume-autodev.log. Both no-op paths must leave greppable evidence."""
     s = _render()
-    assert "flock -n 9" in s  # (c) one fire at a time
-    assert "/proc/$pid/cwd" in s  # (a) no double-drive (cwd detection)
-    assert "assert run --level spec" in s  # (b) done-gate-green no-op
-    assert (
-        'CONDUCTOR_HOME="$WORKTREE"' in s
-    )  # resumes in the worktree, not owner checkout
+    assert "skip reason=lock-held" in s
+    assert "skip reason=gate-green" in s
 
 
 def test_render_is_deterministic():
@@ -449,11 +613,11 @@ def test_write_regenerates_clean_driver_without_force(tmp_path):
 
 
 def test_render_guards_env_file_permissions_before_sourcing():
-    """Static contract: the guard (env-unsafe + exit 5) appears BEFORE the sourcing line,
-    and the sourcing is inside the guarded block, not a bare `[ -f ... ] && .`."""
+    """Static contract: the guard (env-unsafe + its fail-loud exit) appears BEFORE the
+    sourcing line, and the sourcing is inside the guarded block, not a bare `[ -f ... ] && .`."""
     s = _render()
     assert "env-unsafe" in s
-    assert "exit 5" in s
+    assert f"exit {rs.EXIT_ENV_UNSAFE}" in s
     guard_at = s.index("env-unsafe")
     source_at = s.index('. "$ENV_FILE"')
     assert guard_at < source_at
@@ -501,7 +665,7 @@ def test_driver_refuses_writable_env_file_loud_and_never_fires(tmp_path, mode):
     os.chmod(env_file, mode)
     proc = _fire_driver(driver, home)
     log = (project / ".conductor" / "resume-autodev.log").read_text()
-    assert proc.returncode != 0
+    assert proc.returncode == rs.EXIT_ENV_UNSAFE, (proc.returncode, log)
     assert "env-unsafe" in log
     assert f"mode={mode:o}" in log
     assert not fired.exists()
@@ -788,8 +952,13 @@ def test_main_root_identical_from_linked_worktree(tmp_path):
         ["git", "-C", str(proj), "commit", "--allow-empty", "-q", "-m", "x"],
         check=True,
         timeout=30,
-        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        },
     )
     wt = tmp_path / "wt"
     subprocess.run(
@@ -917,7 +1086,9 @@ def test_install_cron_quotes_a_root_with_spaces(tmp_path, monkeypatch):
         assert ln.endswith(rs.cron_marker(main_root)), ln
 
 
-def test_install_cron_on_a_non_repo_fails_with_a_named_reason(tmp_path, monkeypatch, capsys):
+def test_install_cron_on_a_non_repo_fails_with_a_named_reason(
+    tmp_path, monkeypatch, capsys
+):
     _stub_crontab(tmp_path, monkeypatch)
     not_repo = tmp_path / "plain"
     not_repo.mkdir()

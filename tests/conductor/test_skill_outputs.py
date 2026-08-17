@@ -226,6 +226,23 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             "resume-env.sh",
             "resume-script verify",
             "# conductor-autodev",
+            # WHAT THE LOCK DOES, precisely. Bare `flock` above proves only that the word
+            # survives — the whole pgrep-guard removal could be reverted with it green. These
+            # pin the three claims a worker acts on: the lock is held for the FIRE (not
+            # released early), both no-op paths are greppable, and its scope is OS-driver vs
+            # OS-driver — not fire-vs-anything.
+            "held for the whole fire",
+            "skip reason=lock-held",
+            "skip reason=gate-green",
+            "only exclusion between os-driver fires",
+            # contention is the only flock failure that may skip; broken locking is fail-loud
+            "lock-unavailable",
+            # ...and the overlap that scope leaves open, which the owner has to be told about
+            # because nothing detects it.
+            "takes that lock",
+            "do not reintroduce process-name matching",
+            "a live session no longer blocks headless progress",
+            "at the same time",
         ],
     },
     "skills/assertions-to-tests/SKILL.md": {
@@ -271,6 +288,47 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
         "6-report": ["ready for `/conductor:start`"],
     },
 }
+
+
+# Claims that must not appear ANYWHERE in a skill, with the reason a failure should teach.
+#
+# Deliberately NOT region-scoped, unlike _CONTRACT: an instruction can be right in one step
+# and misplaced in another, but a statement that is FALSE about the code is false in every
+# region — and prose a worker reads is executable, so a stale claim here is a live defect,
+# not a docs nit. Each of these described the `pgrep -f 'claude'` + `/proc/<pid>/cwd` guard
+# that was deleted; the driver now does the OPPOSITE of what they say.
+_FORBIDDEN: dict[str, list[tuple[str, str]]] = {
+    "skills/start/SKILL.md": [
+        (
+            "a claude process holds the cwd",
+            "the process-name/cwd guard is gone — a live claude session does NOT stop a "
+            "Tier-B fire, so telling the owner it does sends them to wait out a stall that "
+            "is not happening",
+        ),
+        (
+            "no-ops on every fire",
+            "same deleted guard, other spelling: no guard no-ops a fire on account of a "
+            "live session",
+        ),
+        (
+            "sole fire-vs-fire",
+            "the flock excludes OS-driver vs OS-driver ONLY. The in-session CronCreate tick "
+            "of step 6 never takes it, so calling it the sole fire-vs-fire exclusion "
+            "overstates what is enforced",
+        ),
+    ],
+}
+
+
+def _assert_no_forbidden_claims(path: str) -> None:
+    regions = _regions(path)
+    failures = [
+        f"FORBIDDEN {needle!r} — found in {', '.join(found)}; {why}"
+        for needle, why in _FORBIDDEN[path]
+        if (found := [r for r, text in regions.items() if needle in text])
+    ]
+    if failures:
+        pytest.fail(f"{path}\n  " + "\n  ".join(failures), pytrace=False)
 
 
 # A top-level step heading: `4.` / `4b.` at column 0. The executable spine of a skill.
@@ -380,6 +438,14 @@ def test_start_skill_contract():
         "conductor gate freeze",
     ]:
         assert needle in _regions("skills/start/SKILL.md")["3-gate-dir"], needle
+
+
+def test_start_skill_makes_no_stale_double_drive_claims():
+    """The other half of the contract. Needles prove the CORRECT statement is present; this
+    proves the superseded one is gone. Both are needed: adding the new paragraph without
+    deleting the old one leaves a skill that tells a worker two contradictory things about
+    whether a live session blocks headless progress."""
+    _assert_no_forbidden_claims("skills/start/SKILL.md")
 
 
 def test_assertions_to_tests_skill_contract():

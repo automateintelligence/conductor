@@ -9,8 +9,8 @@ claude/plugin upgrade and every headless fire died silently. Making the script m
 the root cause: one source of truth, resolved at RUN time, verifiable on reconcile.
 
 Split of concerns the render enforces:
-- MECHANICAL (this module owns, regenerable): bin resolution, PATH repair, fail-loud, the three
-  guards (no-double-drive, done-gate-green exit, flock), the fire.
+- MECHANICAL (this module owns, regenerable): bin resolution, PATH repair, fail-loud, the two
+  guards (flock, done-gate-green exit) with every early exit logged as `skip reason=`, the fire.
 - OWNER/MACHINE config (never baked here, sourced from `<project>/.conductor/resume-env.sh` so
   regeneration can never clobber it): `CONDUCTOR_MERGE_VERIFY`, `CONDUCTOR_PLUGIN_DIRS`,
   `DOCKER_HOST`, `CONDUCTOR_RESUME_CLAUDE_FLAGS`.
@@ -32,8 +32,37 @@ import sys
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and
 # `/conductor:start` reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 4
+TEMPLATE_VERSION = 7
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
+
+# The driver's OWN exit statuses — the whole contract for `.conductor/resume-autodev.sh`, in
+# one place because the render interpolates these and the table below is the only
+# documentation of them. They sit in a private 10x block because the driver propagates the
+# worker's rc VERBATIM (`exit "$rc"`), so any status the worker can produce is a status the
+# driver cannot own. `lock-unavailable` shipped as 6, which `assertions/run.py` already defines
+# as EXIT_TAMPERED: a worker that ran the done-gate and passed a 6 through was
+# indistinguishable from a machine that could not lock.
+#
+# Taken by someone else, and therefore unusable here:
+#   0-6       assertions/run.py's exit contract (EXIT_OK..EXIT_TAMPERED) — the worker runs the
+#             done-gate, so any of those can arrive as the propagated rc
+#   1, 2      the generic CLI failure statuses (conductor's own `return 1` / `return 2`)
+#   64-78     sysexits: flock's own error statuses, and conductor's usage exit (64)
+#   126, 127  bash's "found but not executable" / "command not found"
+#   128-165   killed by signal N
+#
+# KNOWN, DELIBERATE RESIDUAL: 0 and the propagated worker rc still overlap by construction —
+# `exit "$rc"` cannot be disambiguated without swallowing the worker's own status, which is
+# worse. So `$?` from the driver answers "did the DRIVER refuse, and why"; it does NOT answer
+# "did the phase succeed". That second question is answered by the `fire-end rc=` log line,
+# which is what `conductor driver status` reads. Do not add a driver code below 100.
+EXIT_LOCK_BUSY = (
+    100  # not an exit status: flock's `-E` conflict value (a logged skip, exit 0)
+)
+EXIT_LOCK_UNAVAILABLE = 101
+EXIT_DRIVER_UNRESOLVED = 102
+EXIT_WORKTREE_MISSING = 103
+EXIT_ENV_UNSAFE = 104
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
 # node-version-pinned bin path, or a plugin path pinned to a specific conductor version.
@@ -160,6 +189,19 @@ def render(project: str, worktree: str) -> str:
 # silently stalling. Machine/run-specific env (CONDUCTOR_MERGE_VERIFY, CONDUCTOR_PLUGIN_DIRS,
 # DOCKER_HOST, CONDUCTOR_RESUME_CLAUDE_FLAGS) lives in <project>/.conductor/resume-env.sh — this
 # script sources it and never bakes it in, so regeneration can never clobber owner config.
+#
+# EXIT STATUS TABLE — the complete contract, so nobody has to re-derive it from the branches:
+#   0                                 fired (the worker returned 0), or a LOGGED skip
+#                                     (`skip reason=lock-held`, `skip reason=gate-green`)
+#   {EXIT_LOCK_UNAVAILABLE}                               lock-unavailable — locking is BROKEN, not busy
+#   {EXIT_DRIVER_UNRESOLVED}                               driver-unresolved — claude and/or conductor did not resolve
+#   {EXIT_WORKTREE_MISSING}                               worktree-missing — the run worktree is gone
+#   {EXIT_ENV_UNSAFE}                               env-unsafe — resume-env.sh is group- or world-writable
+#   anything else                     the WORKER's own rc, propagated verbatim
+# The driver's own statuses live above 100 on purpose: everything at or below 78 is already
+# claimed by the done-gate runner's exit contract (0-6), sysexits (64-78), or bash (126/127),
+# and the propagated worker rc can be any of them. `$?` therefore tells you whether the DRIVER
+# refused and why; whether the PHASE succeeded is the `fire-end rc=` line in the log.
 set -u
 
 PROJECT={shlex.quote(project)}
@@ -180,13 +222,13 @@ CONDUCTOR="$(command -v conductor || true)"
 # Fail LOUD if a bin is unresolvable — silence is the real defect; a stalled run must be visible.
 if [ ! -x "$CLAUDE_BIN" ] || [ ! -x "${{CONDUCTOR:-}}" ]; then
     printf '%s driver-unresolved claude=%s conductor=%s\\n' "$(ts)" "$CLAUDE_BIN" "${{CONDUCTOR:-}}" >> "$LOG"
-    exit 3
+    exit {EXIT_DRIVER_UNRESOLVED}
 fi
 
 # Owner/machine env (merge-verify command, plugin dirs, docker host, extra claude flags). Kept
 # OUT of this generated file so regeneration never clobbers it. SAFETY: the file can carry the
 # bypass flag and a shell-executed CONDUCTOR_MERGE_VERIFY, so a group- or world-writable copy is
-# a privilege-escalation vector — refuse it LOUD (env-unsafe, exit 5) before sourcing, like
+# a privilege-escalation vector — refuse it LOUD (env-unsafe, exit {EXIT_ENV_UNSAFE}) before sourcing, like
 # driver-unresolved. Only a 0600 (or absent) file proceeds to the fire.
 ENV_FILE="$PROJECT/.conductor/resume-env.sh"
 if [ -f "$ENV_FILE" ]; then
@@ -194,7 +236,7 @@ if [ -f "$ENV_FILE" ]; then
     # FAIL-CLOSED: an unreadable mode (both stat forms failed) refuses like a writable one.
     if [ -z "$ENV_MODE" ] || [ $(( 8#$ENV_MODE & 8#022 )) -ne 0 ]; then
         printf '%s env-unsafe mode=%s %s\\n' "$(ts)" "$ENV_MODE" "$ENV_FILE" >> "$LOG"
-        exit 5
+        exit {EXIT_ENV_UNSAFE}
     fi
     . "$ENV_FILE"
 fi
@@ -202,24 +244,59 @@ fi
 # Run topology: the worker resumes in the worktree. Do NOT export CONDUCTOR_RUN_BRANCH — the CLI
 # reads .conductor/run_branch (single source of truth); a stale literal here would override it.
 export CONDUCTOR_HOME="$WORKTREE"
-cd "$WORKTREE" || {{ printf '%s worktree-missing %s\\n' "$(ts)" "$WORKTREE" >> "$LOG"; exit 4; }}
+cd "$WORKTREE" || {{ printf '%s worktree-missing %s\\n' "$(ts)" "$WORKTREE" >> "$LOG"; exit {EXIT_WORKTREE_MISSING}; }}
 mkdir -p "$PROJECT/.conductor"
 
-# (c) one headless fire at a time — hold the lock in the main checkout for the whole fire.
-exec 9>"$PROJECT/.conductor/resume.lock"
-flock -n 9 || exit 0
-
-# (a) never double-drive: exit if a claude process already holds the project OR worktree cwd (a
-#     live terminal session or a prior fire is then the sole driver).
-for pid in $(pgrep -f 'claude' 2>/dev/null); do
-    cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
-    case "$cwd" in
-        "$PROJECT"|"$PROJECT"/*|"$WORKTREE"|"$WORKTREE"/*) exit 0 ;;
-    esac
-done
+# (a) ONE headless fire at a time — the flock in the main checkout, held for the whole fire, is
+#     the ONLY exclusion between OS-DRIVER fires. That is the whole of its scope: both contenders
+#     are this same generated driver contending on one named file, which is why it is sound (no
+#     process-name matching, no host assumptions, released by the kernel if a fire dies) and also
+#     why it excludes nothing else. It is NOT fire-vs-anything exclusion — see KNOWN GAP below.
+#
+#     A `pgrep -f 'claude'` + /proc cwd heuristic used to sit here as a second guard. It was
+#     removed because it could not work: the `cd "$WORKTREE"` above means the fire's OWN cwd
+#     always matched, and `pgrep -f claude` matches the driver's own command line whenever the
+#     project path contains `claude` — true of every project under `~/.claude/`, i.e. conductor's
+#     own. Every fire took the silent `exit 0` branch, permanently. It also matched unrelated
+#     agent tool shells regardless of path, and matched NOTHING on a Codex host (fail-open).
+#     Do NOT reintroduce a process-name heuristic: anything that must exclude a driver has to
+#     contend on THIS lock. See docs/reviews/2026-08-12-codex-host-ground-truth.md.
+#
+#     KNOWN GAP (owner-visible, deliberate — architectural fix is the owner's call): the OTHER
+#     tier takes no lock at all. `/conductor:start` also registers an IN-SESSION scheduled
+#     `/conductor:autodev` (harness CronCreate), and that tick — like a hand-run
+#     `/conductor:autodev` — never opens this file, so a Tier-A tick and a Tier-B fire can work
+#     the same run branch concurrently and nothing detects it. Do not describe this lock as
+#     fire-vs-fire exclusion in general; it is driver-vs-driver only.
+#     CONTENTION vs BROKEN LOCKING are different outcomes and must not share a reason tag.
+#     `if ! flock -n 9` treated every non-zero status as "someone else holds it": no `flock`
+#     binary (bash exits 127), a bad descriptor because `exec 9>` failed, a filesystem with no
+#     locking, a usage error. Each logged `skip reason=lock-held` and exited 0, so a machine
+#     that CANNOT lock stalled forever behind the most reassuring line in the taxonomy. util-linux
+#     documents the discrimination: under -n the CONFLICT status is whatever `-E` asks for, and
+#     everything else is a sysexits error. LOCK_BUSY is picked outside both the sysexits range
+#     (64-78) and bash's 126/127, so no error can be mistaken for a held lock. A busy lock is a
+#     logged skip; anything else is fail-loud (exit {EXIT_LOCK_UNAVAILABLE}), like driver-unresolved and env-unsafe.
+LOCK_BUSY={EXIT_LOCK_BUSY}
+LOCKFILE="$PROJECT/.conductor/resume.lock"
+exec 9>"$LOCKFILE"
+flock -n -E "$LOCK_BUSY" 9
+lock_rc=$?
+if [ "$lock_rc" -eq "$LOCK_BUSY" ]; then
+    printf '%s skip reason=lock-held lock=%s\\n' "$(ts)" "$LOCKFILE" >> "$LOG"
+    exit 0
+elif [ "$lock_rc" -ne 0 ]; then
+    printf '%s lock-unavailable rc=%s lock=%s\\n' "$(ts)" "$lock_rc" "$LOCKFILE" >> "$LOG"
+    exit {EXIT_LOCK_UNAVAILABLE}
+fi
 
 # (b) finished runs get no-op fires: exit once the spec done-gate is green.
-"$CONDUCTOR" assert run --level spec >/dev/null 2>&1 && exit 0
+#     EVERY early exit logs a `skip reason=` line. A bare `exit 0` is what let a permanently
+#     blocked run look identical to a healthy no-op in resume-autodev.log for weeks.
+if "$CONDUCTOR" assert run --level spec >/dev/null 2>&1 9>&-; then
+    printf '%s skip reason=gate-green\\n' "$(ts)" >> "$LOG"
+    exit 0
+fi
 
 # One headless phase of progress, in the run worktree. Bracket the fire in the log so a stalled
 # or crash-looping driver is visible: `fire-start` with no matching `fire-end` = a hung fire
@@ -258,7 +335,14 @@ for arg in "$@"; do
     prev="$arg"
 done
 printf '%s fire-start posture=%s\\n' "$(ts)" "$POSTURE" >> "$LOG"
-"$CLAUDE_BIN" -p "/conductor:autodev" "$@" >> "$LOG" 2>&1
+# `9>&-` CLOSES the lock descriptor in the worker ONLY — the driver keeps holding it for the
+# whole fire. Without it the descriptor (opened by `exec`, so NOT close-on-exec) is inherited
+# by the worker and every process it spawns; a phase that leaves ONE detached descendant
+# running (dev server, docker helper, stray nohup) keeps the locked open-file-description
+# alive after this driver exits, because the kernel only drops a flock when the LAST
+# descriptor on that description closes. Every later fire then skips `lock-held` forever
+# behind a `fire-end rc=0` that looks healthy. Do NOT "fix" that by unlocking early.
+"$CLAUDE_BIN" -p "/conductor:autodev" "$@" >> "$LOG" 2>&1 9>&-
 rc=$?
 printf '%s fire-end rc=%s\\n' "$(ts)" "$rc" >> "$LOG"
 exit "$rc"
@@ -456,8 +540,7 @@ def main(argv: list[str] | None = None) -> int:
             # main_root on a non-repo path: name the failure, never traceback.
             detail = (e.stderr or "").strip()
             print(
-                f"cannot resolve main root for {args.project}: "
-                f"{detail or e}",
+                f"cannot resolve main root for {args.project}: {detail or e}",
                 file=sys.stderr,
             )
             return 1
