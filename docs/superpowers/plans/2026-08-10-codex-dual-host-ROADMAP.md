@@ -66,19 +66,19 @@ Copy this block verbatim into each plan's `## Global Constraints` section.
 
 ## Plan index
 
-| # | Plan | Repo | Depends on | Status |
-| --- | --- | --- | --- | --- |
-| 00 | Source decommission (was: relocation) | conductor (+ workstation) | — | not written; approach superseded, execution deferred |
-| 01 | Run identity, project registry, per-run state | conductor | — | **written** |
-| 02 | Ownership, leases, takeover, prune, rebind | conductor | 01 | not written |
-| 03 | Legacy run migration | conductor | 01, 02 | not written |
-| 04 | Host adapter layer and preflight floors | conductor | 01 | **written** |
-| 05 | Heartbeat, checkpoint, no-compaction policy | conductor | 01, 02, 03, 04 | not written |
-| 06 | Branch/worktree/PR model, merge gates, sync phases | conductor | 01, 04 | not written |
-| 07 | Reviewer routing, structured review, review debt | conductor | 04, 06 | not written |
-| 08 | spec-craft dual-host | spec-craft | — | not written |
-| 09 | Packaging and marketplace dual catalogs | conductor, marketplace | 04, 08 | not written |
-| 10 | Public messaging and installation smokes | all three | 09 | not written |
+| # | Plan | Repo | Depends on | Plan doc | Code |
+| --- | --- | --- | --- | --- | --- |
+| 00 | Source decommission (was: relocation) | conductor (+ workstation) | — | superseded by the 2026-08-12 decommission design | execution deferred; all four loss-risk predicates blocked |
+| 01 | Run identity, project registry, per-run state | conductor | — | **written** | **merged** (PR #84) |
+| 02 | Ownership, leases, takeover, prune, rebind | conductor | 01 | not written | — |
+| 03 | Legacy run migration | conductor | 01, 02 | not written | — |
+| 04 | Host adapter layer and preflight floors | conductor | 01 | **written** | in progress — `conductor/hosts/` does not exist on `main` |
+| 05 | Heartbeat, checkpoint, no-compaction policy | conductor | 01, 02, 03, 04 | not written | — |
+| 06 | Branch/worktree/PR model, merge gates, sync phases | conductor | 01, 04 | not written | — |
+| 07 | Reviewer routing, structured review, review debt | conductor | 04, 06 | not written | — |
+| 08 | spec-craft dual-host | spec-craft | — | not written | — |
+| 09 | Packaging and marketplace dual catalogs | conductor, marketplace | 04, 08 | not written | — |
+| 10 | Public messaging and installation smokes | all three | 09 | not written | — |
 
 Dependency edges are **interface** dependencies: plan N may be written and reviewed before its
 dependency merges, but it cannot go green until the interfaces it consumes exist. **One
