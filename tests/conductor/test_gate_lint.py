@@ -391,3 +391,77 @@ def test_negation_of_real_behavior_is_not_flagged_trivial(tmp_path):
     )
     proj = _mk_project(tmp_path, PINNED, body=body)
     assert "trivial" not in "\n".join(_lint(proj)).lower()
+
+
+# ------------------------------------------------------------- orphan test file rule
+#
+# The runner (`assertions/run.py`) is manifest-entry-driven: it never scans the gate
+# directory. A test file committed under the gate but named by no command is therefore
+# NEVER EXECUTED while `conductor assert run` reports all-green — a false green, which
+# is why this is a hard finding rather than a warning.
+
+
+def test_orphan_test_file_in_gate_dir_is_flagged(tmp_path):
+    proj = _mk_project(tmp_path, PINNED)
+    (proj / "assertions" / "sample" / "test_orphan.py").write_text(GOOD_TEST_BODY)
+    joined = "\n".join(_lint(proj))
+    assert "orphan" in joined.lower(), joined
+    assert "test_orphan.py" in joined, joined
+
+
+def test_referenced_test_file_is_not_flagged_orphan(tmp_path):
+    proj = _mk_project(tmp_path, PINNED)
+    findings = _lint(proj)
+    assert findings == [], findings
+
+
+def test_nodeid_referenced_test_file_is_not_flagged_orphan(tmp_path):
+    # the FILE is named in the command even though only one nodeid runs; partial
+    # coverage is a judgment call, not a mechanical one
+    cmd = (
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest "
+        f"-p no:cacheprovider {TEST_REL}::test_sample_behavior"
+    )
+    proj = _mk_project(tmp_path, cmd)
+    findings = _lint(proj)
+    assert findings == [], findings
+
+
+def test_conftest_in_gate_dir_is_not_flagged_orphan(tmp_path):
+    # a conftest is support code — no command ever names it
+    proj = _mk_project(tmp_path, PINNED)
+    (proj / "assertions" / "sample" / "conftest.py").write_text("import pytest\n")
+    findings = _lint(proj)
+    assert findings == [], findings
+
+
+def test_orphan_under_a_directory_target_is_not_flagged(tmp_path):
+    # a directory token names every test file pytest would collect beneath it
+    cmd = (
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest "
+        "-p no:cacheprovider assertions/sample"
+    )
+    proj = _mk_project(tmp_path, cmd)
+    (proj / "assertions" / "sample" / "test_second.py").write_text(GOOD_TEST_BODY)
+    findings = _lint(proj)
+    assert findings == [], findings
+
+
+def test_unpinned_command_does_not_make_its_own_test_file_an_orphan(tmp_path):
+    # a rejected command yields no resolvable paths, so its test file would LOOK
+    # unreferenced — but it is named, and "named by no manifest command" would be a
+    # false accusation. The orphan verdict is only decidable once every command is
+    # pinned; the gate is already red on the unpinned finding, so no green is hidden.
+    proj = _mk_project(tmp_path, f"pytest {TEST_REL}")
+    joined = "\n".join(_lint(proj))
+    assert "unpinned" in joined.lower(), joined
+    assert "orphan" not in joined.lower(), joined
+
+
+def test_orphan_finding_makes_main_exit_nonzero(tmp_path, monkeypatch, capsys):
+    proj = _mk_project(tmp_path, PINNED)
+    (proj / "assertions" / "sample" / "test_orphan.py").write_text(GOOD_TEST_BODY)
+    monkeypatch.setenv("CONDUCTOR_HOME", str(proj))
+    assert gate_lint.main() != 0
+    out = capsys.readouterr()
+    assert "orphan" in (out.out + out.err).lower()
