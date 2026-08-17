@@ -8,6 +8,11 @@
 **Source design:** `docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md`
 (approved 2026-08-10, commit `67dcf93`, branch `docs/codex-dual-host-design`)
 
+**Superseding design for Plan 00:**
+`docs/superpowers/specs/2026-08-12-conductor-source-decommission-design.md` (owner-approved
+2026-08-16, execution deferred). It replaces the relocation approach with a fresh clone plus
+staged quarantine — see Plan 00 below.
+
 **Why this is split:** the design spans three repositories and ten subsystems that each produce
 working, testable software on their own. A single plan would exceed what one implementer or one
 reviewer can hold. Each plan below has its own worktree, branch, commits, tests, and pull request
@@ -21,8 +26,11 @@ Copy this block verbatim into each plan's `## Global Constraints` section.
 
 - **Host floor:** Claude Code `2.1.224`, Codex CLI `0.147.0`. Manifests, preflight diagnostics,
   and installation documentation publish these minimums.
-- **Canonical editable checkout:** `~/programming/conductor`. The old `~/.claude/conductor` is
-  quarantined at `~/.claude/conductor.quarantine-2026-08-10` with **no symlink left behind**.
+- **Canonical editable checkout:** `~/programming/conductor`, established by a fresh `git clone`
+  — never by moving the existing tree. The old `~/.claude/conductor` is retired in place: `mv` to
+  a dated quarantine directory, one-week observation, then removal, with **no symlink left
+  behind**. Until then Conductor is consumed as an installed plugin from
+  `~/.claude/plugins/cache/`. See the decommission design named above.
 - **Plugin identity:** one public name, `conductor`, in the AutomateIntelligence marketplace.
   No second Codex-specific product identity.
 - **Run key format:** `<spec-slug>-<short-hash-of-normalized-repository-relative-spec-path>[-g<N>]`.
@@ -60,11 +68,11 @@ Copy this block verbatim into each plan's `## Global Constraints` section.
 
 | # | Plan | Repo | Depends on | Status |
 | --- | --- | --- | --- | --- |
-| 00 | Source relocation and quarantine | conductor (+ workstation) | — | not written |
+| 00 | Source decommission (was: relocation) | conductor (+ workstation) | — | not written; approach superseded, execution deferred |
 | 01 | Run identity, project registry, per-run state | conductor | — | **written** |
 | 02 | Ownership, leases, takeover, prune, rebind | conductor | 01 | not written |
 | 03 | Legacy run migration | conductor | 01, 02 | not written |
-| 04 | Host adapter layer and preflight floors | conductor | 01 | not written |
+| 04 | Host adapter layer and preflight floors | conductor | 01 | **written** |
 | 05 | Heartbeat, checkpoint, no-compaction policy | conductor | 01, 02, 03, 04 | not written |
 | 06 | Branch/worktree/PR model, merge gates, sync phases | conductor | 01, 04 | not written |
 | 07 | Reviewer routing, structured review, review debt | conductor | 04, 06 | not written |
@@ -73,41 +81,88 @@ Copy this block verbatim into each plan's `## Global Constraints` section.
 | 10 | Public messaging and installation smokes | all three | 09 | not written |
 
 Dependency edges are **interface** dependencies: plan N may be written and reviewed before its
-dependency merges, but it cannot go green until the interfaces it consumes exist.
+dependency merges, but it cannot go green until the interfaces it consumes exist. **One
+exception:** Plan 09 must not *start* before Plan 04 merges — see that entry.
+
+### Verified Codex facts
+
+`docs/reviews/2026-08-12-codex-host-ground-truth.md` is the source of truth for what Codex CLI
+actually does, measured against `0.147.0`. Prefer it over the design wherever the two differ; the
+design was written before the probe. Two corrections it carries that change plan content:
+
+- **`permission_profile()` is no longer abstract on the Codex side.** The real flags are
+  `-s, --sandbox {read-only|workspace-write|danger-full-access}`, `--approve-for-me` (automatic
+  approval routing under the workspace-write sandbox), and
+  `--dangerously-bypass-approvals-and-sandbox` — the analogue of Claude's
+  `--dangerously-skip-permissions`. Codex's sandbox is a graded axis where Claude's posture is a
+  mode plus a settings file, so they do **not** map one to one: the adapter defines its own
+  posture vocabulary and projects it onto each host rather than passing a shared string through.
+- **The design's assumption that Codex has no session continuation is wrong.** `codex exec
+  resume`, top-level `codex resume`, and `codex fork` all exist. Ignoring them in favour of
+  cold-start reconciliation from durable state is a defensible choice, but it is now an
+  **explicit non-goal to be written down with its reason** (Plan 04 does this), not an absence.
 
 ---
 
-## Plan 00 — Source relocation and quarantine
+## Plan 00 — Source decommission (was: source relocation and quarantine)
 
-**File:** `2026-08-10-plan-00-source-relocation.md`
+**File:** `2026-08-10-plan-00-source-decommission.md`
 **Repo:** conductor, plus workstation configuration (cron, hooks, shell, plugin caches)
-**Spec sections:** §"Source relocation and quarantine"; §"Repository and release sequence" steps
-1–4 and 11; the relocation bullets in §"Integration tests".
+**Governing design:** `docs/superpowers/specs/2026-08-12-conductor-source-decommission-design.md`
+— owner-approved 2026-08-16 with both scope decisions confirmed, amended 2026-08-17, **execution
+deferred**. It supersedes the relocation approach; Plan 00 becomes a decommission checklist, not
+a relocation runbook.
+**Spec sections:** the decommission design in full — §"Predicates", §"Execution preconditions",
+§"Order of operations", §"Testing". The original design's §"Source relocation and quarantine" and
+§"Repository and release sequence" steps 1–4 and 11 now supply only the *release ordering*.
 
-**Goal:** move the canonical editable checkout from `~/.claude/conductor` to
-`~/programming/conductor`, recreate every retained linked worktree from the canonical clone,
-repoint every schedule/hook/resume-env/launcher, quarantine the old path, and pass the one-week
-removal predicate.
+**Approach change.** The checkout is not moved. `~/programming/conductor` is created by a fresh
+`git clone`, verified on its own terms before anything at the old path is touched, and
+`~/.claude/conductor` is retired in place — `mv` to a dated quarantine directory, one-week
+observation, removal only after a final re-run of all six checks. This deletes the old plan's
+highest-risk step outright: a fresh clone creates its worktrees from the new root, so nothing is
+repointed and nothing can dangle. The four linked worktrees under the old path are retired
+explicitly instead, each carrying a recorded outcome — archive, discard, or keep.
 
-**Produces:** a relocation runbook with machine-checked predicates; a
-`conductor doctor relocation` style scan that fails when any cron entry, hook, process,
-worktree registration, or runtime config still names the old path.
+**Goal:** retire `~/.claude/conductor` as the canonical checkout, with Conductor consumed as an
+installed plugin from `~/.claude/plugins/cache/`, and with nothing lost that exists in no second
+place.
 
-**Notes for the writer:** this plan is mostly operational, but every predicate in the final-scan
-list (design lines 418–427) must be a runnable check, not a prose instruction. The nested-worktree
-recreation step (design line 414) is the highest-risk item — absolute linked-worktree metadata
-under the renamed root is what breaks.
+**Produces:** `scripts/decommission-check.sh` — the six predicates as one runnable check, exiting
+non-zero with the failing list and reporting **loss-risk failures and quiesce failures under
+separate headings**, because they mean different things: a quiesce failure is rescheduled, a
+loss-risk failure is remediated. Run before quarantine and again after.
 
-> **BLOCKING PRECONDITION — do not start Plan 00 without an explicit go-ahead.**
-> As of 2026-08-10 the owner has a live Conductor run executing out of `~/.claude/conductor`.
-> Renaming or quarantining that path while a run holds a worktree, a schedule, or a live process
-> under it is exactly the failure design lines 412–414 describe: linked-worktree metadata is
-> absolute, so the run's worktree registrations break and work completes under a quarantined
-> path. Plan 00 step 2 ("checkpoint or quiesce every in-flight run") is not a formality —
-> it is the gate. Before any step of Plan 00 runs, the owner must confirm that every run is
-> checkpointed or quiesced and no live process has its working directory or executable under the
-> old checkout. Plans 01–07 are unaffected: they are ordinary feature branches developed in
-> `.worktrees/`, and they never move, rename, or write to the checkout root.
+**Notes for the writer:** every predicate is a runnable check, not a prose instruction — that
+requirement survives the change of approach. Three of them have already had to be corrected once
+each, and the design records why: P1 must be built on `git log --branches --not --remotes`, never
+on `@{u}`, which cannot see an upstream-less branch — the only case that has ever failed here;
+P2 must invoke `git status --porcelain -uall --ignored` and print the `.conductor/` entries it
+finds rather than a count, since the ignored paths are precisely the ones GitHub never saw; P5
+must run P1's and P2's commands *inside* each linked worktree and fail on any worktree without a
+recorded outcome, not merely enumerate them. Merge status decides nothing anywhere in this plan.
+
+> **PRECONDITION — reduced, not removed.** The original form of this gate said: as of 2026-08-10
+> the owner has a live Conductor run executing out of `~/.claude/conductor`, and renaming that
+> path while a run holds a worktree, a schedule, or a live process under it breaks absolute
+> linked-worktree metadata, so worktree registrations dangle and work completes under a
+> quarantined path. Not moving the tree removes that specific hazard, but it does not remove the
+> gate. The single blocking precondition splits in two:
+>
+> - **Loss-risk gates are unconditional and must pass before quarantine.** P1 (no commit exists
+>   only here), P2 (no untracked *or ignored* content of value), P4 (nothing external names the
+>   path), P5 (no worktree holds state with no second copy). They ask one question: would
+>   anything be destroyed that exists nowhere else? As of the 2026-08-17 readings **all four are
+>   blocked**, which is why execution is deferred. Deletion is the only irreversible step and
+>   GitHub recovers only what was pushed to it.
+> - **Quiesce is now a declared window, not a standing invariant.** "No durable process rooted
+>   here" (P3) and the other activity checks are evaluated inside an announced window immediately
+>   before the `mv`; a failed check reschedules the window rather than failing the design. Do not
+>   re-tighten P1 or P5 back into absolute activity invariants — a gate that goes red whenever
+>   anyone is working in the tree gates nothing.
+>
+> Plans 01–07 remain unaffected: they are ordinary feature branches developed in `.worktrees/`,
+> and they never move, rename, or write to the checkout root.
 
 ---
 
@@ -293,42 +348,92 @@ failure.
 
 ## Plan 04 — Host adapter layer and preflight floors
 
-**File:** `2026-08-10-plan-04-host-adapters.md`
+**File:** `2026-08-10-plan-04-host-adapters.md` — **written** (commit `ee8befe`)
 **Repo:** conductor
 **Spec sections:** §"System architecture"; the host-floor paragraph in §"Packaging and
 installation"; adapter/permission/dispatch bullets in §"Unit and contract tests".
 
-**Goal:** introduce `conductor/hosts/{base,claude,codex}.py` implementing the eleven adapter
-capabilities, so no core module contains a Claude slash command, a Codex dollar invocation,
+**Goal:** introduce `conductor/hosts/{base,proc,claude,codex,cli}.py` implementing the adapter
+surface, so no core module contains a Claude slash command, a Codex dollar invocation,
 `CLAUDE_PLUGIN_ROOT`, a host-specific permission flag, or an assumption about one installation
-directory.
+directory. Thirty-one production lines across `resume_script.py`, `driver.py`, and `preflight.py`
+carry a host assumption today; Plan 04 builds the destination without moving them.
 
-**Produces:**
+**Produces** — the written plan establishes a **nineteen-member** surface. The design's eleven
+capabilities and the twelve methods this roadmap previously listed were both insufficient; this
+block is now the plan's, not the roadmap's guess:
 
 ```python
 # conductor/hosts/base.py
+@dataclass(frozen=True)
+class DispatchResult:                                          # referenced by the old signature,
+    host: str; argv: tuple[str, ...]; returncode: int          #   defined nowhere until now
+    result_path: str; result_text: str; truncated: bool; duration_s: float
+
 class HostAdapter(Protocol):
-    id: str                                                   # "claude" | "codex"
+    id: str                                                   # "claude" | "codex"; also the executable basename
     def executable(self) -> str: ...
     def source_root(self) -> str: ...
     def version(self) -> tuple[int, ...]: ...
     def minimum_version(self) -> tuple[int, ...]: ...
-    def worker_argv(self, *, state_root: str, run_key: str, project_root: str) -> list[str]: ...
-    def reviewer_argv(self, *, pr: int, head_sha: str, run_key: str) -> list[str]: ...
+    def upgrade_hint(self) -> str: ...
     def native_invocation(self, skill: str) -> str: ...        # "/conductor:autodev" | "$conductor:autodev"
-    def permission_profile(self) -> dict: ...
+    def launch_prompt(self, skill: str, *, run_key: str | None = None) -> str: ...
+    def worker_argv(self, *, state_root: str, run_key: str, project_root: str,
+                    posture: str = "supervised") -> list[str]: ...
+    def worker_env(self, *, state_root: str, run_key: str,
+                   project_root: str) -> dict[str, str]: ...
+    def reviewer_argv(self, *, pr: int, head_sha: str, run_key: str, project_root: str,
+                      posture: str = "supervised") -> list[str]: ...
+    def permission_profile(self, posture: str = "supervised") -> dict: ...
     def validate_permissions(self, profile: dict) -> None: ...
+    def process_identity(self, pid: int) -> str: ...           # "<host>:<pid>:<start-ticks>"
     def process_alive(self, identity: str) -> bool: ...
-    def install_hooks(self, state_root: str, run_key: str) -> None: ...
-    def dispatch_implementation(self, prompt: str, *, timeout: float) -> DispatchResult: ...
+    def processes_under(self, roots: list[str]) -> list[int]: ...
+    def install_hooks(self, state_root: str, run_key: str, *, command: list[str]) -> str: ...
+    def hook_installed(self, state_root: str, run_key: str) -> bool: ...
+    def dispatch_implementation(self, prompt: str, *, timeout: float,
+                                result_path: str | None = None,
+                                posture: str = "scoped") -> DispatchResult: ...
 def load(host_id: str) -> HostAdapter
 def opposite(host_id: str) -> str
 ```
 
-**Hard requirements:** adapters launch **argument vectors**, never interpolated shell strings;
-Codex's `$conductor:*` invocation is literal prompt text and must not be shell-expanded; an
-adapter that cannot dispatch isolated implementation work **fails preflight** — the orchestrator
-never absorbs implementation as fallback.
+**Why each addition, since the earlier list looked complete:** `upgrade_hint` because preflight
+must fail with the documented minimum-version command and nothing else renders one;
+`process_identity` because `process_alive(identity)` needs an identity to have been minted, and
+Plan 02 storing a bare PID would reintroduce PID reuse; **`processes_under` because
+`process_alive` cannot express the double-drive guard** — it asks "is the process I recorded
+alive?", while the guard asks "is any process of my host already driving this directory?", with
+no prior recording, which is the entire point; `hook_installed` because `install_hooks -> None`
+leaves "missing, untrusted, disabled, or ineffective" undetectable; `worker_env` because Claude's
+proven worker argv is a bare slash command, so the run key travels in the environment rather than
+changing a dispatch path many live fires have proven.
+
+**Corrections the written plan makes to this roadmap and the design:**
+
+- **`install_hooks` takes the command.** The old signature implied the adapter knows what the
+  hook should do. It runs Plan 05's checkpoint sequence, which does not exist yet. The caller
+  supplies the command; the adapter owns host-native placement and format.
+- **`native_invocation` and `launch_prompt` are two methods, not one.** `$conductor:*` is a
+  prompting convention, not a host primitive: `$name` is resolved by the *model* reading a
+  dispatch table in `~/.codex/AGENTS.md`, so on a machine without one it resolves to nothing.
+  Fixing the quoting does not make the launch work, it makes it fail differently. `launch_prompt`
+  emits the expansion — an explicit `SKILL.md` path — while `native_invocation` preserves the
+  user-facing surface the design describes.
+- **`dispatch_implementation` is the out-of-session child-process form.** The design describes an
+  in-session subagent mechanism; a Python adapter spawned from cron has no Task-tool API. Whether
+  Codex has a native in-session subagent primitive at all is still open.
+- **Bounded result collection cannot be symmetric.** Codex has `--output-schema`; Claude has no
+  equivalent. Plan 04 delivers bounded *text* with a byte cap and a caller-named `result_path`.
+  Structured verdicts are Plan 07's.
+
+**Hard requirements:** adapters launch **argument vectors**, never interpolated shell strings; the
+literal `$conductor:*` token must not be shell-expanded *and* must not be relied on as a launch
+mechanism; an adapter that cannot dispatch isolated implementation work **fails preflight** — the
+orchestrator never absorbs implementation as fallback. Plan 04 ships **unwired**: nothing in
+`driver.py`, `resume_script.py`, or `preflight.py` imports it, and those three files stay
+byte-identical. Plan 05 is where the adapter first carries load.
 
 ---
 
@@ -345,6 +450,13 @@ implement the eight-step checkpoint sequence with `compaction.marker` fencing.
 
 **Consumes:** 01 (state), 02 (owner.lock lifetime), 03 (migrate-before-lock at the entry point),
 04 (launch, hooks, context telemetry).
+
+**Handed off explicitly by written Plan 04, resolve before assuming:** Codex `PreCompact` is
+unimplemented and blocks unattended Codex runs — unblocking needs a probe proving the hook
+requests a checkpoint and blocks continuation. Claude's hook payload shape is unprobed; Plan 04's
+tests assert a round trip through its own reader, not conformance to Claude's schema. And
+**whether Codex has a native scheduler was not observed, not confirmed absent** — settle that
+before this plan's per-run `heartbeat.sh` assumes OS cron on both hosts.
 
 **Produces:** `conductor/heartbeat/{cli,schedule,checkpoint,marker}.py`, the two verbatim
 orchestrator reminders and their anchor contract tests, and the reconciliation evidence
@@ -418,6 +530,11 @@ a takeover; outstanding debt blocks the final PR.
 **Produces:** `conductor/reviewers/{policy,verdict,debt}.py` and the verdict JSON schema
 (reviewer host, verdict, findings, reviewed head SHA, timestamp, prompt/schema version).
 
+**Affordances Plan 04 deliberately left here:** Codex's `--output-schema` may be used as a
+Codex-only path to structured verdicts — Claude has no equivalent, so the schema must degrade to
+Plan 04's bounded text on that side rather than becoming a shared requirement. `codex exec review`
+exists but its argument contract was not verified; whether to use it is this plan's decision.
+
 ---
 
 ## Plan 08 — spec-craft dual-host
@@ -447,6 +564,16 @@ step 5.
 generate `plugins/conductor` and `plugins/spec-craft` bundles from immutable tags with recorded
 source commit and version, verified against source in CI.
 
+**Ordering exception — this plan does not start before Plan 04 merges.** Packaging Conductor for
+Codex while the adapter is absent produces a plugin that installs cleanly and then tries to spawn
+`claude` at first fire, on a machine that may not have Claude installed. This is the one place the
+"write ahead of your dependency" allowance above does not apply. The written Plan 04 also records
+that the Codex plugin system is missing from the design entirely — `codex plugin {add, list,
+marketplace, remove}`, `.codex-plugin/plugin.json`, `.agents/plugins/marketplace.json`, a `policy`
+block Claude has no counterpart for, and `--sparse` file scoping Claude has no mechanism for —
+plus that Codex's installed plugin-cache layout is not contractual anywhere. Establishing that
+layout is this plan's job.
+
 **Hard requirement to encode as a CI gate:** Codex has no plugin-level `dependencies` field, so
 the Codex marketplace marks spec-craft `policy.installation=INSTALLED_BY_DEFAULT`. Release CI
 must validate the catalog with the supported Codex CLI, add the marketplace in an isolated
@@ -475,15 +602,21 @@ Claude-only description.
 ## Release sequencing (design §"Repository and release sequence")
 
 Engineering order and release order differ. Engineering may proceed 01 → 02 → 03 → 04 → 05 →
-06 → 07 in the canonical clone as soon as Plan 00 step 1 (canonical clone established) is done.
-Release order is fixed:
+06 → 07 in the canonical clone as soon as decommission precondition 1 (fresh clone established at
+`~/programming/conductor`) is done — and, because nothing is being moved, it may equally proceed
+from `.worktrees/` under the old path until then. Release order is fixed:
 
-1. Plan 00 steps 1–4 — canonical clone, quiesce, worktree recreation, quarantine rename.
+1. Decommission precondition 1 — fresh clone established. Preconditions 2–5 (archive untracked and
+   ignored state, give every linked worktree a recorded outcome, clear the stale Codex
+   project-trust entry, install and smoke-test the intended plugin version) run in that order
+   alongside engineering; the quarantine itself does **not** happen here.
 2. Plan 08 — spec-craft dual-host, versioned artifact.
 3. Plans 01–07 — Conductor dual-host against that supported spec-craft version.
-4. Plan 09 — marketplace catalogs and bundles.
+4. Plan 09 — marketplace catalogs and bundles. Not before Plan 04 has merged.
 5. Plan 10 — descriptions and public documentation, after each repository team accepts.
 6. Branch-based installation smokes before merge; public installation smokes after merge.
-7. Plan 00 step 11 — quarantine removal after the one-week observation period and final scan.
+7. Decommission precondition 6 — declare the quiesce window, `mv` to a dated quarantine directory,
+   observe for one week, then remove after a final re-run of all six checks against the
+   quarantined copy.
 
 **Conductor never merges any of these default-branch pull requests.**
