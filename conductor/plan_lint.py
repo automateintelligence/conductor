@@ -53,6 +53,17 @@ _ADR_DIRS = ("docs/adr", "docs/ADR", "docs/adrs", "docs/decisions")
 _FENCE = re.compile(r"^ {0,3}(?P<f>`{3,}|~{3,})(?P<info>.*)$")
 
 
+def _opens_fence(m: re.Match[str]) -> bool:
+    """Whether a fence-shaped line actually OPENS a fenced block (CommonMark §4.5).
+
+    A backtick fence's info string may not contain a backtick — ```` ```md`x ```` is inline
+    code in a paragraph, not a fence. A tilde fence's info string may, and that asymmetry is
+    the spec's, not a shortcut here. Accepting any info text let a line that opens no fence in
+    any renderer open one in this parser, which then SUPPRESSED every marker finding to the end
+    of the phase: a false negative, and the quietest possible failure for a hard check."""
+    return not (m.group("f")[0] == "`" and "`" in m.group("info"))
+
+
 def _fence_scan(text: str) -> Iterator[tuple[int, str, bool, str | None]]:
     """(line-start offset, line without its newline, inside-a-fenced-block, fence still open
     after this line) per line.
@@ -76,9 +87,11 @@ def _fence_scan(text: str) -> Iterator[tuple[int, str, bool, str | None]]:
     for line in text.split("\n"):
         m = _FENCE.match(line)
         if fence is None:
-            inside = m is not None
-            if m is not None:
+            if m is not None and _opens_fence(m):
+                inside = True
                 fence = m.group("f")
+            else:
+                inside = False
         else:
             inside = True
             if (

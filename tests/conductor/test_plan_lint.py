@@ -366,6 +366,34 @@ def test_an_unterminated_fence_does_not_hide_the_headings_after_it():
     assert titles == ["Phase 1 — Scoring (A3, A4)", "Phase 2 — Reporting (A8)"]
 
 
+# --- an info string is not free text (codex round 2, finding 4) --------------------------
+# CommonMark §4.5: a BACKTICK fence's info string may not contain a backtick (the line is
+# inline code, not a fence); a TILDE fence's info string may. Accepting arbitrary info text
+# let a non-fence line open a fence in this parser and suppress every following marker finding
+# to the end of the phase — a false negative introduced by the fence fix itself.
+
+
+def test_a_backtick_in_a_backtick_fence_info_string_opens_no_fence():
+    text = _fenced("```md`not-an-opener", "```")
+    assert plan_lint.lint(text) == [
+        f"{_MARKER}Phase 2 — Reporting (A8):- [~] documented example"
+    ]
+
+
+def test_a_backtick_in_a_tilde_fence_info_string_still_opens_a_fence():
+    # The other half of §4.5 — the rule is backtick-specific, so a tilde fence keeps working.
+    assert plan_lint.lint(_fenced("~~~md`still-an-opener", "~~~")) == []
+
+
+def test_a_run_of_backticks_after_the_opener_is_not_an_info_string():
+    # ```` ``` ```` is the shape a plan uses to show a fence; the info string carries
+    # backticks, so it is not an opener either.
+    text = _fenced("```` ```", "````")
+    assert plan_lint.lint(text) == [
+        f"{_MARKER}Phase 2 — Reporting (A8):- [~] documented example"
+    ]
+
+
 def test_committed_plan_phase_titles_are_unchanged_by_fence_awareness():
     # The plan in this repo that HAS phases, so "don't change the split for plans without
     # fenced H2s" is checked against a real file and not only against fixtures.
