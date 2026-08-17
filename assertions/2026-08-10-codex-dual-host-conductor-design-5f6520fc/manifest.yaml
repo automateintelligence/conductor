@@ -1,0 +1,24 @@
+# Done-gate manifest for docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md
+#
+# Gate directory = assertions/<run-key>, and the run key is derived, never typed:
+#   conductor.core.runkey.run_key(normalize_spec_path(repo, <spec>))
+#     -> 2026-08-10-codex-dual-host-conductor-design-5f6520fc
+#   conductor.core.names.derived_names(<run-key>).gate_dir -> assertions/<run-key>
+# which is exactly what conductor.paths.resolve_gate(run_key=...) verifies a run.json against.
+#
+# Run this gate with the slug named explicitly, because `conductor assert run` has no --run
+# flag and the ambient resolver in this checkout still points at the flat self-enforcement gate:
+#   CONDUCTOR_GATE_SLUG=2026-08-10-codex-dual-host-conductor-design-5f6520fc \
+#     ./bin/conductor assert run
+#
+# A-DH-5/6/7 are deliberately absent: they govern relocation and merge automation, which the
+# roadmap defers to Track B (docs/superpowers/plans/2026-08-10-codex-dual-host-ROADMAP.md).
+assertions:
+  - id: a-dh-1-host-vocabulary-confined-to-adapters
+    claim: "no Python module outside the host-adapter layer contains a Claude slash-command invocation, a Codex dollar-prefixed skill invocation, CLAUDE_PLUGIN_ROOT, or a host-specific permission or sandbox flag string"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_1_host_vocabulary.py"
+    setup: ""
+    teardown: ""
+    timeout: 60
+    level: spec
+    kind: property
