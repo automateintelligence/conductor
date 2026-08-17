@@ -16,6 +16,18 @@
 
 ---
 
+## Execution status
+
+**Task 1 is executed.** Branch `feature/plan-04-host-adapters`, commit `72847d0` (2026-08-17). Ten tests in `tests/conductor/hosts/test_registry.py`, all passing; every falsifier applied, watched fail, and reverted. Created `conductor/hosts/{__init__,base,claude,codex}.py`. Land-unwired confirmed: `git diff main` against `conductor/driver.py`, `conductor/resume_script.py`, and `conductor/preflight.py` is empty.
+
+**Two `# type: ignore[return-value]  # conforming from Task 10` comments exist at `conductor/hosts/base.py:154` and `:158`,** on the two `return` statements in `load()`. They suppress a *real* non-conformance — the adapter shells declare no protocol method yet — and are correct only until the adapters are complete. **Task 10 must delete both.** If they survive Task 10, pyright is silently no longer checking that `load()` returns something that satisfies `HostAdapter`, which is the one static guarantee §"Working agreements" leans on.
+
+Tasks 2–11 are not started. Three defects the first execution surfaced are corrected in place: the Task 1 import block (Step 4, "Import hygiene"), the predicted RED output of Task 1 Step 3, and the parametrized-falsifier gap now documented in §"How to read the test steps".
+
+**Track reclassification — why a written plan is not being executed straight through.** The owner has since split the roadmap into a Codex-capable track that ships first and an improvement track that follows. **Plan 04 is improvement-track work and is deferred.** It specifies a nineteen-member adapter protocol; the minimal Codex-capable surface needs only the members that roughly 23 lines of Python actually use. This plan is retained in full and is **not superseded** — nothing in it is withdrawn, and Task 1 stays landed. Do not restructure it to match the smaller surface. A future reader finding Tasks 2–11 unexecuted should read that as sequencing, not abandonment.
+
+---
+
 ## Dependency status — read this before believing the numbering
 
 Plan 04 depends on **Plan 01 only** (roadmap dependency table, lines 61–73). Plan 01 is **merged**: PR #84, merge commit `f3b0858`, and its residuals are recorded in `docs/reviews/2026-08-10-plan-01-residuals.md`. Every interface Plan 04 needs already exists on `main`.
@@ -198,6 +210,8 @@ Every test step carries a **Falsifier** line: the exact edit you would make to t
 
 Contract tests are parametrized over `("claude", "codex")` wherever the contract is shared, so the same assertion runs against both hosts. Where a contract is genuinely asymmetric — `install_hooks` is the only one — the shared assertion is stated at the level where symmetry holds ("installs or refuses loudly; never silently no-ops") and the branch is inside the test.
 
+**A falsifier that shrinks a parametrize list removes cases instead of failing them.** Every parametrization in this plan is generated from `base.HOST_IDS`, so editing `HOST_IDS` to `("claude",)` does not make the `[codex]` cases fail — pytest never collects them, the run is green, and the assertion you meant to exercise was silently deleted. A vanished case is the same defect as a test that passes with its own fix removed, wearing different clothes; this repository has now been bitten by that family five times. **Every parametrized case needs at least one falsifier that keeps the case generated** — perturb the per-host value the case asserts on (`CodexAdapter.id`, an argv flag, a floor tuple), not the list the case is generated from. When a task's falsifier note names a `HOST_IDS` edit, treat it as covering the unparametrized assertions only, and read the run's collected-test count, not just its pass/fail line.
+
 ---
 
 ### Task 1: The package, the vocabularies, the error taxonomy, and the registry
@@ -349,9 +363,11 @@ def test_the_protocol_declares_every_member_the_adapters_must_implement():
 - [ ] **Step 3: Run the test to verify it fails**
 
 Run: `pytest tests/conductor/hosts/test_registry.py -q`
-Expected: FAIL — `ModuleNotFoundError: No module named 'conductor.hosts.base'`
+Expected: FAIL — `ImportError: cannot import name 'base' from 'conductor.hosts'`
 
-**Falsifier for this task's tests:** change `HOST_IDS` to `("claude",)` — `test_host_ids_are_exactly_the_two_supported_hosts`, both parametrized `load` cases, and `test_opposite_is_an_involution_over_the_host_set` all fail. Change `load` to return a `ClaudeAdapter` for any unknown id and `test_load_refuses_an_unknown_host_and_names_the_supported_set` fails.
+Not `ModuleNotFoundError`. Step 1 has already created an empty `conductor/hosts/__init__.py`, so the package imports fine and only the `base` name is missing; the test's `from conductor.hosts import base` therefore raises `ImportError`, not `ModuleNotFoundError`. Same root cause, different exception — an executor matching the message literally would otherwise conclude the step misfired. *(Observed on the first execution, 2026-08-17.)*
+
+**Falsifier for this task's tests:** change `HOST_IDS` to `("claude",)` — `test_host_ids_are_exactly_the_two_supported_hosts`, the `[claude]` `load` case, and `test_opposite_is_an_involution_over_the_host_set` all fail. Change `load` to return a `ClaudeAdapter` for any unknown id and `test_load_refuses_an_unknown_host_and_names_the_supported_set` fails. **Then, separately, set `CodexAdapter.id = "claude"` and watch `test_load_returns_an_adapter_whose_id_matches_the_request[codex]` fail.** That third falsifier is not redundant: shrinking `HOST_IDS` does not fail the `[codex]` case, it *deletes* it — the parametrization is generated from `base.HOST_IDS`, so under the first falsifier `[codex]` is never collected and its assertion is never run. See §"How to read the test steps".
 
 - [ ] **Step 4: Write the implementation**
 
@@ -376,10 +392,8 @@ Sharing *argv construction* is not.
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -586,6 +600,22 @@ def assert_minimum_version(adapter: HostAdapter) -> tuple[int, ...]:
         )
     return found
 ```
+
+**Import hygiene — corrected after the first execution.** This block imports only what Task 1's own code uses. `os` and `tempfile` are deliberately absent: nothing in Task 1's `base.py` touches either, and the repository has no `pyproject.toml` and no `ruff.toml`, so `ruff check` runs its default rule set — which includes `F`. An unused import is therefore a hard failure at Step 8, not a warning:
+
+```
+F401 [*] `os` imported but unused        --> conductor/hosts/base.py:19:8
+F401 [*] `tempfile` imported but unused  --> conductor/hosts/base.py:22:8
+```
+
+Both *are* needed by `base.py` later, but not until the task that uses them, and each adds its own import at that point:
+
+| Import | Added by | First use in `base.py` |
+| --- | --- | --- |
+| `os` | Task 2, Step 4 | `validated_source_root` |
+| `tempfile` | Task 9, Step 3 | `allocate_result_path` |
+
+Do not pre-import either here to save a later edit — every task between would fail its own lint gate.
 
 Create `conductor/hosts/__init__.py`:
 
@@ -885,7 +915,7 @@ def validated_source_root(root: str, *, host_id: str) -> str:
     return os.path.realpath(root)
 ```
 
-`os` is already in `base.py`'s import block from Task 1.
+**Add `import os` to `base.py` in this step.** Task 1 does not import it — Task 1's code does not use it, and an unused import fails `ruff check` under the default `F` rules (Task 1, Step 4, "Import hygiene"). `validated_source_root` is `os`'s first use in this module.
 
 - [ ] **Step 5: Write the Claude implementation**
 
@@ -3067,7 +3097,7 @@ def allocate_result_path(host_id: str) -> str:
     return path
 ```
 
-`os` and `tempfile` are already in `base.py`'s import block from Task 2.
+`os` is already in `base.py`'s import block from Task 2. **`tempfile` is not — add `import tempfile` in this step.** No earlier task uses it, so no earlier task may import it without failing `ruff check` (Task 1, Step 4, "Import hygiene").
 
 - [ ] **Step 4: Write the Claude implementation**
 
