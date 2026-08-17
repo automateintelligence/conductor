@@ -17,6 +17,8 @@ import re
 import sys
 from collections.abc import Iterator
 
+from conductor.hosts import runhost
+from conductor.hosts.base import load, opposite
 from ledger import sync
 
 _NORMATIVE = re.compile(r"(?im)^\s*(?:[>*-]\s*)*\*{0,2}normative spec\*{0,2}\s*:")
@@ -106,9 +108,36 @@ def _adr_refs(value: str) -> tuple[list[str], list[str]]:
 # phases forever). issue-sync's parser stays unchecked-only by design (done work must not
 # respawn sub-issues); only the lint uses this broader form.
 _TASK_ANY = re.compile(r"^- \[[ xX]\] .+$", re.MULTILINE)
-# The per-phase recipe's load-bearing markers: self-review per task, codex review of the PR,
-# the merge gate, and the PR<->phase-issue link. Substring, case-insensitive.
-_RECIPE_NEEDLES = ("/code-review", "codex", "merge-gate", "closes #")
+# The two markers that mean the same thing on either host: the merge gate, and the
+# PR<->phase-issue link. Substring, case-insensitive.
+_HOST_NEUTRAL_NEEDLES = ("merge-gate", "closes #")
+# The skill a phase's per-task self-review invokes. A NAME, not an invocation — each host
+# renders it in its own form.
+_REVIEW_SKILL = "code-review"
+
+
+def recipe_needles(host_id: str) -> tuple[str, ...]:
+    """The per-phase recipe's load-bearing markers for a run hosted on ``host_id``.
+
+    Two of the four are host-derived, and it matters which two.
+
+    The first is the self-review command, rendered in the host's own invocation form —
+    `/code-review` under Claude, `$code-review` under Codex. A recipe that names the other
+    host's form names something the worker cannot dispatch.
+
+    The second is the REVIEWER, which is always ``opposite(host_id)`` (design line 25). This
+    is the line that made a correct plan fail: the needle was the literal ``"codex"``, so a
+    Codex-hosted plan naming Claude as its reviewer — the only correct thing it could say —
+    was rejected, while a Codex-hosted plan naming *Codex* passed and set up a same-host
+    review. Deriving it inverts both verdicts.
+
+    ``UnknownHost`` on a bad id rather than a fallback: a lint that silently graded a plan
+    against the wrong host's recipe is worse than one that refuses to grade it.
+    """
+    adapter = load(host_id)
+    return (adapter.native_invocation(_REVIEW_SKILL), opposite(host_id)) + (
+        _HOST_NEUTRAL_NEEDLES
+    )
 
 
 def _adr_reasons(title: str, section: str) -> list[str]:
@@ -155,7 +184,11 @@ def lint_phase_adrs(text: str, phase_title: str) -> tuple[list[str], list[str]]:
     return [f"phase-not-found:{phase_title}"], []
 
 
-def lint(text: str, spec_path: str | None = None) -> list[str]:
+def lint(
+    text: str, spec_path: str | None = None, host_id: str | None = None
+) -> list[str]:
+    """Reasons the plan is not fit to drive a run on ``host_id`` (default: this run's host)."""
+    host = host_id or runhost.resolve(os.getcwd())
     reasons: list[str] = []
     if not _NORMATIVE.search(text):
         reasons.append("normative-spec-missing")
@@ -184,7 +217,7 @@ def lint(text: str, spec_path: str | None = None) -> list[str]:
         reasons.append("no-phases")
 
     lowered = text.lower()
-    for needle in _RECIPE_NEEDLES:
+    for needle in recipe_needles(host):
         if needle not in lowered:
             reasons.append(f"recipe-missing:{needle}")
     return reasons
@@ -318,13 +351,16 @@ def main(argv: list[str] | None = None) -> int:
     # Belt to _adr_index's braces: the warning leg is advisory end to end, so ANY failure
     # resolving it (unreadable dir, vanished path, permission change mid-walk) costs the
     # warnings and nothing else. The lint's verdict is never the warning leg's to change.
+    root = _project_root(args.plan_md)
     try:
-        warnings = adr_warnings(text, _project_root(args.plan_md))
+        warnings = adr_warnings(text, root)
     except OSError as exc:
         warnings = [f"warn:phase-adr-unresolvable: {exc}"]
     for warning in warnings:
         print(warning, file=sys.stderr)
-    reasons = lint(text, spec_path=args.spec)
+    # The plan's OWN repo decides the host, not the caller's cwd: `conductor plan-lint` is run
+    # from anywhere, and `<root>/.conductor/host` is where /conductor:start recorded it.
+    reasons = lint(text, spec_path=args.spec, host_id=runhost.resolve(root))
     for reason in reasons:
         print(reason, file=sys.stderr)
     return 1 if reasons else 0

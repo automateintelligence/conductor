@@ -447,3 +447,68 @@ def test_this_repos_own_current_dialect_plans_lint_clean():
     for path in plans:
         text = open(path, encoding="utf-8").read()
         assert plan_lint.lint(text) == [], os.path.basename(path)
+
+
+# --------------------------------------------------------------------- host-derived recipe
+#
+# A1. The recipe needles used to be the literal tuple ("/code-review", "codex", "merge-gate",
+# "closes #"). Two of those four name ONE host: the opposite-host reviewer and the invocation
+# form of the review command. On a Codex-hosted run the opposite host is Claude, so a plan
+# whose recipe correctly says "claude review" failed a lint that demanded the substring
+# "codex" — the lint rejected the only correct plan it could have been given.
+
+CODEX_HOSTED_PLAN = GOOD_PLAN.replace(
+    "/code-review per task", "$code-review per task"
+).replace("codex review ×2", "claude review ×2")
+
+
+def test_claude_hosted_recipe_still_passes_unchanged():
+    # The regression floor: today's plan text, today's verdict.
+    assert plan_lint.lint(GOOD_PLAN, host_id="claude") == []
+
+
+def test_codex_hosted_recipe_naming_claude_as_reviewer_passes():
+    assert plan_lint.lint(CODEX_HOSTED_PLAN, host_id="codex") == []
+
+
+def test_a_codex_hosted_plan_that_names_codex_as_its_own_reviewer_fails():
+    # Same-host review is the defect the opposite-host policy exists to prevent, and it is
+    # exactly what a plan copied from a Claude run would say.
+    reasons = plan_lint.lint(GOOD_PLAN, host_id="codex")
+    assert "recipe-missing:claude" in reasons
+
+
+def test_a_claude_hosted_plan_that_names_claude_as_its_own_reviewer_fails():
+    reasons = plan_lint.lint(CODEX_HOSTED_PLAN, host_id="claude")
+    assert "recipe-missing:codex" in reasons
+
+
+def test_the_review_command_needle_is_rendered_in_the_hosts_own_form():
+    assert plan_lint.recipe_needles("claude")[0] == "/code-review"
+    assert plan_lint.recipe_needles("codex")[0] == "$code-review"
+
+
+def test_the_reviewer_needle_is_always_the_opposite_host():
+    assert "codex" in plan_lint.recipe_needles("claude")
+    assert "claude" in plan_lint.recipe_needles("codex")
+    assert "claude" not in plan_lint.recipe_needles("claude")
+    assert "codex" not in plan_lint.recipe_needles("codex")
+
+
+def test_the_host_neutral_needles_are_identical_on_both_hosts():
+    shared = set(plan_lint.recipe_needles("claude")) & set(
+        plan_lint.recipe_needles("codex")
+    )
+    assert shared == {"merge-gate", "closes #"}
+
+
+def test_lint_defaults_to_the_recorded_host_when_none_is_passed(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
+    assert plan_lint.lint(CODEX_HOSTED_PLAN) == []
+    assert "recipe-missing:claude" in plan_lint.lint(GOOD_PLAN)
+
+
+def test_an_unknown_host_is_refused_rather_than_silently_linted_as_claude():
+    with pytest.raises(Exception) as excinfo:
+        plan_lint.recipe_needles("gemini")
+    assert "gemini" in str(excinfo.value)
