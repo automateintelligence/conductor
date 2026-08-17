@@ -93,8 +93,16 @@ class CodexAdapter:
         and not from Claude's. ``--approve-for-me`` counts as scoped because it auto-approves
         under a workspace-write sandbox — labelling that supervised would be the audit
         misrepresentation the posture line exists to prevent.
+
+        The first arm is the ``--`` terminator, and ``break`` inside a ``case`` inside the
+        driver's ``for`` loop ends the scan. Verified against codex-cli 0.147.0:
+        ``codex exec --cd /tmp -- --dangerously-bypass-approvals-and-sandbox <prompt>`` does not
+        apply that flag — it takes it as the PROMPT positional and then rejects the driver's own
+        prompt as a second positional, exit 2. A token after ``--`` grants nothing, so labelling
+        the fire from it is an audit line claiming a privilege Codex never gave.
         """
         return (
+            "        --) break ;;\n"
             '        --dangerously-bypass-approvals-and-sandbox) POSTURE="full-bypass" ;;\n'
             '        --sandbox=danger-full-access) POSTURE="full-bypass" ;;\n'
             '        danger-full-access) case "$prev" in --sandbox|-s) POSTURE="full-bypass" ;; esac ;;\n'
@@ -121,10 +129,16 @@ class CodexAdapter:
         )
 
     def posture_of(self, args: list[str]) -> str:
-        """The Python mirror of ``resume_posture_arms``. Exact tokens, bypass wins."""
+        """The Python mirror of ``resume_posture_arms``. Exact tokens, bypass wins.
+
+        Stops at ``--`` for the same reason the shell arm does: Codex parses nothing after the
+        terminator as a flag, so nothing after it can raise the posture.
+        """
         posture = "supervised"
         prev = ""
         for arg in args:
+            if arg == "--":
+                break
             if arg in (
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--sandbox=danger-full-access",

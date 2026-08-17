@@ -1215,6 +1215,16 @@ def test_a_codex_run_fails_loud_when_the_skill_tree_is_missing(tmp_path):
             "CONDUCTOR_RESUME_CODEX_FLAGS=\"--cd '/tmp/a danger-full-access'\"",
             "supervised",
         ),
+        # `--` ends codex's option parsing (verified against codex-cli 0.147.0): the flag
+        # after it becomes the PROMPT positional and grants nothing.
+        (
+            'CONDUCTOR_RESUME_CODEX_FLAGS="-- --dangerously-bypass-approvals-and-sandbox"',
+            "supervised",
+        ),
+        (
+            'CONDUCTOR_RESUME_CODEX_FLAGS="--approve-for-me -- --dangerously-bypass-approvals-and-sandbox"',
+            "scoped",
+        ),
     ],
 )
 def test_a_codex_fire_labels_its_posture_from_codex_flags(tmp_path, env_line, expected):
@@ -1238,6 +1248,11 @@ def test_the_shell_posture_derivation_agrees_with_its_python_mirror(tmp_path):
         (["--sandbox", "workspace-write"], "scoped"),
         (["--approve-for-me"], "scoped"),
         (["--dangerously-bypass-approvals-and-sandbox"], "full-bypass"),
+        (["--", "--dangerously-bypass-approvals-and-sandbox"], "supervised"),
+        (
+            ["--approve-for-me", "--", "--dangerously-bypass-approvals-and-sandbox"],
+            "scoped",
+        ),
     ):
         assert adapter.posture_of(args) == expected
 

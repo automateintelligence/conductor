@@ -239,10 +239,33 @@ def test_claude_posture_derivation(args, expected):
         ),
         (["--cd", "/tmp/danger-full-access"], "supervised"),
         (["workspace-write"], "supervised"),
+        # `--` ends option parsing: everything after it is a POSITIONAL, never a flag.
+        (["--", "--dangerously-bypass-approvals-and-sandbox"], "supervised"),
+        (["--", "--sandbox", "workspace-write"], "supervised"),
+        (["--", "--approve-for-me"], "supervised"),
+        # tokens BEFORE the terminator are real flags and still count
+        (
+            ["--approve-for-me", "--", "--dangerously-bypass-approvals-and-sandbox"],
+            "scoped",
+        ),
     ],
 )
 def test_codex_posture_derivation(args, expected):
     assert base.load("codex").posture_of(args) == expected
+
+
+def test_a_flag_after_the_terminator_grants_nothing_and_must_not_be_labelled():
+    """Verified against codex-cli 0.147.0: `codex exec --cd /tmp -- <flag> <prompt>` does not
+    apply <flag>. It takes it as the PROMPT positional, then rejects the driver's own generated
+    prompt as a second positional and exits 2. Labelling that fire `full-bypass` is an audit log
+    that claims a privilege Codex never granted — and `_posture_decided` then suppresses the
+    permissions nudge on the strength of the lie."""
+    adapter = base.load("codex")
+    assert (
+        adapter.posture_of(["--", "--dangerously-bypass-approvals-and-sandbox"])
+        == "supervised"
+    )
+    assert "--) break ;;" in adapter.resume_posture_arms()
 
 
 def test_a_bypass_flag_from_the_other_host_never_grants_bypass():
