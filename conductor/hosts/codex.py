@@ -22,6 +22,22 @@ from conductor.hosts import discovery
 #: truth §"Session and config isolation"), so this is the Codex config root unconditionally.
 CONFIG_DIR_ENV = "CODEX_HOME"
 
+#: The subcommand that reports where Codex installed each plugin. A CLI contract (``--json`` is
+#: documented by ``codex plugin list --help`` on 0.147.0), which is what makes it usable where
+#: the cache LAYOUT is not: the only root ever observed was ``$CODEX_HOME/.tmp/plugins``.
+PLUGIN_LIST_ARGV: tuple[str, ...] = ("plugin", "list", "--json")
+
+#: The same lookup as ``installed_plugin_roots``, as a self-contained program the generated cron
+#: driver can run before any conductor code is importable — that is the whole problem it solves,
+#: so it cannot import from here. Reads ``codex plugin list --json`` on stdin, takes a plugin
+#: name in argv, prints that plugin's install root (or nothing). Single quotes are forbidden
+#: inside it: the driver wraps it in shell single quotes.
+PLUGIN_ROOT_SNIPPET = (
+    "import json,sys;"
+    'print(next((p["source"]["path"] for p in json.load(sys.stdin).get("installed") or []'
+    ' if p.get("name")==sys.argv[1] and (p.get("source") or {}).get("path")),""))'
+)
+
 
 class CodexAdapter:
     id: str = "codex"
@@ -53,20 +69,45 @@ class CodexAdapter:
     def resume_bin_resolution(self) -> str:
         """Resolve `codex`, `conductor`, and conductor's skill tree at RUN time.
 
-        The installed Codex plugin cache is deliberately NOT globbed. The only root ever
-        observed was ``$CODEX_HOME/.tmp/plugins``, a ``.tmp`` path no documentation makes
-        contractual, and baking an unverified layout is exactly the rot
-        ``resume_script._ROT_PATTERNS`` exists to detect. ``CODEX_PLUGIN_ROOT`` is the escape
-        hatch; otherwise the skill tree is derived from the resolved conductor bin
-        (``<root>/bin/conductor`` -> ``<root>/skills/...``), which cannot go stale because it
-        is computed on every fire.
+        A Codex user installs conductor as a PLUGIN, and an installed plugin's bin is not on
+        PATH (``skills/start/SKILL.md`` says so). Nothing installs a shim and nothing persists
+        ``CODEX_PLUGIN_ROOT``, so PATH plus that variable resolve nothing on a normal install
+        and the first cron fire dies at the guard before Codex is ever spawned.
+
+        The third leg therefore ASKS CODEX where it put the plugin, via
+        ``codex plugin list --json`` (``installed[].name`` + ``installed[].source.path``,
+        verified against codex-cli 0.147.0 — ``--json`` is a documented flag of that
+        subcommand). That is a CLI contract, not a filesystem layout: the only cache root ever
+        observed was ``$CODEX_HOME/.tmp/plugins``, which no documentation makes contractual, so
+        globbing it would bake exactly the kind of guess ``resume_script._ROT_PATTERNS`` exists
+        to detect. Asking the host survives a cache move AND a version bump, because nothing
+        version-shaped is written down. ``</dev/null`` because Codex subcommands hang on an
+        unredirected stdin (ground truth §"Codex help hangs"), and under cron a hang is a stuck
+        worker rather than a failed one. ``python3`` is not a new dependency: ``bin/conductor``
+        execs it for every subcommand, so a machine that cannot run it cannot run conductor.
+
+        The skill tree is derived from whichever bin won (``<root>/bin/conductor`` ->
+        ``<root>/skills/...``), which cannot go stale because it is computed on every fire. It
+        is derived ONLY from a resolved bin — never from ``.`` — so an unresolved fire reports
+        an empty path instead of inventing one out of the current working directory.
         """
         return (
             'CODEX_BIN="$(command -v codex || true)"\n'
             'CONDUCTOR="$(command -v conductor || true)"\n'
             '[ -x "$CONDUCTOR" ] || [ -z "${CODEX_PLUGIN_ROOT:-}" ] || CONDUCTOR="$CODEX_PLUGIN_ROOT/bin/conductor"\n'
-            "# Conductor's skill tree, derived from the bin at RUN time — never a baked path.\n"
-            'CONDUCTOR_SOURCE="${CODEX_PLUGIN_ROOT:-$(cd "$(dirname "$(readlink -f "${CONDUCTOR:-.}" 2>/dev/null || printf \'%s\' "${CONDUCTOR:-.}")")/.." 2>/dev/null && pwd)}"'
+            "# Installed as a plugin? Ask codex where it put it — a CLI contract, not a\n"
+            "# guessed cache layout, so a cache move or a version bump cannot rot it.\n"
+            'if [ ! -x "${CONDUCTOR:-}" ] && [ -x "${CODEX_BIN:-}" ]; then\n'
+            "    CONDUCTOR_PLUGIN_DIR=\"$(\"$CODEX_BIN\" plugin list --json </dev/null 2>/dev/null "
+            f"| python3 -c '{PLUGIN_ROOT_SNIPPET}' conductor 2>/dev/null || true)\"\n"
+            '    [ -z "$CONDUCTOR_PLUGIN_DIR" ] || CONDUCTOR="$CONDUCTOR_PLUGIN_DIR/bin/conductor"\n'
+            "fi\n"
+            "# Conductor's skill tree, derived from the RESOLVED bin at RUN time — never a\n"
+            "# baked path, and never from `.` (a cwd-derived tree is a wrong answer that looks\n"
+            "# like a right one whenever the fire happens to start inside some checkout).\n"
+            'CONDUCTOR_SOURCE="${CODEX_PLUGIN_ROOT:-}"\n'
+            '[ -n "$CONDUCTOR_SOURCE" ] || [ ! -x "${CONDUCTOR:-}" ] || '
+            'CONDUCTOR_SOURCE="$(cd "$(dirname "$(readlink -f "$CONDUCTOR" 2>/dev/null || printf \'%s\' "$CONDUCTOR")")/.." 2>/dev/null && pwd)"'
         )
 
     def resume_unresolved_guard(self) -> str:

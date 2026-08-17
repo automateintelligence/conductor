@@ -1262,6 +1262,10 @@ def test_a_codex_fire_stops_loud_when_codex_knows_of_no_conductor_plugin(tmp_pat
     assert "driver-unresolved codex=" in log
     assert not argv_file.exists()
     assert "fire-start" not in log
+    # ...and the skill path it reports must be EMPTY, not a tree derived from whatever cwd
+    # happened to be. A cwd-derived answer is how this suite — which runs from inside a real
+    # conductor checkout — makes an unresolved driver look resolved.
+    assert "skill=/skills/autodev/SKILL.md" in log, log
 
 
 def test_a_conductor_on_path_still_wins_over_the_plugin_lookup(tmp_path):

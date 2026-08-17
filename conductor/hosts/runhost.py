@@ -8,8 +8,13 @@ context, and no live agent to ask, which is why the answer is a file next to
 Resolution order, most explicit first:
 
 1. ``$CONDUCTOR_HOST`` — an operator override, validated.
-2. ``<project>/.conductor/host`` — what ``/conductor:start`` recorded for this run.
+2. ``<main-checkout>/.conductor/host`` — what ``/conductor:start`` recorded for this run.
 3. ``claude`` — the legacy default.
+
+Step 2 resolves the MAIN checkout, never the directory it was handed. A run lives in a linked
+worktree and the driver exports that worktree as ``CONDUCTOR_HOME``, so the recording and every
+later read of it start from different paths; joining ``.conductor/host`` onto each would make one
+run answer ``codex`` from the owner checkout and ``claude`` from its own worktree.
 
 Step 3 is the compatibility guarantee, not a guess: every run installed before this module
 existed has no host file, and each of those must keep rendering and firing byte-for-byte as it
@@ -21,6 +26,7 @@ log that says nothing about it is the failure class this repository is built aro
 from __future__ import annotations
 
 import os
+import subprocess
 
 from conductor.core.atomic import write_atomic
 from conductor.hosts.base import HOST_IDS, HostAdapter, UnknownHost, load
@@ -32,9 +38,33 @@ HOST_ENV = "CONDUCTOR_HOST"
 DEFAULT_HOST = "claude"
 
 
+def _common_root(project_root: str) -> str:
+    """The MAIN checkout for any path inside the repository; the path itself outside one.
+
+    ``conductor.core.resolve.repo_root`` is the single implementation of this (dirname of
+    ``--git-common-dir``, identical from a linked worktree and from the owner checkout) and
+    ``resume_script.main_root`` already delegates to it. Resolving here rather than at each call
+    site is what makes the run's host ONE answer: the driver records from the main checkout, but
+    it exports the run WORKTREE as ``CONDUCTOR_HOME``, so preflight, plan-lint and the merge gate
+    all ask from in there. Joining ``.conductor/host`` onto whatever root each was handed gave a
+    Codex run claude's preflight roots and the wrong review marker, from inside its own worktree.
+
+    A path that is not in a repository — a project nobody has ``git init``-ed, a plain temp dir —
+    keeps the literal-path behaviour rather than failing: this is a leaf read on the launcher's
+    path, and refusing to answer would be a worse failure than answering about the directory the
+    caller actually named.
+    """
+    from conductor.core.resolve import repo_root
+
+    try:
+        return repo_root(project_root)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return project_root
+
+
 def host_file(project_root: str) -> str:
-    """``<project_root>/.conductor/host`` — the recorded host for this project's run."""
-    return os.path.join(project_root, ".conductor", "host")
+    """``<main-checkout>/.conductor/host`` — the recorded host for this project's run."""
+    return os.path.join(_common_root(project_root), ".conductor", "host")
 
 
 def _validated(host_id: str, *, source: str) -> str:

@@ -14,6 +14,7 @@ one outcome no operator can debug from a cron log.
 from __future__ import annotations
 
 import os
+import subprocess
 
 import pytest
 
@@ -113,3 +114,75 @@ def test_recording_creates_the_state_directory_when_it_is_absent(tmp_path):
     os.mkdir(root)
     runhost.record(root, "codex")
     assert runhost.resolve(root) == "codex"
+
+
+# ---- the run worktree is the same run (P1-B) ---------------------------------------
+
+
+@pytest.fixture
+def linked_worktree(tmp_path):
+    """A main checkout plus a linked worktree of it — the topology every run uses.
+
+    `/conductor:start` step 5b puts the worker in `.worktrees/run-<slug>`, and the generated
+    driver exports that worktree as `CONDUCTOR_HOME`. So every consumer of the host — preflight,
+    plan-lint, the merge gate — asks from INSIDE the worktree, while `driver install` recorded
+    from the main checkout.
+    """
+    main = tmp_path / "main"
+    main.mkdir()
+    for cmd in (
+        ["git", "init", "-q", str(main)],
+        ["git", "-C", str(main), "commit", "-q", "--allow-empty", "-m", "root"],
+        [
+            "git",
+            "-C",
+            str(main),
+            "worktree",
+            "add",
+            "-q",
+            str(tmp_path / "wt"),
+            "-b",
+            "run",
+        ],
+    ):
+        subprocess.run(cmd, check=True, timeout=30)
+    return str(main), str(tmp_path / "wt")
+
+
+@pytest.mark.parametrize("host_id", HOSTS)
+def test_a_linked_worktree_resolves_the_same_host_as_the_main_checkout(
+    host_id, linked_worktree, monkeypatch
+):
+    """One run, one host. Resolving per-directory gave a Codex run claude preflight roots, a
+    claude plan-lint needle and the wrong review marker — from inside its own worktree."""
+    monkeypatch.delenv(runhost.HOST_ENV, raising=False)
+    main, worktree = linked_worktree
+    runhost.record(main, host_id)
+    assert runhost.resolve(worktree) == host_id
+
+
+@pytest.mark.parametrize("host_id", HOSTS)
+def test_recording_from_inside_the_worktree_lands_in_the_main_checkout(
+    host_id, linked_worktree, monkeypatch
+):
+    """The write side has to agree with the read side, or a worktree grows its own recording
+    that the main checkout — and the next reconcile from it — never sees."""
+    monkeypatch.delenv(runhost.HOST_ENV, raising=False)
+    main, worktree = linked_worktree
+    runhost.record(worktree, host_id)
+    assert not os.path.exists(os.path.join(worktree, ".conductor", "host"))
+    assert runhost.resolve(main) == host_id
+
+
+def test_a_path_outside_any_repository_still_resolves_against_itself(
+    tmp_path, monkeypatch
+):
+    """Not every caller is in a git repo — the tmp-dir callers in this file are not, and neither
+    is a project someone has not run `git init` in yet. Those keep the literal-path behaviour
+    rather than failing or reaching for an unrelated ancestor repository."""
+    monkeypatch.delenv(runhost.HOST_ENV, raising=False)
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    runhost.record(str(plain), "codex")
+    assert os.path.isfile(os.path.join(str(plain), ".conductor", "host"))
+    assert runhost.resolve(str(plain)) == "codex"

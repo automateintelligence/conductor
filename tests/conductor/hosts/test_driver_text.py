@@ -142,6 +142,37 @@ def test_codex_resolves_its_skill_root_at_run_time_never_at_generation_time():
     assert os.path.isabs(fire.split("$CONDUCTOR_SOURCE")[0].split()[-1]) is False
 
 
+def test_codex_finds_a_plugin_installed_conductor_by_asking_codex_not_by_guessing():
+    """An installed plugin's bin is not on PATH, so PATH + CODEX_PLUGIN_ROOT resolve nothing on
+    a normal install. The third leg asks the host — a documented CLI surface — and specifically
+    does NOT encode the one cache root ever observed, which no documentation makes contractual
+    and which carries a version segment that would rot on the next upgrade."""
+    text = base.load("codex").resume_bin_resolution()
+    assert "plugin list --json" in text
+    assert "</dev/null" in text  # codex subcommands hang on an unredirected stdin
+    assert ".tmp/plugins" not in text
+    assert "$CODEX_HOME" not in text
+
+
+def test_codex_never_derives_its_skill_root_from_the_current_directory():
+    """`readlink -f .` answers with whatever directory the fire started in. Inside any conductor
+    checkout that answer looks valid, which is how an unresolved driver reports a resolved
+    tree — and how a test suite that runs from such a checkout cannot tell the two apart."""
+    text = base.load("codex").resume_bin_resolution()
+    assert "CONDUCTOR:-." not in text
+    assert '[ ! -x "${CONDUCTOR:-}" ] || CONDUCTOR_SOURCE=' in text
+
+
+def test_the_plugin_lookup_snippet_is_self_contained_and_shell_quotable():
+    """It runs BEFORE any conductor code is importable — that is the problem it solves — and the
+    driver wraps it in shell single quotes, so it must contain none."""
+    from conductor.hosts import codex
+
+    assert "'" not in codex.PLUGIN_ROOT_SNIPPET
+    assert "conductor" not in codex.PLUGIN_ROOT_SNIPPET  # the name comes from argv
+    assert f"'{codex.PLUGIN_ROOT_SNIPPET}' conductor" in codex.CodexAdapter().resume_bin_resolution()
+
+
 def test_codex_guard_fails_loud_when_the_skill_file_is_missing():
     guard = base.load("codex").resume_unresolved_guard()
     assert "driver-unresolved codex=" in guard
