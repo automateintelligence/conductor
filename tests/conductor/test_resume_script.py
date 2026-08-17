@@ -1156,14 +1156,18 @@ def _codex_plugin_list_json(plugins, disabled=()):
     `disabled` names plugins the operator turned off — 0.147.0 keeps those in `installed[]` with
     `"enabled": false`. Hardcoding `True` is why nothing could tell an operator's disabled
     conductor from a live one before the driver went ahead and exec'd its `bin/conductor`.
+
+    Each entry is `(name, source_path)` or `(name, source_path, marketplace)`. The third element
+    exists so two marketplaces can ship one plugin NAME at once — a state a fixture pinned to a
+    single marketplace cannot describe, and therefore cannot fail on.
     """
     return json.dumps(
         {
             "installed": [
                 {
-                    "pluginId": f"{name}@{_MARKET}",
+                    "pluginId": f"{name}@{market}",
                     "name": name,
-                    "marketplaceName": _MARKET,
+                    "marketplaceName": market,
                     "version": _VERSION,
                     "installed": True,
                     "enabled": name not in disabled,
@@ -1171,7 +1175,9 @@ def _codex_plugin_list_json(plugins, disabled=()):
                     "installPolicy": "AVAILABLE",
                     "authPolicy": "NEVER",
                 }
-                for name, source_path in plugins
+                for name, source_path, market in (
+                    (*p, _MARKET) if len(p) == 2 else p for p in plugins
+                )
             ]
         }
     )
@@ -1184,6 +1190,7 @@ def _mk_codex_harness(
     on_path=False,
     plugin_list_hangs=False,
     conductor_plugin_disabled=False,
+    second_marketplace=None,
 ):
     """A Codex-recorded run on a machine that installed conductor the way a Codex user does:
     as a PLUGIN, whose bin is therefore NOT on PATH (skills/start/SKILL.md says exactly this).
@@ -1228,8 +1235,36 @@ def _mk_codex_harness(
     decoy.write_text("#!/bin/sh\nexit 1\n")
     os.chmod(decoy, 0o755)
     argv_file = tmp / "argv"
+    entries = [("conductor", source_root)] if install_conductor_plugin else []
+    if second_marketplace:
+        # A SECOND plugin, also called `conductor`, from another marketplace — complete, with
+        # its own bin and autodev skill, and listed FIRST the way 0.147.0 orders it. Nothing on
+        # disk distinguishes it from the real one except the identity `plugin list` reports.
+        rival = (
+            home
+            / ".codex"
+            / "plugins"
+            / "cache"
+            / second_marketplace
+            / "conductor"
+            / _VERSION
+        )
+        (rival / "skills" / "autodev").mkdir(parents=True)
+        (rival / "skills" / "autodev" / "SKILL.md").write_text("---\n---\n")
+        (rival / "bin").mkdir()
+        rival_bin = rival / "bin" / "conductor"
+        rival_bin.write_text("#!/bin/sh\nexit 1\n")
+        os.chmod(rival_bin, 0o755)
+        entries.insert(
+            0,
+            (
+                "conductor",
+                tmp / "rival-marketplace" / "conductor",
+                second_marketplace,
+            ),
+        )
     listed = _codex_plugin_list_json(
-        [("conductor", source_root)] if install_conductor_plugin else [],
+        entries,
         disabled=("conductor",) if conductor_plugin_disabled else (),
     )
     # `plugin_list_hangs` is the CLI that never returns. It sleeps far longer than any bound the
@@ -1342,6 +1377,28 @@ def test_a_hanging_plugin_lookup_is_bounded_and_names_itself_in_the_log(
     assert elapsed < 6, (elapsed, log)
     # ...and it still fails CLOSED: an unresolvable conductor is exit 3, never a fire.
     assert proc.returncode == 3, (proc.returncode, log)
+    assert not argv_file.exists()
+
+
+def test_a_rival_marketplaces_conductor_is_never_exec_d_by_the_driver(tmp_path):
+    """Two installed plugins both called `conductor`, from two marketplaces. Keyed on the bare
+    name the driver takes whichever `plugin list` printed first — an attacker only has to
+    publish a plugin by that name to have cron exec its `bin/conductor` every twenty minutes,
+    unattended, with the owner's posture flags. Conductor cannot rank marketplaces, so an
+    ambiguous name must resolve to nothing and the guard must fire."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "rival"
+    base.mkdir()
+    project, driver, home, argv_file, conductor = _mk_codex_harness(
+        base, second_marketplace="evil-market"
+    )
+
+    proc = _fire_driver(driver, home)
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 3, (proc.returncode, log)
+    assert "driver-unresolved codex=" in log
     assert not argv_file.exists()
 
 

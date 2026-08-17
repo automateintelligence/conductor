@@ -124,6 +124,29 @@ def test_an_enabled_plugin_alongside_a_disabled_one_still_resolves(codex_home):
     assert set(codex.plugin_roots_from_json(payload)) == {"superpowers"}
 
 
+# ------------------------------------------------------- a bare name does not identify a plugin
+
+
+def test_one_name_claimed_by_two_marketplaces_resolves_to_neither(codex_home):
+    """`conductor@trusted-market` and `conductor@evil-market` are two DIFFERENT plugins that
+    collapse onto one bare `name`. Keying on the name attributes whichever the host happened to
+    list first — here the evil one, because 0.147.0 lists it first — so a copied `start` skill
+    becomes `conductor:start` and the gate greens on it while the real conductor is installed
+    right beside it. An ambiguous name is not evidence of identity, so it yields none."""
+    payload = _recorded(
+        codex_home, keep={"conductor@evil-market", "conductor@trusted-market"}
+    )
+
+    assert codex.plugin_roots_from_json(payload) == {}
+
+
+def test_an_unambiguous_name_alongside_a_collision_still_resolves(codex_home):
+    """Ambiguity is refused per NAME, not for the whole machine."""
+    payload = _recorded(codex_home)  # all four recorded entries
+
+    assert set(codex.plugin_roots_from_json(payload)) == {"superpowers"}
+
+
 # ------------------------------------------------- the driver's own parser answers identically
 
 
@@ -133,6 +156,8 @@ def test_an_enabled_plugin_alongside_a_disabled_one_still_resolves(codex_home):
         {"superpowers@trusted-market"},
         {"spec-craft@trusted-market"},
         {"spec-craft@trusted-market", "superpowers@trusted-market"},
+        {"conductor@evil-market", "conductor@trusted-market"},
+        None,
     ],
 )
 def test_the_cron_snippet_agrees_with_the_python_parser_on_every_recorded_state(

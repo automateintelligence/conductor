@@ -49,7 +49,8 @@ PLUGIN_ROOT_SNIPPET = (
     ' and p.get("enabled") is True and p.get("marketplaceName") and p.get("version")];'
     'd=[os.path.join(h,"plugins","cache",p["marketplaceName"],p["name"],p["version"])'
     " for p in e];"
-    'print(next((x for x in d if os.path.isdir(x)),""))'
+    "d=sorted(set(x for x in d if os.path.isdir(x)));"
+    'print(d[0] if len(d)==1 else "")'
 )
 
 
@@ -102,24 +103,61 @@ def plugin_roots_from_json(text: str) -> dict[str, str]:
     ``tests/conductor/fixtures/README.md``. Nothing here raises — malformed or unexpected output
     means "this machine reports no plugin identities", which is a legitimate answer that
     ``preflight`` degrades on, not an error.
+
+    A name claimed by MORE THAN ONE installed root is dropped. ``name`` is a string a plugin
+    declares about itself; ``pluginId``/``marketplaceName`` are the identity Codex actually keys
+    on, and two marketplaces may ship ``conductor`` at once. Keeping the first — which is what
+    listing order decides, and 0.147.0 lists the rival first — attributes a stranger's copied
+    skill as the required plugin's and points the cron driver's ``$CONDUCTOR`` at its ``bin/``.
+    Conductor has no marketplace trust list and inventing one is not this function's job, so the
+    honest answer for an ambiguous name is none: preflight reports the requirement
+    ``unverified`` and the driver stops at its guard. Roots that are not on disk are excluded
+    BEFORE the count, so two listings of which only one is really installed still resolve.
     """
+    return {
+        name: next(iter(roots))
+        for name, roots in _claims_from_json(text).items()
+        if len(roots) == 1
+    }
+
+
+def contested_roots_from_json(text: str) -> list[str]:
+    """The installed roots of every name MORE THAN ONE of them claims, sorted.
+
+    Their contents are still invocable — Codex's skill namespace is flat, so both plugins' skills
+    resolve by bare name — but no plugin claim survives the collision. Discovery contributes them
+    unqualified, which is what makes ``preflight`` report the requirement ``unverified`` rather
+    than ``missing``: the skill IS there, and telling an owner to install a plugin that is
+    already installed twice is advice that teaches them to ignore the gate.
+    """
+    return sorted(
+        root
+        for roots in _claims_from_json(text).values()
+        if len(roots) > 1
+        for root in roots
+    )
+
+
+def _claims_from_json(text: str) -> dict[str, set[str]]:
+    """``{plugin name: every enabled, on-disk install root claiming it}``."""
     try:
         data = json.loads(text)
     except (ValueError, TypeError):
         return {}
     home = config_root()
-    roots: dict[str, str] = {}
+    claims: dict[str, set[str]] = {}
     for entry in (data.get("installed") if isinstance(data, dict) else None) or []:
         if not isinstance(entry, dict):
             continue
         root = _installed_root(entry, home)
         if root:
-            roots.setdefault(str(entry["name"]), root)
-    return roots
+            claims.setdefault(str(entry["name"]), set()).add(root)
+    return claims
 
 
-def installed_plugin_roots() -> dict[str, str]:
-    """Where Codex says each installed plugin lives, or nothing if it cannot be asked.
+def installed_plugins() -> tuple[dict[str, str], list[str]]:
+    """``({attributable name: root}, [contested roots])``, or two empties if Codex cannot be
+    asked.
 
     Asking the host is the only way to attribute a skill to a plugin on Codex: skill directories
     are flat and carry no plugin qualifier, so nothing on disk says whose a skill is. What comes
@@ -128,10 +166,15 @@ def installed_plugin_roots() -> dict[str, str]:
     rather than trusted. ``</dev/null`` because Codex subcommands hang on an unredirected stdin
     (ground truth §"Codex help hangs"); a timeout because a preflight that hangs is worse than
     one that reports less.
+
+    ONE invocation answers both halves. Splitting them into two functions would mean shelling
+    out to the CLI twice per preflight and, worse, letting the two answers come from different
+    moments — a plugin installed in between would be attributable to one and contested to the
+    other.
     """
     exe = shutil.which("codex")
     if not exe:
-        return {}
+        return {}, []
     try:
         proc = subprocess.run(
             [exe, "plugin", "list", "--json"],
@@ -141,8 +184,10 @@ def installed_plugin_roots() -> dict[str, str]:
             timeout=PLUGIN_LIST_TIMEOUT_S,
         )
     except (OSError, subprocess.SubprocessError):
-        return {}
-    return plugin_roots_from_json(proc.stdout) if proc.returncode == 0 else {}
+        return {}, []
+    if proc.returncode != 0:
+        return {}, []
+    return plugin_roots_from_json(proc.stdout), contested_roots_from_json(proc.stdout)
 
 
 class CodexAdapter:
@@ -392,19 +437,26 @@ class CodexAdapter:
         ``AGENTS.md`` dispatch table resolves.
 
         Installed PLUGIN skills come back qualified, because Codex itself supplies the
-        attribution: ``codex plugin list --json`` reports each installed plugin's name and root,
-        and its skills live under that root. The cache LAYOUT is still not searched — the only
-        root ever observed was ``$CODEX_HOME/.tmp/plugins`` and nothing makes it contractual —
-        but asking the host is not guessing a layout, and without it no Codex machine can
+        attribution: ``codex plugin list --json`` reports each installed plugin's identity, and
+        its skills live under the root that identity implies. Without it no Codex machine can
         distinguish spec-craft's ``expectations`` from any other plugin's.
+
+        A plugin NAME that two installed roots claim is the exception, and it comes back BARE.
+        Both roots' skills really are invocable — the Codex skill namespace is flat — so
+        dropping them would report a present skill missing; but neither root's claim on the name
+        survives the other, so qualifying them would hand a stranger's copy the required
+        plugin's identity. Bare is the third answer: present, unattributed, ``unverified``.
         """
         home = self.source_root()
         project = project_root or os.getcwd()
         cmds = discovery.skill_names(f"{home}/skills/*/SKILL.md")
         cmds |= discovery.command_names(f"{home}/prompts/*.md")
         cmds |= discovery.skill_names(f"{project}/.{self.id}/skills/*/SKILL.md")
-        for name, root in installed_plugin_roots().items():
+        attributed, contested = installed_plugins()
+        for name, root in attributed.items():
             cmds |= discovery.qualified(name, root)
+        for root in contested:
+            cmds |= discovery.plugin_contents(root)
         cmds |= discovery.scan_plugin_dir(
             discovery.CONDUCTOR_ROOT, discovery.ALL_MANIFEST_DIRS
         )

@@ -82,19 +82,35 @@ def test_discovers_conductor_own_root(monkeypatch, tmp_path):
 _MARKET, _VERSION = "openai-curated", "d6169bef"
 
 
-def _installed_root(home, name):
+def _installed_root(home, name, market=_MARKET):
     """Where codex-cli 0.147.0 actually puts an installed plugin, as `codex plugin add` reports
     it (`Installed plugin root: …`). NOT `source.path`."""
-    return home / "plugins" / "cache" / _MARKET / name / _VERSION
+    return home / "plugins" / "cache" / market / name / _VERSION
+
+
+def _entries(sources):
+    """`sources` -> `(name, marketplace, source.path)` triples.
+
+    A key is either a bare plugin name (installed from `_MARKET`) or a `(name, marketplace)`
+    pair. The pair form exists because a mapping keyed by name alone CANNOT hold
+    `conductor@openai-curated` and `conductor@evil-market` at the same time — and that
+    inexpressibility is exactly why nothing could observe two marketplaces collapsing onto one
+    name.
+    """
+    return [
+        (*(key if isinstance(key, tuple) else (key, _MARKET)), path)
+        for key, path in sources.items()
+    ]
 
 
 def _plugin_list_json(sources, disabled=()):
     """What `codex plugin list --json` prints — the shape verified on codex-cli 0.147.0 by
     recording the CLI's own output; see `tests/conductor/fixtures/`.
 
-    `sources` maps plugin name -> `source.path`, which names the MARKETPLACE tree the plugin was
-    copied from and is a different directory from the installed copy. Every fixture here used to
-    pass the installed root for it, which is why no test could catch discovery reading it.
+    `sources` maps a plugin (see `_entries`) -> `source.path`, which names the MARKETPLACE tree
+    the plugin was copied from and is a different directory from the installed copy. Every
+    fixture here used to pass the installed root for it, which is why no test could catch
+    discovery reading it.
 
     `disabled` names plugins the operator turned off. 0.147.0 keeps those in `installed[]` with
     `"enabled": false`; this argument exists because a fixture that hardcodes `True` cannot state
@@ -104,15 +120,15 @@ def _plugin_list_json(sources, disabled=()):
         {
             "installed": [
                 {
-                    "pluginId": f"{name}@{_MARKET}",
+                    "pluginId": f"{name}@{market}",
                     "name": name,
-                    "marketplaceName": _MARKET,
+                    "marketplaceName": market,
                     "version": _VERSION,
                     "installed": True,
                     "enabled": name not in disabled,
                     "source": {"source": "local", "path": str(path)},
                 }
-                for name, path in sources.items()
+                for name, market, path in _entries(sources)
             ]
         }
     )
@@ -390,6 +406,40 @@ def test_codex_recovers_plugin_identity_from_the_installed_plugin_list(
     avail = preflight.available_commands(host_id="codex")
     assert "spec-craft:expectations" in avail
     assert "expectations" not in avail
+
+
+def test_a_second_marketplace_shipping_a_same_named_plugin_greens_nothing(
+    tmp_path, monkeypatch
+):
+    """The false pass the three-state result was supposed to close, one level down. `pluginId`
+    and `marketplaceName` are the identity Codex uses; `name` is a self-declared string, so
+    `conductor@evil-market` shipping a copied `start` skill is attributed as `conductor:start`
+    exactly like the real one — and `installed[]` lists it FIRST, so it wins. Conductor has no
+    trust list and cannot rank the two, so an ambiguous name must claim nothing at all."""
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    for market in ("evil-market", _MARKET):
+        skill = _installed_root(home, "spec-craft", market) / "skills" / "expectations"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\n---\n")
+    _stub_codex_on_path(
+        tmp_path,
+        monkeypatch,
+        {
+            ("spec-craft", "evil-market"): tmp_path / "evil" / "spec-craft",
+            ("spec-craft", _MARKET): tmp_path / "curated" / "spec-craft",
+        },
+    )
+
+    out = preflight.check(
+        required=["spec-craft:expectations"],
+        host_id="codex",
+        project_root=str(tmp_path / "project"),
+    )
+
+    assert not out["ok"], out
+    assert out["unverified"] == ["$expectations"], out
 
 
 def test_a_disabled_spec_craft_is_not_a_healthy_conducted_stack(tmp_path, monkeypatch):
