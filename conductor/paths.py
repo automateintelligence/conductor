@@ -215,6 +215,17 @@ def spec_roots() -> tuple[str, ...]:
                 "'docs/specs'). This is a spelling rule, not containment — a root that "
                 "is a symlink out of the repo is still followed."
             )
+        # NORMALISE BEFORE DEDUP. Dedup compared raw strings, so `docs/specs` and
+        # `./docs/specs` — one directory, two spellings — both survived as roots. The no-goal
+        # glob then found the single candidate through both and `freeze` refused with
+        # `ambiguous-assertions-source` naming the SAME relative path twice: a refusal with no
+        # available remedy, because there is no second file to delete or reconcile.
+        #
+        # Strictly AFTER the `..` check, never before: `normpath` collapses `docs/specs/../..`
+        # to `.`, which would silently launder a traversal the check exists to refuse. By this
+        # line the root has no `..`, so `normpath` only folds `.` segments, doubled separators
+        # and a trailing slash — exactly the equivalences that should collapse.
+        root = os.path.normpath(root)
         if root not in roots:
             roots.append(root)
     if not roots:
