@@ -32,8 +32,14 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    host's own invocation form, including the **opposite-host review wrapper**, which is the one
    requirement that differs: a Claude-hosted run needs the Codex wrapper, a Codex-hosted run
    needs the Claude one. A list copied into prose is a list that drifts from the checker.
-   Any **missing → STOP** and tell the user to install exactly what preflight named
-   (fail-closed, amendment E). Do not launch a loop that dies at the first conducted call.
+   The checker has THREE outcomes and **exits non-zero on two of them** — treat its exit status
+   as the decision, never your reading of the report. Any **missing → STOP** and tell the user to
+   install exactly what preflight named. Any **UNVERIFIED → STOP** as well: that skill is present
+   and invocable, but this host cannot establish it is the plugin's — a hand-copied skill
+   directory, or two installed plugins claiming one name — so `install it` is the wrong advice
+   and preflight prints the right one on that line. Pass it on verbatim. Only an `ok` result
+   proceeds (fail-closed, amendment E). Do not launch a loop that dies at the first conducted
+   call, and do not launch one whose conducted skills are not the ones they claim to be.
 1. **Detect spec source**; load spec + Expectations. The **executable-assertion specs** live in
    `<spec>.assertions.md` — the sibling file `/spec-craft:executable-assertions` writes — **not**
    inline in the spec; load them from there if it exists.

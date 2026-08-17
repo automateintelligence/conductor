@@ -207,6 +207,12 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             "do not re-list the required commands",
             "in your host's own invocation form",
             "opposite-host review wrapper",
+            # A1: the checker has THREE outcomes and exits 1 on two of them. A workflow that
+            # only stops on `missing` tells a reader to proceed past a result the CLI already
+            # refused — and `unverified` is the outcome a hostile or hand-copied stack
+            # produces, so it is the one that must not be walked past.
+            "unverified",
+            "unverified → stop",
         ],
         "2-assertions-present": ["spec-craft:executable-assertions"],
         "3-gate-dir": [
