@@ -106,6 +106,8 @@ def _run_branch_slug(root: str) -> str | None:
 # declarations that could not disagree, and so could not catch it. One resolver serves both.
 
 _SPEC_PATH_RE = re.compile(r"docs/specs/[^\s`'\"]+?\.md")
+# the done-definition sibling spec-craft writes next to a spec — never a spec itself
+_ASSERTIONS_SUFFIX = ".assertions.md"
 # an explicit declaration line, e.g. `spec: docs/specs/foo.md`
 #
 # The field's value is deliberately NOT constrained to the `docs/specs/*.md` shape. The prose
@@ -153,8 +155,17 @@ def spec_from_goal_text(text: str) -> str | None:
         return fields[0]
     found: list[str] = []
     for hit in _SPEC_PATH_RE.finditer(text):
-        if hit.group(0) not in found:
-            found.append(hit.group(0))
+        path = hit.group(0)
+        if path.endswith(_ASSERTIONS_SUFFIX):
+            # A spec's `.assertions.md` sibling is its DONE-DEFINITION, not a second spec, and
+            # `freeze._source_candidates` derives it from whichever spec this resolver picks.
+            # Counting it as a candidate made the ordinary "implement <spec> and keep its
+            # assertions green" goal ambiguous against its own sibling. Excluded from the
+            # FALLBACK scan only: an explicit `spec:` field naming one is a deliberate (and
+            # louder) choice, so it is honoured above rather than second-guessed.
+            continue
+        if path not in found:
+            found.append(path)
     if len(found) > 1:
         raise AmbiguousSpecReference(
             "ambiguous-spec-reference: the goal names "

@@ -182,6 +182,57 @@ def test_explicit_spec_field_outside_docs_specs_resolves(tmp_path):
     )
 
 
+# An `.assertions.md` sibling is the spec's DONE-DEFINITION, not a second spec. Once
+# `freeze._source_candidates` made `<stem>.assertions.md` canonical, that sibling started
+# matching the `docs/specs/*.md` prose regex, so the ordinary goal shape "implement X and keep
+# X's assertions green" read as two candidates and failed closed on a run that used to work.
+# The exclusion is on the FALLBACK scan only — an explicit `spec:` field naming one is the
+# user's business, and a louder kind of mistake.
+
+
+def test_assertions_sibling_is_not_a_second_prose_spec_candidate():
+    text = (
+        "Implement docs/specs/payments.md and keep "
+        "docs/specs/payments.assertions.md green\n"
+    )
+    assert paths.spec_from_goal_text(text) == "docs/specs/payments.md"
+
+
+def test_legacy_dotmd_assertions_sibling_is_not_a_second_prose_candidate():
+    text = (
+        "Implement docs/specs/payments.md and keep "
+        "docs/specs/payments.md.assertions.md green\n"
+    )
+    assert paths.spec_from_goal_text(text) == "docs/specs/payments.md"
+
+
+def test_an_assertions_path_alone_is_still_no_spec():
+    # the goal must name the SPEC; a done-definition on its own declares no subject
+    assert (
+        paths.spec_from_goal_text("keep docs/specs/payments.assertions.md green\n")
+        is None
+    )
+
+
+def test_two_real_specs_still_fail_closed_alongside_an_assertions_sibling():
+    text = (
+        "Port docs/specs/alpha.md into docs/specs/beta.md, keeping "
+        "docs/specs/beta.assertions.md green\n"
+    )
+    with pytest.raises(paths.AmbiguousSpecReference) as excinfo:
+        paths.spec_from_goal_text(text)
+    message = str(excinfo.value)
+    assert "docs/specs/alpha.md" in message and "docs/specs/beta.md" in message
+    assert "assertions.md" not in message  # the sibling is not offered as a candidate
+
+
+def test_an_explicit_spec_field_naming_an_assertions_file_is_honoured():
+    assert (
+        paths.spec_from_goal_text("spec: docs/specs/payments.assertions.md\n")
+        == "docs/specs/payments.assertions.md"
+    )
+
+
 def test_spec_from_goal_reads_the_goal_file_and_is_none_without_one(tmp_path):
     assert paths.spec_from_goal(str(tmp_path)) is None
     _write(tmp_path, ".conductor/goal.md", "spec: docs/specs/beta.md\n")
