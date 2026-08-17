@@ -88,7 +88,12 @@ def recorded(project_root: str) -> str | None:
     try:
         with open(path, encoding="utf-8") as f:
             raw = f.read().strip()
-    except OSError:
+    except FileNotFoundError:
+        # ABSENCE, and only absence, means "this run predates the file". Every other read
+        # failure — a directory at that path, an unreadable mode, a `.conductor` that is itself
+        # a file — means a host IS recorded and this process cannot see it. Catching the whole
+        # of OSError answered `claude` for all of them: the same silent wrong-agent launch the
+        # garbage-contents branch below already refuses, arrived at from the other direction.
         return None
     return _validated(raw, source=path)
 

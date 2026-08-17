@@ -186,3 +186,46 @@ def test_a_path_outside_any_repository_still_resolves_against_itself(
     runhost.record(str(plain), "codex")
     assert os.path.isfile(os.path.join(str(plain), ".conductor", "host"))
     assert runhost.resolve(str(plain)) == "codex"
+
+
+# ---- an unreadable host file is not an unrecorded one (P2-D) ------------------------
+
+
+def test_a_host_file_that_is_a_directory_is_refused_rather_than_read_as_unrecorded(
+    project, monkeypatch
+):
+    """`except OSError` collapsed every read failure into "this run predates the file". A
+    directory at `.conductor/host` therefore resolved to claude — the same silent wrong-agent
+    launch the garbage-contents cases already refuse. Only ABSENCE means unrecorded."""
+    monkeypatch.delenv(runhost.HOST_ENV, raising=False)
+    os.mkdir(runhost.host_file(project))
+    with pytest.raises(OSError):
+        runhost.resolve(project)
+
+
+def test_an_unreadable_host_file_is_refused_rather_than_read_as_unrecorded(
+    project, monkeypatch
+):
+    """Same rule for a permission failure: the operator has a host recorded, this process just
+    cannot read it, and answering `claude` would launch an agent nobody chose."""
+    monkeypatch.delenv(runhost.HOST_ENV, raising=False)
+    path = runhost.host_file(project)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("codex\n")
+    os.chmod(path, 0o000)
+    try:
+        if os.access(path, os.R_OK):  # running as root — the mode cannot be enforced
+            pytest.skip("cannot make a file unreadable for this user")
+        with pytest.raises(OSError):
+            runhost.resolve(project)
+    finally:
+        os.chmod(path, 0o600)
+
+
+def test_an_absent_host_file_is_still_the_legacy_claude_default(project, monkeypatch):
+    """The compatibility guarantee, pinned next to the failures above so narrowing the except
+    clause cannot take it with it: absence — and only absence — is a pre-A1 run."""
+    monkeypatch.delenv(runhost.HOST_ENV, raising=False)
+    assert not os.path.exists(runhost.host_file(project))
+    assert runhost.recorded(project) is None
+    assert runhost.resolve(project) == "claude"
