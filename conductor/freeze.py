@@ -146,6 +146,33 @@ class DivergentAssertionsSource(RuntimeError):
     pick one of them blind — fail closed."""
 
 
+class UnreadableAssertionsSource(RuntimeError):
+    """A candidate assertions source EXISTS but cannot be read, so its bytes are unknown.
+
+    Its own condition, deliberately not folded into ``DivergentAssertionsSource``: divergence
+    is a claim that two done-definitions disagree, and nothing here compared them. The remedy
+    differs too — fix the mode or the ownership, versus reconcile two files — and a freeze
+    refusal that names the wrong one sends the operator to the wrong repair. Unreadable is also
+    not "absent" (``MissingAssertionsSource``): deleting the file would make the freeze
+    succeed against the remaining spelling, while a mode change must not."""
+
+
+def _source_digest(path: str, repo_root: str) -> str:
+    """``_sha256_file`` for an assertions-source candidate, with an unreadable file turned into
+    a domain refusal. The raw ``OSError`` escaped ``record()`` as a traceback: ``freeze.main``
+    catches domain errors only, so ``gate freeze`` crashed instead of refusing. It did fail
+    closed — no baseline was written — but nothing greppable said why."""
+    try:
+        return _sha256_file(path)
+    except OSError as exc:
+        rel = os.path.relpath(path, repo_root)
+        raise UnreadableAssertionsSource(
+            f"unreadable-assertions-source: {rel} exists but could not be read ({exc}); "
+            "the done-definition cannot be frozen without its bytes — fix the file's "
+            "permissions (removing it is a different decision, and a louder one)"
+        ) from exc
+
+
 def _pick_source(candidates: list[str], repo_root: str) -> str | None:
     """THE assertions-source choice among `_source_candidates`' spellings, or None when none
     exists.
@@ -160,7 +187,8 @@ def _pick_source(candidates: list[str], repo_root: str) -> str | None:
     So: same file (equal realpath — the committed-symlink bridge) or same bytes (the committed
     copy) means the disagreement is not real, and the preferred spelling is taken silently.
     Genuinely different bytes are two done-definitions with no way to tell which one the human
-    confirmed; refuse and name both rather than freeze either."""
+    confirmed; refuse and name both rather than freeze either. A candidate whose bytes cannot be
+    READ is neither case and raises ``UnreadableAssertionsSource`` (see ``_source_digest``)."""
     present = [p for p in candidates if os.path.isfile(p)]
     if not present:
         return None
@@ -171,8 +199,8 @@ def _pick_source(candidates: list[str], repo_root: str) -> str | None:
         if os.path.realpath(other) == chosen_real:
             continue
         if chosen_digest is None:
-            chosen_digest = _sha256_file(chosen)
-        if _sha256_file(other) == chosen_digest:
+            chosen_digest = _source_digest(chosen, repo_root)
+        if _source_digest(other, repo_root) == chosen_digest:
             continue
         a, b = (os.path.relpath(p, repo_root) for p in (chosen, other))
         raise DivergentAssertionsSource(
@@ -210,7 +238,9 @@ def _assertions_source(repo_root: str) -> tuple[dict, str]:
         candidates = _source_candidates(base)
         path = _pick_source(candidates, repo_root)
         if path:
-            return {os.path.relpath(path, repo_root): _sha256_file(path)}, "env"
+            return {
+                os.path.relpath(path, repo_root): _source_digest(path, repo_root)
+            }, "env"
         raise MissingAssertionsSource(
             f"missing-assertions-source: CONDUCTOR_ASSERTIONS_SOURCE names "
             f"{override} but none of {', '.join(candidates)} exist"
@@ -224,7 +254,9 @@ def _assertions_source(repo_root: str) -> tuple[dict, str]:
             rels = _source_candidates(spec)
             path = _pick_source([os.path.join(repo_root, r) for r in rels], repo_root)
             if path:
-                return {os.path.relpath(path, repo_root): _sha256_file(path)}, "goal"
+                return {
+                    os.path.relpath(path, repo_root): _source_digest(path, repo_root)
+                }, "goal"
             raise MissingAssertionsSource(
                 f"missing-assertions-source: the goal names "
                 f"{spec} but none of {', '.join(rels)} exist"
@@ -246,7 +278,7 @@ def _assertions_source(repo_root: str) -> tuple[dict, str]:
         )
     if matches:
         rel = os.path.relpath(matches[0], repo_root)
-        return {rel: _sha256_file(matches[0])}, "glob"
+        return {rel: _source_digest(matches[0], repo_root)}, "glob"
     return {}, "none"
 
 
@@ -383,6 +415,7 @@ def main(argv: list | None = None) -> int:
             AmbiguousAssertionsSource,
             DivergentAssertionsSource,
             MissingAssertionsSource,
+            UnreadableAssertionsSource,
             AmbiguousSpecReference,
         ) as exc:
             print(f"[GATE] {exc}", file=sys.stderr)

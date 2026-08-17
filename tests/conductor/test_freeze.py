@@ -408,6 +408,81 @@ def test_divergent_spellings_make_the_freeze_cli_refuse(tmp_path, monkeypatch, c
     assert not os.path.exists(baseline)  # nothing was laundered into a baseline
 
 
+# An UNREADABLE candidate is its own condition, not divergence: nothing was compared, so
+# "these two disagree" would be a claim the code cannot make. `_pick_source` let the
+# PermissionError out of `record`, and the CLI catches domain errors only — so `gate freeze`
+# ended in a traceback. It did fail closed (no baseline written), but a traceback is not a
+# refusal: nothing greppable, and the operator is left diagnosing conductor instead of the repo.
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores mode 0o000, so the file cannot be made unreadable",
+)
+def test_an_unreadable_duplicate_source_is_a_domain_refusal(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    stem_path, legacy_path = _spec_with_sources(tmp_path, stem=True, legacy=True)
+    legacy_path.write_text(
+        stem_path.read_text()
+    )  # identical bytes: only the READ can fail
+    legacy_path.chmod(0o000)
+    try:
+        with pytest.raises(freeze.UnreadableAssertionsSource) as excinfo:
+            freeze.record(manifest, baseline, str(tmp_path))
+    finally:
+        legacy_path.chmod(0o644)
+    message = str(excinfo.value)
+    assert "unreadable-assertions-source" in message  # greppable, and its OWN reason
+    assert "divergent" not in message
+    assert "docs/specs/fixture-spec.md.assertions.md" in message
+    assert not os.path.exists(baseline)
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores mode 0o000, so the file cannot be made unreadable",
+)
+def test_an_unreadable_source_makes_the_freeze_cli_refuse(
+    tmp_path, monkeypatch, capsys
+):
+    manifest, baseline = _setup(tmp_path)
+    stem_path, legacy_path = _spec_with_sources(tmp_path, stem=True, legacy=True)
+    legacy_path.write_text(stem_path.read_text())
+    legacy_path.chmod(0o000)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+    monkeypatch.setenv("CONDUCTOR_MANIFEST", manifest)
+    monkeypatch.setenv("CONDUCTOR_FREEZE_BASELINE", baseline)
+    try:
+        assert freeze.main(["freeze"]) == 1  # refused, not a traceback
+    finally:
+        legacy_path.chmod(0o644)
+    err = capsys.readouterr().err
+    assert "unreadable-assertions-source" in err
+    assert "Traceback" not in err
+    assert not os.path.exists(baseline)  # nothing was laundered into a baseline
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores mode 0o000, so the file cannot be made unreadable",
+)
+def test_the_only_source_being_unreadable_is_the_same_refusal(tmp_path):
+    # Same defect one line over: with a single candidate `_pick_source` never compares
+    # anything, and the crash moved to the digest `record` takes of the file it chose.
+    manifest, baseline = _setup(tmp_path)
+    stem_path, _legacy = _spec_with_sources(tmp_path, stem=True)
+    stem_path.chmod(0o000)
+    try:
+        with pytest.raises(
+            freeze.UnreadableAssertionsSource, match="unreadable-assertions-source"
+        ):
+            freeze.record(manifest, baseline, str(tmp_path))
+    finally:
+        stem_path.chmod(0o644)
+    assert not os.path.exists(baseline)
+
+
 def test_goal_with_neither_spelling_still_fails_closed(tmp_path):
     manifest, baseline = _setup(tmp_path)
     _spec_with_sources(tmp_path)  # spec, no assertions source at all
