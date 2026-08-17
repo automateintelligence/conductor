@@ -88,7 +88,18 @@ exit "${FAKE_WORKER_RC:-0}"
 
 # `conductor assert run --level spec` — exit 0 means the done-gate is GREEN (nothing to do).
 # Default 1 (gate red) so a fire proceeds.
+#
+# FAKE_GATE_LEAK is the worker's leak one line earlier: the done-gate runs the PROJECT'S OWN
+# assertion commands, so it executes arbitrary owner code and can leave a detached descendant
+# behind exactly as a phase can. The driver already holds the lock when it calls the gate.
 _FAKE_CONDUCTOR = """#!/usr/bin/env bash
+if [ -n "${FAKE_GATE_LEAK:-}" ]; then
+    setsid bash -c 'echo $$ > "$FAKE_GATE_LEAK.pid"
+        deadline=$(( $(date +%s) + ${FAKE_WAIT_SECONDS:-30} ))
+        while [ ! -f "$FAKE_GATE_LEAK" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+            sleep 0.05
+        done' </dev/null >/dev/null 2>&1 &
+fi
 exit "${FAKE_GATE_RC:-1}"
 """
 
@@ -130,7 +141,7 @@ def _wait_for_cwd(pid: int, want: Path) -> None:
 # will spawn in a session of its own. `<value>.pid` is where that descendant writes its own pid
 # as its first action — the only handle anything outside that new session can ever have on it,
 # which is why the rig registers the path at SPAWN time rather than when a test adopts it.
-_LEAK_VARS = ("FAKE_WORKER_LEAK",)
+_LEAK_VARS = ("FAKE_WORKER_LEAK", "FAKE_GATE_LEAK")
 
 
 @dataclass
@@ -798,3 +809,33 @@ def test_a_green_done_gate_skip_is_logged(make_rig):
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert "skip reason=gate-green" in rig.log_text(), rig.log_text()
     assert rig.worker_calls() == []
+
+
+@_needs_real_flock
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
+def test_a_detached_descendant_of_the_done_gate_does_not_hold_the_lock(make_rig):
+    """The SAME descriptor-inheritance defect as the worker's, one line earlier and easier to
+    miss, because the gate call looks like a read-only question.
+
+    It is not: `$CONDUCTOR assert run --level spec` executes the PROJECT'S OWN assertion
+    commands — arbitrary owner code — while the driver holds the lock, and fd 9 was opened by
+    `exec`, so it is not close-on-exec. One assertion that leaves a container, a server, or a
+    stray helper running therefore keeps the locked open-file-description alive after the
+    driver exits. The gate-green path is the worst place for that to happen: the run is
+    FINISHED, every later fire is a legitimate no-op, and the lock is stranded behind
+    `skip reason=gate-green` — so the log looks perfect while the driver is permanently dead
+    to any future run on the same project."""
+    rig = make_rig("plain-host-gateleak")
+    leak = rig.project / "gate-descendant"
+
+    first = rig.run(FAKE_GATE_RC="0", FAKE_GATE_LEAK=str(leak))
+
+    assert first.returncode == 0, (first.stdout, first.stderr, rig.log_text())
+    rig.adopt_pidfile(Path(f"{leak}.pid"), "the done-gate's detached descendant")
+    assert "skip reason=gate-green" in rig.log_text(), rig.log_text()
+
+    second = rig.run(FAKE_GATE_RC="0")
+
+    assert second.returncode == 0, (second.stdout, second.stderr, rig.log_text())
+    assert "skip reason=lock-held" not in rig.log_text(), rig.log_text()
+    assert rig.log_text().count("skip reason=gate-green") == 2, rig.log_text()
