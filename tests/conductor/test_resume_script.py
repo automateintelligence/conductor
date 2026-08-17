@@ -1,6 +1,7 @@
 """Tier-B resume-driver generator: the runtime-resolution contract that fixes the 2026-07-05
 silent-stall (generation-time-pinned bins that rot on upgrade)."""
 
+import hashlib
 import os
 import re
 import shlex
@@ -20,6 +21,72 @@ REPO = Path(rs.__file__).resolve().parents[1]
 
 def _render():
     return rs.render(PROJECT, WORKTREE)
+
+
+# ---- TEMPLATE_VERSION must name exactly one render ----
+
+# One row per template version, keyed by TEMPLATE_VERSION, valued by a digest of that
+# version's render with its own `# conductor-resume-template: vN` line REMOVED. Removing it
+# is the point: the digest then measures the SUBSTANCE of the template rather than the number
+# that names it, so a bump alone cannot change it and a text change cannot hide behind one.
+#
+# Old rows are kept, not replaced. They are what makes a DOWNGRADE fail with a specific
+# message instead of an anonymous mismatch, and they are the record of which script text each
+# installed driver's marker refers to.
+_TEMPLATE_DIGESTS = {
+    6: "6dfc579d7359c75577824e5531f2cab7b2f2d9e74cd8023fec1c57d56c069707",
+    7: "c063f3f724ca4f420760efa8586ac95a6a3e4894c335d0f2ed85ae77ca6b1226",
+}
+
+
+def _template_body(text: str) -> str:
+    return "\n".join(
+        ln
+        for ln in text.splitlines()
+        if not ln.startswith("# conductor-resume-template: v")
+    )
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_template_version_names_exactly_one_render():
+    """TEMPLATE_VERSION is the ONLY thing that makes an ALREADY-INSTALLED driver regenerate:
+    `verify` calls a script stale when the marker or the text differs, and `/conductor:start`
+    reconcile rewrites it. Ship a template fix without bumping and every existing project keeps
+    executing the script it already has — the fix ships inert, on exactly the machines it was
+    written for.
+
+    Nothing else in the suite notices. Reverting the bump left all 117 focused tests green,
+    because every other test renders fresh text and compares it against itself; only an
+    installed script can tell the difference, and no other test has one.
+
+    WHY A DIGEST AND NOT A NUMBER. `assert TEMPLATE_VERSION == 7` catches the revert and
+    nothing else: it says nothing about whether the template changed, and it must be edited on
+    every bump whether or not anything moved — so it decays into a number someone updates
+    reflexively. The digest table inverts that. It fails on the condition that actually
+    matters (text changed, version did not), and updating it IS the bump, so it cannot be
+    satisfied without making the decision it exists to force. The cost is one manual step per
+    template change — add the new row — and that step is the entire point.
+    """
+    body = _template_body(_render())
+    current = _digest(body)
+
+    assert len(set(_TEMPLATE_DIGESTS.values())) == len(_TEMPLATE_DIGESTS), (
+        "two template versions record the same render — a stale row was copied rather than "
+        "the template genuinely re-pinned"
+    )
+    assert rs.TEMPLATE_VERSION == max(_TEMPLATE_DIGESTS), (
+        f"TEMPLATE_VERSION is {rs.TEMPLATE_VERSION} but {max(_TEMPLATE_DIGESTS)} is already "
+        "recorded: a version may only go forward, or installed drivers stop regenerating."
+    )
+    assert current == _TEMPLATE_DIGESTS[rs.TEMPLATE_VERSION], (
+        f"the render changed but TEMPLATE_VERSION is still {rs.TEMPLATE_VERSION}, so every "
+        f"installed driver keeps running the old script and this change ships inert. Bump "
+        f"TEMPLATE_VERSION to {rs.TEMPLATE_VERSION + 1} and add the row "
+        f"{rs.TEMPLATE_VERSION + 1}: {current!r}"
+    )
 
 
 # ---- the driver's OWN exit statuses must be unreachable by anything else in `$?` ----
