@@ -512,3 +512,50 @@ def test_an_unknown_host_is_refused_rather_than_silently_linted_as_claude():
     with pytest.raises(Exception) as excinfo:
         plan_lint.recipe_needles("gemini")
     assert "gemini" in str(excinfo.value)
+
+
+# Every host case above hands `lint` its answer — as `host_id=` or through `$CONDUCTOR_HOST`.
+# The CLI derives it instead, from the PLAN'S OWN repo, and that derivation had no coverage.
+
+
+def _repo_with_plan(tmp_path, text):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, timeout=30)
+    plan = repo / "plan.md"
+    plan.write_text(text, encoding="utf-8")
+    return repo, str(plan)
+
+
+def test_the_cli_derives_claude_for_a_repo_with_nothing_recorded(
+    tmp_path, monkeypatch, capsys
+):
+    """No `host_id=`, no `$CONDUCTOR_HOST`, no `.conductor/host`: the pre-A1 state, which must
+    keep linting for a Claude-hosted run and keep demanding a Codex reviewer."""
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    _repo, good = _repo_with_plan(tmp_path, GOOD_PLAN)
+    assert plan_lint.main([good]) == 0
+
+    _repo2, codex_plan = _repo_with_plan(tmp_path / "b", CODEX_HOSTED_PLAN)
+    assert plan_lint.main([codex_plan]) == 1
+    assert "recipe-missing:codex" in capsys.readouterr().err
+
+
+def test_the_cli_derives_codex_from_the_repos_durable_recording(
+    tmp_path, monkeypatch, capsys
+):
+    """The same derivation with the recording as its only input — no environment at all. A
+    Codex-hosted plan passes and a copied Claude-hosted one is refused for naming its own
+    host as reviewer."""
+    from conductor.hosts import runhost
+
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    repo, codex_plan = _repo_with_plan(tmp_path, CODEX_HOSTED_PLAN)
+    runhost.record(str(repo), "codex")
+    assert plan_lint.main([codex_plan]) == 0
+
+    (repo / "claude-plan.md").write_text(GOOD_PLAN, encoding="utf-8")
+    assert plan_lint.main([str(repo / "claude-plan.md")]) == 1
+    assert "recipe-missing:claude" in capsys.readouterr().err

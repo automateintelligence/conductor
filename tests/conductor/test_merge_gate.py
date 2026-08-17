@@ -620,3 +620,37 @@ def test_an_explicit_marker_still_overrides_the_host_derived_default(monkeypatch
         _rc("2026-06-02T00:00:00Z", body="LGTM-bot ok"),
     ]
     assert _call(d)["ok"]
+
+
+# Every host case above hands `_review_marker` its answer through `$CONDUCTOR_HOST`. That
+# exercises the projection and never the derivation, so the two below supply NOTHING: the host
+# comes out of the project the gate is actually run against, the way a real fire gets it.
+
+
+def test_a_project_with_no_recorded_host_derives_the_legacy_claude_marker(
+    tmp_path, monkeypatch
+):
+    """No override and no `.conductor/host` — the pre-A1 state every existing run is in. The
+    marker has to stay `Codex review` or those runs stop counting their own reviews."""
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    monkeypatch.delenv("CONDUCTOR_REVIEW_MARKER", raising=False)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    subprocess.run(["git", "init", "-q", str(proj)], check=True, timeout=30)
+    monkeypatch.setenv("CONDUCTOR_HOME", str(proj))
+    assert merge_gate._review_marker() == "Codex review"
+
+
+def test_a_project_recorded_as_codex_derives_the_claude_marker(tmp_path, monkeypatch):
+    """The same derivation on the host this branch exists for, still with no env input: the
+    durable recording alone must reroute the marker."""
+    from conductor.hosts import runhost
+
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    monkeypatch.delenv("CONDUCTOR_REVIEW_MARKER", raising=False)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    subprocess.run(["git", "init", "-q", str(proj)], check=True, timeout=30)
+    runhost.record(str(proj), "codex")
+    monkeypatch.setenv("CONDUCTOR_HOME", str(proj))
+    assert merge_gate._review_marker() == "Claude review"

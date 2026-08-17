@@ -978,14 +978,22 @@ def test_render_for_a_claude_recorded_run_is_the_claude_driver(tmp_path):
 
 
 def test_render_for_an_unrecorded_run_is_byte_identical_to_the_recorded_claude_one(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
     """Every run installed before A1 has no `.conductor/host`. Those must not change host on
-    the next regeneration — that would silently switch which agent drives a live run."""
+    the next regeneration — that would silently switch which agent drives a live run.
+
+    `$CONDUCTOR_HOST` is cleared rather than assumed absent: with it set to `codex` both renders
+    are codex and this compares two identical wrong answers. It is the only test in this file
+    that supplies the resolver NOTHING, so it is the only one that can catch a broken
+    derivation, and it has to actually be unsupplied to do that."""
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
     project, worktree = _project_recorded_as(tmp_path, "claude")
     recorded = rs.render(project, worktree)
     os.remove(os.path.join(project, ".conductor", "host"))
-    assert rs.render(project, worktree) == recorded
+    unrecorded = rs.render(project, worktree)
+    assert unrecorded == recorded
+    assert 'CLAUDE_BIN="$(command -v claude || true)"' in unrecorded
 
 
 def test_render_for_a_codex_recorded_run_resolves_and_launches_codex(tmp_path):
