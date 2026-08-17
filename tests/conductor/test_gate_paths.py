@@ -423,6 +423,49 @@ def test_an_unusable_spec_roots_value_is_refused_not_silently_defaulted(
         paths.spec_roots()
 
 
+# --- the `..` refusal is a SPELLING rule, and says so ----------------------------------
+#
+# `spec_roots` rejects an absolute root and a `..` segment, both LEXICALLY. That is not
+# containment and cannot be: an in-repo symlink (`external -> /tmp/outside`) is a plain
+# relative root with no `..` in it, and every scan follows it straight out of the repo. The
+# refusal used to say the entry "escapes the project root", which promises a guarantee the
+# function does not provide — an operator reading it would reasonably conclude that a root
+# which passes is confined, and stop looking.
+#
+# DELIBERATE: symlinks are followed, not resolved away. `freeze._pick_source` already blesses
+# a symlinked assertions source (equal-realpath is its "committed-symlink bridge"), a monorepo
+# that symlinks a shared specs directory is a legitimate layout, and `spec_roots` is a pure
+# string function called on every prose scan — giving it a `realpath` check would make it do
+# filesystem I/O and answer differently depending on cwd. The variable is owner configuration,
+# not attacker input: anyone who can set it can also set `CONDUCTOR_MERGE_VERIFY`, which the
+# driver executes as shell, so this was never a security boundary.
+
+
+def test_the_dotdot_refusal_states_the_rule_without_promising_containment(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/../../specs")
+    with pytest.raises(paths.InvalidSpecRoots) as excinfo:
+        paths.spec_roots()
+    message = str(excinfo.value)
+    assert "'..'" in message  # names the actual, lexical rule
+    # and does NOT claim it keeps roots inside the repo — a symlinked root defeats that
+    assert "escapes" not in message
+
+
+def test_a_symlinked_root_is_followed_out_of_the_repo_by_design(tmp_path, monkeypatch):
+    # pins the decision above: this must keep working, and must fail loudly if anyone
+    # "hardens" spec_roots by resolving symlinks
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "repo").mkdir()
+    os.symlink(outside, tmp_path / "repo" / "external")
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "external")
+    monkeypatch.chdir(tmp_path / "repo")
+    assert paths.spec_roots() == ("external",)
+    assert paths.spec_from_goal_text("Implement external/legacy.md\n") == (
+        "external/legacy.md"
+    )
+
+
 def test_the_roots_are_read_per_call_not_frozen_at_import(monkeypatch):
     monkeypatch.delenv("CONDUCTOR_SPEC_ROOTS", raising=False)
     assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST}\n") is None
