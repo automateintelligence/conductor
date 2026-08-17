@@ -295,3 +295,102 @@ def test_glob_derived_baseline_still_verifies_clean_without_goal(tmp_path):
     freeze.record(manifest, baseline, str(tmp_path))
     res = freeze.verify(manifest, baseline, str(tmp_path))
     assert res["ok"] is True and res["tampered"] == []
+
+
+# ---------------------------------------------- assertions-source naming (both forms)
+#
+# spec-craft (`/spec-craft:executable-assertions`) WRITES `docs/specs/<stem>.assertions.md`;
+# conductor only READS it, so spec-craft's name is the binding one. The legacy
+# `<spec>.md.assertions.md` form conductor used to demand is still accepted so repos that
+# bridged the gap with a committed file/symlink keep verifying.
+
+
+def _spec_with_sources(tmp_path, name="fixture-spec", stem=False, legacy=False):
+    """A spec + whichever of its two assertions-source spellings were asked for + a goal
+    naming the spec. Returns (stem_path, legacy_path)."""
+    d = tmp_path / "docs" / "specs"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.md").write_text(f"# {name}\n")
+    stem_path = d / f"{name}.assertions.md"
+    legacy_path = d / f"{name}.md.assertions.md"
+    if stem:
+        stem_path.write_text(f"# stem assertions for {name}\n")
+    if legacy:
+        legacy_path.write_text(f"# legacy assertions for {name}\n")
+    dot = tmp_path / ".conductor"
+    dot.mkdir(exist_ok=True)
+    (dot / "goal.md").write_text(f"Implement docs/specs/{name}.md until done\n")
+    return stem_path, legacy_path
+
+
+def test_goal_resolves_stem_form_assertions_source(tmp_path):
+    # spec-craft's actual output name
+    manifest, baseline = _setup(tmp_path)
+    _spec_with_sources(tmp_path, stem=True)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/fixture-spec.assertions.md"]
+    assert freeze.verify(manifest, baseline, str(tmp_path))["ok"] is True
+
+
+def test_goal_resolves_legacy_dotmd_form_assertions_source(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _spec_with_sources(tmp_path, legacy=True)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/fixture-spec.md.assertions.md"]
+
+
+def test_stem_form_is_preferred_when_both_spellings_exist(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _spec_with_sources(tmp_path, stem=True, legacy=True)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/fixture-spec.assertions.md"]
+
+
+def test_goal_with_neither_spelling_still_fails_closed(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _spec_with_sources(tmp_path)  # spec, no assertions source at all
+    with pytest.raises(Exception, match="missing-assertions-source"):
+        freeze.record(manifest, baseline, str(tmp_path))
+
+
+def test_env_override_resolves_stem_form(tmp_path, monkeypatch):
+    manifest, baseline = _setup(tmp_path)
+    _spec_with_sources(tmp_path, stem=True)
+    monkeypatch.setenv("CONDUCTOR_ASSERTIONS_SOURCE", "docs/specs/fixture-spec.md")
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert doc["sources_via"] == "env"
+    assert list(doc["sources"]) == ["docs/specs/fixture-spec.assertions.md"]
+
+
+def test_env_override_resolves_legacy_form(tmp_path, monkeypatch):
+    manifest, baseline = _setup(tmp_path)
+    _spec_with_sources(tmp_path, legacy=True)
+    monkeypatch.setenv("CONDUCTOR_ASSERTIONS_SOURCE", "docs/specs/fixture-spec.md")
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/fixture-spec.md.assertions.md"]
+
+
+def test_env_override_naming_the_assertions_file_itself_is_used_verbatim(
+    tmp_path, monkeypatch
+):
+    manifest, baseline = _setup(tmp_path)
+    _spec_with_sources(tmp_path, stem=True)
+    monkeypatch.setenv(
+        "CONDUCTOR_ASSERTIONS_SOURCE", "docs/specs/fixture-spec.assertions.md"
+    )
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/fixture-spec.assertions.md"]
+
+
+def test_env_override_with_no_source_present_fails_closed(tmp_path, monkeypatch):
+    manifest, baseline = _setup(tmp_path)
+    _spec_with_sources(tmp_path)
+    monkeypatch.setenv("CONDUCTOR_ASSERTIONS_SOURCE", "docs/specs/fixture-spec.md")
+    with pytest.raises(Exception, match="missing-assertions-source"):
+        freeze.record(manifest, baseline, str(tmp_path))
