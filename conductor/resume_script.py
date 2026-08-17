@@ -334,8 +334,17 @@ def verify(project: str, worktree: str, script_path: str) -> tuple[bool, list[st
     return (not reasons), reasons
 
 
-def _write(project: str, worktree: str, out: str | None, force: bool = False) -> int:
-    text = render(project, worktree)
+def _write(
+    project: str,
+    worktree: str,
+    out: str | None,
+    force: bool = False,
+    host: str | None = None,
+) -> int:
+    """`host` is for the caller that is INSTALLING a host, not reading one: `driver install`
+    writes the script before it records the host, so at this moment `<project>/.conductor/host`
+    still names the host being replaced. Omitted, this stays the recorded host's driver."""
+    text = render(project, worktree, host)
     if out is None:
         sys.stdout.write(text)
         return 0
@@ -365,15 +374,17 @@ def _write(project: str, worktree: str, out: str | None, force: bool = False) ->
     # file that exists but sets no posture (empty FLAGS, unrelated exports) still stalls
     # unattended fires, so it still gets the nudge. Point at both opt-ins without choosing.
     env_path = os.path.join(os.path.dirname(out) or ".", "resume-env.sh")
-    host = runhost.adapter(project)
-    if not _posture_decided(env_path, host):
+    # The adapter of the host just WRITTEN, not the recorded one — naming the other host's flags
+    # variable would tell the owner to configure a posture this driver never reads.
+    h = base.load(host) if host else runhost.adapter(project)
+    if not _posture_decided(env_path, h):
         print(
             f"note: unattended fires need permissions pre-authorized or they STALL on the "
             f"first prompt. Pick a posture in {env_path}:\n"
-            f'  (scoped) {host.FLAGS_VAR}="{host.POSTURE_EXAMPLES["scoped"]}"\n'
-            f"           — {host.POSTURE_NOTES['scoped']}\n"
-            f'  (full)   {host.FLAGS_VAR}="{host.POSTURE_EXAMPLES["full-bypass"]}"\n'
-            f"           — {host.POSTURE_NOTES['full-bypass']}",
+            f'  (scoped) {h.FLAGS_VAR}="{h.POSTURE_EXAMPLES["scoped"]}"\n'
+            f"           — {h.POSTURE_NOTES['scoped']}\n"
+            f'  (full)   {h.FLAGS_VAR}="{h.POSTURE_EXAMPLES["full-bypass"]}"\n'
+            f"           — {h.POSTURE_NOTES['full-bypass']}",
             file=sys.stderr,
         )
     return 0
@@ -460,6 +471,14 @@ def main(argv: list[str] | None = None) -> int:
                 action="store_true",
                 help="overwrite even if the target has inline owner env (migrate it first)",
             )
+            sp.add_argument(
+                "--host",
+                default=None,
+                choices=base.HOST_IDS,
+                help="render THIS host's driver (default: the host recorded for the project). "
+                "`conductor driver install` passes it because it writes the script before it "
+                "records the host",
+            )
         else:
             sp.add_argument(
                 "--script", required=True, help="installed driver to verify"
@@ -488,7 +507,7 @@ def main(argv: list[str] | None = None) -> int:
             print(str(e), file=sys.stderr)
             return 1
     if args.cmd == "write":
-        return _write(args.project, args.worktree, args.out, args.force)
+        return _write(args.project, args.worktree, args.out, args.force, args.host)
     ok, reasons = verify(args.project, args.worktree, args.script)
     for r in reasons:
         print(r, file=sys.stderr)

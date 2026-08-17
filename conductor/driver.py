@@ -203,8 +203,8 @@ def install(project: str, worktree: str, host: str | None = None) -> int:
     write the resume script (through `resume-script write`, so its inline-owner-env
     no-clobber guard is respected) and then the marker-tagged crontab lines.
 
-    `host` records which host this run's fires spawn, BEFORE the script is rendered from that
-    recording. It is the caller's to state because it is only knowable one level up: the
+    `host` names which host this run's fires spawn. It is the caller's to state because it is
+    only knowable one level up: the
     `/conductor:start` skill runs ON the host, while every layer below it is a subprocess with
     no marker it can trust (Claude exports `CLAUDECODE`/`CLAUDE_PLUGIN_ROOT`, the Codex ground
     truth records no exported analogue, and "neither present" is indistinguishable from a plain
@@ -215,7 +215,18 @@ def install(project: str, worktree: str, host: str | None = None) -> int:
     shell. A run with NO recording gets one anyway, naming the host this install actually
     rendered. Leaving it unrecorded is what let the two disagree: the render honours
     `$CONDUCTOR_HOST`, the next reconcile runs from cron without it, and the run silently
-    regenerates back to claude."""
+    regenerates back to claude.
+
+    ORDER: the script is rendered and written FIRST, and only a written script is recorded. The
+    two are one durable fact and the recording is the half that reroutes everything else — cron
+    fires whatever the script says, while `status`, preflight, plan-lint and the merge gate all
+    believe the recording. Recording first made a failure split them: the inline-owner-env
+    no-clobber guard refused the old driver (rc 2), the recording said codex, and the surviving
+    script still fired claude — permanently, because the guard refuses every retry. Rolling the
+    record back on failure would fix that case but not a crash between the steps. This order
+    fails the other way instead: a crash after the write leaves a new script and an older
+    recording, which `resume-script verify` already reports as stale and reconcile regenerates.
+    Inconsistent-and-self-healing beats inconsistent-and-stuck."""
     root = resume_script.main_root(project)
     # Validate BEFORE anything is written: a typo'd host must not leave a driver behind.
     chosen = (
@@ -223,14 +234,26 @@ def install(project: str, worktree: str, host: str | None = None) -> int:
         if host
         else (runhost.recorded(root) or runhost.resolve(root))
     )
-    runhost.record(root, chosen)
     out = os.path.join(root, ".conductor", "resume-autodev.sh")
     os.makedirs(os.path.dirname(out), exist_ok=True)
+    # `--host` explicitly, never via the recording: it is not written yet, and the render must
+    # be the host this install decided on rather than the one the project is leaving behind.
     rc = resume_script.main(
-        ["write", "--project", root, "--worktree", worktree, "--out", out]
+        [
+            "write",
+            "--project",
+            root,
+            "--worktree",
+            worktree,
+            "--out",
+            out,
+            "--host",
+            chosen,
+        ]
     )
     if rc != 0:
         return rc
+    runhost.record(root, chosen)
     return resume_script.install_cron(root)
 
 

@@ -169,6 +169,97 @@ def test_a_codex_run_resolves_a_plugin_qualified_skill_from_a_flat_dir(
     assert "$expectations" not in out["missing"]
 
 
+def test_a_same_named_skill_from_another_plugin_is_not_the_required_one_on_either_host():
+    """The false pass: `unrelated:expectations` is attributable, and it is attributed to a
+    plugin that is NOT spec-craft. Accepting it reports the stack healthy while spec-craft is
+    absent — and a hostile plugin only has to ship a same-named skill to be invoked in its
+    place. The two hosts must agree, because the fact ("spec-craft is not installed") is not a
+    host-specific fact."""
+    avail = {"unrelated:expectations"}
+    on_claude = preflight.check(
+        required=["spec-craft:expectations"], available=avail, host_id="claude"
+    )
+    on_codex = preflight.check(
+        required=["spec-craft:expectations"], available=avail, host_id="codex"
+    )
+    assert not on_claude["ok"]
+    assert not on_codex["ok"], on_codex
+    assert on_codex["missing"] == ["$expectations"]
+
+
+def test_a_flat_codex_skill_is_reported_unverifiable_never_as_a_pass():
+    """Codex skill dirs are flat, so a bare `expectations` under $CODEX_HOME/skills/ carries no
+    plugin identity at all. It IS invocable as `$expectations`, so it is not missing — but
+    preflight cannot justify calling it spec-craft's, and a gate that greens on what it cannot
+    check is worth nothing."""
+    out = preflight.check(
+        required=["spec-craft:expectations"], available={"expectations"}, host_id="codex"
+    )
+    assert not out["ok"], out
+    assert out["unverified"] == ["$expectations"]
+    assert out["missing"] == []
+    line = next(a for a in out["advice"] if a.startswith("$expectations"))
+    assert "cannot verify" in line and "spec-craft" in line
+
+
+def test_a_codex_skill_attributed_to_the_required_plugin_is_a_clean_pass():
+    out = preflight.check(
+        required=["spec-craft:expectations"],
+        available={"spec-craft:expectations"},
+        host_id="codex",
+    )
+    assert out["ok"], out
+    assert out["unverified"] == []
+
+
+def test_an_unqualified_requirement_is_satisfied_by_any_plugins_copy_on_codex():
+    """`code-review` is environment-provided: the requirement names no plugin, so no plugin
+    identity is being claimed and there is nothing to verify."""
+    out = preflight.check(
+        required=["code-review"], available={"gstack:code-review"}, host_id="codex"
+    )
+    assert out["ok"] and out["unverified"] == []
+
+
+def test_codex_recovers_plugin_identity_from_the_installed_plugin_list(
+    tmp_path, monkeypatch
+):
+    """Identity IS recoverable for a plugin-installed skill: `codex plugin list --json` reports
+    each installed plugin's name and root, and its skills live under that root. Discovery must
+    use it rather than flattening every skill into an unattributable bare name."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    root = tmp_path / "cache" / "spec-craft"
+    skill = root / "skills" / "expectations"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    _stub_codex_on_path(tmp_path, monkeypatch, {"spec-craft": root})
+    avail = preflight.available_commands(host_id="codex")
+    assert "spec-craft:expectations" in avail
+    assert "expectations" not in avail
+
+
+def test_the_plugin_lookup_agrees_with_the_program_the_cron_driver_runs(tmp_path):
+    """Two parsers of one JSON shape drift. The driver cannot import conductor — that is the
+    problem it solves — so the only defence is checking them against each other."""
+    import subprocess
+    import sys
+
+    from conductor.hosts import codex
+
+    payload = _plugin_list_json({"spec-craft": tmp_path / "sc", "other": tmp_path / "o"})
+    from_python = codex.plugin_roots_from_json(payload)
+    for name in ("spec-craft", "other", "absent"):
+        proc = subprocess.run(
+            [sys.executable, "-c", codex.PLUGIN_ROOT_SNIPPET, name],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.stdout.strip() == from_python.get(name, ""), (name, proc.stderr)
+
+
 def test_a_claude_run_does_not_accept_an_unnamespaced_plugin_skill():
     # The regression floor for the qualifier: under Claude, a bare `expectations` is NOT
     # `/spec-craft:expectations`, and loosening that would green a machine where the plugin

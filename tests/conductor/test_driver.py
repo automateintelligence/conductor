@@ -579,3 +579,67 @@ def test_an_ambient_override_never_moves_a_run_that_already_recorded_a_host(
     assert driver.install(str(proj), str(wt)) == 0
     monkeypatch.delenv("CONDUCTOR_HOST")
     assert runhost.recorded(root) == "claude"
+
+
+def test_a_refused_driver_write_leaves_no_host_recorded(tmp_path, monkeypatch):
+    """The record and the driver are one durable fact; a half-applied install is the worst
+    outcome available. Recording first produced exactly that: `install(host="codex")` returned 2
+    because the no-clobber guard refused the old script, the recording said codex, and the
+    surviving script still fired claude — so cron ran claude while status, preflight and the
+    merge gate all consulted codex, permanently (the guard refuses every retry)."""
+    from conductor.hosts import runhost
+
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    proj, root = _mk_project(tmp_path)
+    written = _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    script = proj / ".conductor" / "resume-autodev.sh"
+    original = "#!/usr/bin/env bash\nexport CONDUCTOR_MERGE_VERIFY='pytest -q'\n"
+    script.write_text(original)
+
+    assert driver.install(str(proj), str(wt), host="codex") == 2
+    assert script.read_text() == original  # the surviving driver still fires claude
+    assert runhost.recorded(root) is None  # ...and nothing claims otherwise
+    assert not written.exists()
+
+
+def test_a_refused_driver_write_leaves_a_live_runs_host_where_it_was(
+    tmp_path, monkeypatch
+):
+    """Same guard, on a run that already has a host: a failed re-install must not move it."""
+    from conductor.hosts import runhost
+
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    proj, root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    runhost.record(root, "claude")
+    (proj / ".conductor" / "resume-autodev.sh").write_text(
+        "#!/usr/bin/env bash\nexport CONDUCTOR_MERGE_VERIFY='pytest -q'\n"
+    )
+
+    assert driver.install(str(proj), str(wt), host="codex") == 2
+    assert runhost.recorded(root) == "claude"
+
+
+def test_a_successful_install_records_the_host_the_written_script_fires(
+    tmp_path, monkeypatch
+):
+    """The other direction: once the driver exists, the recording names ITS host — not the one
+    the project had a moment earlier."""
+    from conductor.hosts import runhost
+
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    proj, root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    runhost.record(root, "claude")
+
+    assert driver.install(str(proj), str(wt), host="codex") == 0
+    assert runhost.recorded(root) == "codex"
+    script = (proj / ".conductor" / "resume-autodev.sh").read_text()
+    assert 'CODEX_BIN="$(command -v codex || true)"' in script
+    assert "CLAUDE_BIN" not in script
