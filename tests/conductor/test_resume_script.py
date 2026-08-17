@@ -788,8 +788,13 @@ def test_main_root_identical_from_linked_worktree(tmp_path):
         ["git", "-C", str(proj), "commit", "--allow-empty", "-q", "-m", "x"],
         check=True,
         timeout=30,
-        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        },
     )
     wt = tmp_path / "wt"
     subprocess.run(
@@ -917,9 +922,435 @@ def test_install_cron_quotes_a_root_with_spaces(tmp_path, monkeypatch):
         assert ln.endswith(rs.cron_marker(main_root)), ln
 
 
-def test_install_cron_on_a_non_repo_fails_with_a_named_reason(tmp_path, monkeypatch, capsys):
+def test_install_cron_on_a_non_repo_fails_with_a_named_reason(
+    tmp_path, monkeypatch, capsys
+):
     _stub_crontab(tmp_path, monkeypatch)
     not_repo = tmp_path / "plain"
     not_repo.mkdir()
     assert rs.main(["install-cron", "--project", str(not_repo)]) == 1
     assert "cannot resolve main root" in capsys.readouterr().err
+
+
+# ---- A1: the driver spawns the RUN'S host, not always claude ----------------------------
+#
+# The measurement that motivated A1: 18 of the 36 host-coupled Python lines in conductor/ are
+# in this file, and every one of them is on the path between "cron fires" and "an agent runs".
+# A Codex user installing conductor today gets a driver that resolves `claude`.
+
+# Literal, never `base.HOST_IDS`: parametrizing over the value under test would let a
+# falsifier that shrinks HOST_IDS DELETE cases instead of failing them.
+A1_HOSTS = ("claude", "codex")
+
+
+def test_the_host_matrix_covers_exactly_the_supported_hosts():
+    from conductor.hosts import base
+
+    assert A1_HOSTS == base.HOST_IDS
+
+
+def _project_recorded_as(tmp, host_id):
+    """A project whose run is recorded as `host_id`, plus its worktree."""
+    from conductor.hosts import runhost
+
+    project = tmp / "proj"
+    worktree = tmp / "wt"
+    (project / ".conductor").mkdir(parents=True)
+    worktree.mkdir()
+    runhost.record(str(project), host_id)
+    return str(project), str(worktree)
+
+
+def test_render_for_a_claude_recorded_run_is_the_claude_driver(tmp_path):
+    project, worktree = _project_recorded_as(tmp_path, "claude")
+    s = rs.render(project, worktree)
+    assert 'CLAUDE_BIN="$(command -v claude || true)"' in s
+    assert '"$CLAUDE_BIN" -p "/conductor:autodev" "$@"' in s
+
+
+def test_render_for_an_unrecorded_run_is_byte_identical_to_the_recorded_claude_one(
+    tmp_path,
+):
+    """Every run installed before A1 has no `.conductor/host`. Those must not change host on
+    the next regeneration — that would silently switch which agent drives a live run."""
+    project, worktree = _project_recorded_as(tmp_path, "claude")
+    recorded = rs.render(project, worktree)
+    os.remove(os.path.join(project, ".conductor", "host"))
+    assert rs.render(project, worktree) == recorded
+
+
+def test_render_for_a_codex_recorded_run_resolves_and_launches_codex(tmp_path):
+    """The A1 goal in one assertion: the cron fire spawns `codex`, not `claude`."""
+    project, worktree = _project_recorded_as(tmp_path, "codex")
+    s = rs.render(project, worktree)
+    assert 'CODEX_BIN="$(command -v codex || true)"' in s
+    assert "command -v claude" not in s
+    fire = [ln for ln in s.splitlines() if ln.strip().startswith('"$CODEX_BIN"')]
+    assert len(fire) == 1, fire
+    assert fire[0].strip().startswith('"$CODEX_BIN" exec --cd "$WORKTREE"')
+    assert "skills/autodev/SKILL.md" in fire[0]
+
+
+def test_a_codex_driver_never_names_the_claude_binary_or_its_plugin_cache(tmp_path):
+    project, worktree = _project_recorded_as(tmp_path, "codex")
+    s = rs.render(project, worktree)
+    for token in (
+        "CLAUDE_BIN",
+        "$HOME/.local/bin/claude",
+        '$HOME"/.claude/plugins/cache',
+        "--dangerously-skip-permissions",
+        "--permission-mode",
+        "CONDUCTOR_RESUME_CLAUDE_FLAGS",
+    ):
+        assert token not in s, token
+
+
+def test_a_claude_driver_never_names_codex_flags(tmp_path):
+    project, worktree = _project_recorded_as(tmp_path, "claude")
+    s = rs.render(project, worktree)
+    for token in (
+        "CODEX_BIN",
+        "--sandbox",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "CONDUCTOR_RESUME_CODEX_FLAGS",
+    ):
+        assert token not in s, token
+
+
+@pytest.mark.parametrize("host_id", A1_HOSTS)
+def test_every_hosts_render_is_valid_bash(host_id, tmp_path):
+    if not (bash := _which("bash")):
+        pytest.skip("bash not available")
+    project, worktree = _project_recorded_as(tmp_path, host_id)
+    proc = subprocess.run(
+        [bash, "-n"],
+        input=rs.render(project, worktree),
+        text=True,
+        capture_output=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize("host_id", A1_HOSTS)
+def test_every_hosts_render_shell_escapes_paths(host_id, tmp_path):
+    if not (bash := _which("bash")):
+        pytest.skip("bash not available")
+    project, _ = _project_recorded_as(tmp_path, host_id)
+    s = rs.render(project, "/home/u/pro j'x")
+    assert (
+        subprocess.run([bash, "-n"], input=s, text=True, capture_output=True).returncode
+        == 0
+    )
+    assert 'WORKTREE="/home/u/pro j\'x"' not in s
+
+
+@pytest.mark.parametrize("host_id", A1_HOSTS)
+def test_every_hosts_render_keeps_the_three_guards_and_the_rot_ban(host_id, tmp_path):
+    project, worktree = _project_recorded_as(tmp_path, host_id)
+    s = rs.render(project, worktree)
+    assert "flock -n 9" in s
+    assert "assert run --level spec" in s
+    assert 'CONDUCTOR_HOME="$WORKTREE"' in s
+    assert "driver-unresolved" in s and "exit 3" in s
+    assert "env-unsafe" in s and "exit 5" in s
+    for pat, why in rs._ROT_PATTERNS:
+        assert not pat.search(s), f"{host_id}: {why}"
+
+
+def test_verify_flags_an_installed_driver_from_the_previous_template(tmp_path):
+    """TEMPLATE_VERSION must move whenever the generated text does, or an already-installed
+    driver never regenerates and the whole change ships inert."""
+    project, worktree = _project_recorded_as(tmp_path, "claude")
+    installed = tmp_path / "resume-autodev.sh"
+    installed.write_text(
+        rs.render(project, worktree).replace(
+            rs._MARKER, "# conductor-resume-template: v4"
+        )
+    )
+    ok, reasons = rs.verify(project, worktree, str(installed))
+    assert not ok
+    assert any("regenerate" in r for r in reasons), reasons
+
+
+def test_verify_regenerates_when_the_recorded_host_changes(tmp_path):
+    """Re-recording a run onto the other host must make the installed driver stale, or the
+    run keeps firing the old agent forever."""
+    from conductor.hosts import runhost
+
+    project, worktree = _project_recorded_as(tmp_path, "claude")
+    installed = tmp_path / "resume-autodev.sh"
+    installed.write_text(rs.render(project, worktree))
+    assert rs.verify(project, worktree, str(installed))[0]
+    runhost.record(project, "codex")
+    ok, reasons = rs.verify(project, worktree, str(installed))
+    assert not ok, reasons
+
+
+# ---- A1: the owner-env allowlist ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "var",
+    [
+        "CONDUCTOR_MERGE_VERIFY",
+        "CONDUCTOR_PLUGIN_DIRS",
+        "DOCKER_HOST",
+        "CONDUCTOR_RESUME_CLAUDE_FLAGS",
+        "CONDUCTOR_RESUME_CODEX_FLAGS",
+        "CONDUCTOR_SPEC_ROOTS",
+    ],
+)
+def test_owner_env_migration_allowlist_covers_every_declared_variable(var):
+    """An owner variable missing from this list is silently DROPPED when a driver carrying it
+    inline is regenerated. CONDUCTOR_SPEC_ROOTS is the live example: a project whose specs are
+    not under docs/specs resolves its gate interactively and then fails across the cron loop."""
+    assert var in rs.OWNER_ENV_VARS
+    assert rs._OWNER_ENV_RE.findall(f"export {var}=x\n") == [var]
+
+
+def test_the_allowlist_regex_is_derived_from_the_declared_set_not_hand_written():
+    """A hand-maintained alternation drifts from the declaration the day someone adds a
+    variable to one and not the other."""
+    for var in rs.OWNER_ENV_VARS:
+        assert rs._OWNER_ENV_RE.findall(f"export {var}=x\n") == [var]
+    assert rs._OWNER_ENV_RE.findall("export CONDUCTOR_NOT_DECLARED=x\n") == []
+
+
+# ---- A1: the codex driver actually fires codex (end to end, real bash) --------------------
+
+
+def _mk_codex_harness(tmp):
+    """Same shape as _mk_env_harness, for a Codex-recorded run: stub `codex` and `conductor`
+    in a temp HOME's .local/bin, and put conductor's skill tree where the driver derives it
+    from the resolved bin (<root>/bin/conductor -> <root>/skills/...)."""
+    from conductor.hosts import runhost
+
+    project = tmp / "proj"
+    worktree = tmp / "wt"
+    home = tmp / "home"
+    bindir = home / ".local" / "bin"
+    skill = home / ".local" / "skills" / "autodev"
+    for d in (project / ".conductor", worktree, bindir, skill):
+        d.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: autodev\n---\n")
+    argv_file = tmp / "argv"
+    codex = bindir / "codex"
+    codex.write_text(
+        f'#!/bin/sh\nfor a in "$@"; do printf \'%s\\n\' "$a"; done > "{argv_file}"\nexit 0\n'
+    )
+    os.chmod(codex, 0o755)
+    stub_conductor = bindir / "conductor"
+    stub_conductor.write_text("#!/bin/sh\nexit 1\n")  # gate not green -> proceed
+    os.chmod(stub_conductor, 0o755)
+    runhost.record(str(project), "codex")
+    driver = project / ".conductor" / "resume-autodev.sh"
+    driver.write_text(rs.render(str(project), str(worktree)))
+    os.chmod(driver, 0o755)
+    return project, driver, home, argv_file
+
+
+def _fire_codex(tmp, name, env_line=None):
+    base = tmp / name
+    base.mkdir()
+    project, driver, home, argv_file = _mk_codex_harness(base)
+    if env_line is not None:
+        env_file = project / ".conductor" / "resume-env.sh"
+        env_file.write_text(env_line + "\n")
+        os.chmod(env_file, 0o600)
+    proc = _fire_driver(driver, home)
+    log_file = project / ".conductor" / "resume-autodev.log"
+    log = log_file.read_text() if log_file.is_file() else ""
+    argv = argv_file.read_text().splitlines() if argv_file.is_file() else []
+    return proc, log, argv
+
+
+def test_a_codex_run_fires_the_codex_binary_with_an_exec_invocation(tmp_path):
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    proc, log, argv = _fire_codex(tmp_path, "fire")
+    assert "fire-start" in log, (proc.returncode, proc.stdout, proc.stderr, log)
+    assert proc.returncode == 0
+    assert argv[:3] == ["exec", "--cd", str(tmp_path / "fire" / "wt")], argv
+    assert argv[-1].startswith("Read ")
+    assert argv[-1].endswith("/skills/autodev/SKILL.md and execute it.")
+    # -p is --profile to codex: the prompt must never be its value
+    assert "-p" not in argv, argv
+    assert "--profile" not in argv, argv
+    assert "/conductor:autodev" not in argv, argv
+
+
+def test_a_codex_run_fails_loud_when_the_skill_tree_is_missing(tmp_path):
+    """A prompt pointing at a nonexistent SKILL.md does not fail fast — it burns a whole
+    context discovering the path is wrong. Fail before the fire, like an unresolved bin."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "noskill"
+    base.mkdir()
+    project, driver, home, argv_file = _mk_codex_harness(base)
+    os.remove(home / ".local" / "skills" / "autodev" / "SKILL.md")
+    proc = _fire_driver(driver, home)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 3
+    assert "driver-unresolved codex=" in log
+    assert not argv_file.exists()
+    assert "fire-start" not in log
+
+
+@pytest.mark.parametrize(
+    "env_line,expected",
+    [
+        (None, "supervised"),
+        ('CONDUCTOR_RESUME_CODEX_FLAGS="--sandbox read-only"', "supervised"),
+        ('CONDUCTOR_RESUME_CODEX_FLAGS="--sandbox workspace-write"', "scoped"),
+        ('CONDUCTOR_RESUME_CODEX_FLAGS="--approve-for-me"', "scoped"),
+        (
+            'CONDUCTOR_RESUME_CODEX_FLAGS="--dangerously-bypass-approvals-and-sandbox"',
+            "full-bypass",
+        ),
+        (
+            'CONDUCTOR_RESUME_CODEX_FLAGS="--sandbox workspace-write --dangerously-bypass-approvals-and-sandbox"',
+            "full-bypass",
+        ),
+        (
+            "CONDUCTOR_RESUME_CODEX_FLAGS=\"--cd '/tmp/a danger-full-access'\"",
+            "supervised",
+        ),
+    ],
+)
+def test_a_codex_fire_labels_its_posture_from_codex_flags(tmp_path, env_line, expected):
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    name = f"posture{abs(hash((env_line, expected)))}"
+    _proc, log, _argv = _fire_codex(tmp_path, name, env_line)
+    lines = _posture_lines(log)
+    assert lines, log
+    assert any(f"posture={expected}" in ln for ln in lines), (expected, lines)
+
+
+def test_the_shell_posture_derivation_agrees_with_its_python_mirror(tmp_path):
+    """Two derivations of the same label drift; the log then misrepresents the fire. Every
+    case above is checked against the adapter that renders the shell."""
+    from conductor.hosts import base
+
+    adapter = base.load("codex")
+    for args, expected in (
+        ([], "supervised"),
+        (["--sandbox", "workspace-write"], "scoped"),
+        (["--approve-for-me"], "scoped"),
+        (["--dangerously-bypass-approvals-and-sandbox"], "full-bypass"),
+    ):
+        assert adapter.posture_of(args) == expected
+
+
+def test_a_codex_run_ignores_the_claude_flag_variable_entirely(tmp_path):
+    """An owner who set CONDUCTOR_RESUME_CLAUDE_FLAGS on a machine that later runs Codex must
+    not have those flags smuggled into a `codex exec` argv, and must not be labelled
+    full-bypass for a posture Codex never granted."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    _proc, log, argv = _fire_codex(
+        tmp_path,
+        "leak",
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"',
+    )
+    assert "--dangerously-skip-permissions" not in argv, argv
+    assert any("posture=supervised" in ln for ln in _posture_lines(log)), log
+
+
+def test_a_codex_driver_holds_the_same_flock_and_gate_guards(tmp_path):
+    """A second fire while one holds the lock must exit 0 without launching — the guard is
+    host-neutral and must not have been lost in the rewrite."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "gate"
+    base.mkdir()
+    project, driver, home, argv_file = _mk_codex_harness(base)
+    green = home / ".local" / "bin" / "conductor"
+    green.write_text("#!/bin/sh\nexit 0\n")  # done-gate green -> no-op fire
+    os.chmod(green, 0o755)
+    proc = _fire_driver(driver, home)
+    assert proc.returncode == 0
+    assert not argv_file.exists()
+
+
+# ---- A1: the write-time posture nudge follows the host -----------------------------------
+
+
+@pytest.mark.parametrize(
+    "host_id,flags_var",
+    [
+        ("claude", "CONDUCTOR_RESUME_CLAUDE_FLAGS"),
+        ("codex", "CONDUCTOR_RESUME_CODEX_FLAGS"),
+    ],
+)
+def test_the_write_nudge_names_the_hosts_own_flag_variable(
+    host_id, flags_var, tmp_path, capsys
+):
+    from conductor.hosts import base
+
+    project, worktree = _project_recorded_as(tmp_path, host_id)
+    out = tmp_path / "resume-autodev.sh"
+    rs.main(["write", "--project", project, "--worktree", worktree, "--out", str(out)])
+    err = capsys.readouterr().err
+    assert flags_var in err
+    # and never the other host's variable, which would tell the owner to set something the
+    # driver for this run does not read
+    other = base.load(base.opposite(host_id)).FLAGS_VAR
+    assert other not in err, err
+
+
+@pytest.mark.parametrize(
+    "host_id,decided_line",
+    [
+        ("claude", 'CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"'),
+        (
+            "codex",
+            'CONDUCTOR_RESUME_CODEX_FLAGS="--dangerously-bypass-approvals-and-sandbox"',
+        ),
+    ],
+)
+def test_a_decided_posture_silences_the_nudge_per_host(
+    host_id, decided_line, tmp_path, capsys
+):
+    project, worktree = _project_recorded_as(tmp_path, host_id)
+    out = tmp_path / "out" / "resume-autodev.sh"
+    out.parent.mkdir()
+    (out.parent / "resume-env.sh").write_text(decided_line + "\n")
+    rs.main(["write", "--project", project, "--worktree", worktree, "--out", str(out)])
+    assert "Pick a posture" not in capsys.readouterr().err
+
+
+def test_the_other_hosts_decided_posture_does_not_silence_the_nudge(tmp_path, capsys):
+    """A Claude posture in resume-env.sh decides nothing for a Codex run: that run still
+    fires supervised and its owner still needs telling."""
+    project, worktree = _project_recorded_as(tmp_path, "codex")
+    out = tmp_path / "out" / "resume-autodev.sh"
+    out.parent.mkdir()
+    (out.parent / "resume-env.sh").write_text(
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"\n'
+    )
+    rs.main(["write", "--project", project, "--worktree", worktree, "--out", str(out)])
+    assert "Pick a posture" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "host_id,own,foreign",
+    [
+        ("claude", "CONDUCTOR_RESUME_CLAUDE_FLAGS", "CONDUCTOR_RESUME_CODEX_FLAGS"),
+        ("codex", "CONDUCTOR_RESUME_CODEX_FLAGS", "CONDUCTOR_RESUME_CLAUDE_FLAGS"),
+    ],
+)
+def test_a_driver_documents_only_the_variables_its_own_fire_reads(
+    host_id, own, foreign
+):
+    """The MIGRATION allowlist is the union — a driver being regenerated may carry either
+    host's inline config and neither may be dropped. What a driver DOCUMENTS is narrower:
+    naming a variable this run never reads is how an owner sets Claude flags on a Codex run
+    and wonders why nothing changed."""
+    from conductor.hosts import base
+
+    vars_for = rs.owner_env_vars_for(base.load(host_id))
+    assert own in vars_for
+    assert foreign not in vars_for
+    assert "CONDUCTOR_SPEC_ROOTS" in vars_for
+    assert set(vars_for) < set(rs.OWNER_ENV_VARS)

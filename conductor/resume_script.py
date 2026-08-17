@@ -12,8 +12,14 @@ Split of concerns the render enforces:
 - MECHANICAL (this module owns, regenerable): bin resolution, PATH repair, fail-loud, the three
   guards (no-double-drive, done-gate-green exit, flock), the fire.
 - OWNER/MACHINE config (never baked here, sourced from `<project>/.conductor/resume-env.sh` so
-  regeneration can never clobber it): `CONDUCTOR_MERGE_VERIFY`, `CONDUCTOR_PLUGIN_DIRS`,
-  `DOCKER_HOST`, `CONDUCTOR_RESUME_CLAUDE_FLAGS`.
+  regeneration can never clobber it): every name in `OWNER_ENV_VARS`.
+
+WHICH HOST the fire spawns is `conductor.hosts.runhost.resolve(project)` — the run's recorded
+host, `claude` when nothing is recorded. Everything that differs between hosts (bin resolution,
+the fail-loud guard, the posture table, the fire line, the owner-flags variable) is the
+adapter's text, not this module's. Nothing here is a format string with a host id in it: `-p` is
+`--print` to Claude and `--profile` to Codex, so one shared template is wrong exactly once,
+silently, and presents as a model-selection bug.
 
 `CONDUCTOR_RUN_BRANCH` is deliberately NOT exported: a stale literal would override
 `.conductor/run_branch` in `merge_gate._expected_base()` and pin an out-of-date branch. The file
@@ -30,9 +36,11 @@ import stat
 import subprocess
 import sys
 
+from conductor.hosts import base, runhost
+
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and
 # `/conductor:start` reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 4
+TEMPLATE_VERSION = 5
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
@@ -49,10 +57,43 @@ _ROT_PATTERNS = (
 )
 # Owner/machine env an old inline script may carry; verify surfaces these so a regeneration
 # migrates them to resume-env.sh instead of silently dropping them.
+#
+# ONE declared set, and the regex below is built from it. A variable missing from this list is
+# silently dropped on regeneration, and the failure is invisible until a cron fire behaves
+# differently from an interactive run — which is exactly what CONDUCTOR_SPEC_ROOTS does when a
+# project's specs are not under `docs/specs`. A hand-maintained alternation drifts from the
+# declaration the first time someone adds a variable to one and not the other.
+OWNER_ENV_VARS: tuple[str, ...] = (
+    "CONDUCTOR_MERGE_VERIFY",
+    "CONDUCTOR_PLUGIN_DIRS",
+    "DOCKER_HOST",
+    "CONDUCTOR_SPEC_ROOTS",
+    # One per host: the VALUE is that host's flag vocabulary, and a single shared name is how
+    # an owner's `--dangerously-skip-permissions` would end up in a `codex exec` argv.
+    *(base.load(host_id).FLAGS_VAR for host_id in base.HOST_IDS),
+)
+# Escaped at THIS boundary specifically. The same names are also interpolated into shell (the
+# generated driver) and into plain prose (the nudge), and each of those is a different
+# interpreter with different live metacharacters — escaping done for one does not carry to
+# another. The identifier check below is what makes all three boundaries safe at once.
 _OWNER_ENV_RE = re.compile(
-    r"^\s*export\s+(CONDUCTOR_MERGE_VERIFY|CONDUCTOR_PLUGIN_DIRS|DOCKER_HOST|CONDUCTOR_RESUME_CLAUDE_FLAGS)\b",
+    r"^\s*export\s+(" + "|".join(re.escape(v) for v in OWNER_ENV_VARS) + r")\b",
     re.MULTILINE,
 )
+if not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", v) for v in OWNER_ENV_VARS):
+    raise ValueError(f"owner env names must be shell identifiers: {OWNER_ENV_VARS}")
+
+
+def owner_env_vars_for(host: base.HostAdapter) -> tuple[str, ...]:
+    """`OWNER_ENV_VARS` minus the other host's flags variable.
+
+    The migration allowlist is deliberately the union — a driver being regenerated may carry
+    either host's inline config and neither may be dropped. What one generated driver
+    *documents* is the narrower set: naming a variable this run's fire never reads is how an
+    owner comes to set Claude flags on a Codex run and wonder why nothing changed.
+    """
+    foreign = {base.load(h).FLAGS_VAR for h in base.HOST_IDS} - {host.FLAGS_VAR}
+    return tuple(v for v in OWNER_ENV_VARS if v not in foreign)
 
 
 def main_root(path: str) -> str:
@@ -144,22 +185,28 @@ def uninstall_cron(project: str) -> int:
     return _write_crontab(kept)
 
 
-def render(project: str, worktree: str) -> str:
-    """The Tier-B driver script, deterministic in (project, worktree). project = the owner
+def render(project: str, worktree: str, host: str | None = None) -> str:
+    """The Tier-B driver script, deterministic in (project, worktree, host). project = the owner
     main-checkout root (lock + log live there, shared across drivers); worktree = the run
     worktree the worker resumes in (never the owner checkout). Paths are rendered with
     shlex.quote so a directory name containing a space/quote/`$` can't break or inject into the
-    emitted shell."""
+    emitted shell.
+
+    `host` defaults to the run's recorded host, which is `claude` when nothing is recorded — so
+    every driver installed before A1 regenerates to the same host it has always fired."""
+    h = base.load(host) if host else runhost.adapter(project)
     return f"""#!/usr/bin/env bash
 {_MARKER}
 # conductor Tier-B resume driver — GENERATED by `conductor resume-script write`. Do NOT hand-edit.
 #
 # OWNER-OWNED run infrastructure: the autodev worker never modifies it. `/conductor:start`
 # reconcile regenerates it (via `conductor resume-script verify` -> `write`) when this template
-# changes or its bins stop resolving, so a claude/node/plugin upgrade SELF-HEALS instead of
-# silently stalling. Machine/run-specific env (CONDUCTOR_MERGE_VERIFY, CONDUCTOR_PLUGIN_DIRS,
-# DOCKER_HOST, CONDUCTOR_RESUME_CLAUDE_FLAGS) lives in <project>/.conductor/resume-env.sh — this
-# script sources it and never bakes it in, so regeneration can never clobber owner config.
+# changes or its bins stop resolving, so a host/node/plugin upgrade SELF-HEALS instead of
+# silently stalling. Machine/run-specific env ({", ".join(owner_env_vars_for(h))})
+# lives in <project>/.conductor/resume-env.sh — this script sources it and never bakes it in,
+# so regeneration can never clobber owner config.
+#
+# HOST: {h.id} (from <project>/.conductor/host; unrecorded runs are claude).
 set -u
 
 PROJECT={shlex.quote(project)}
@@ -172,18 +219,12 @@ export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin${{PATH:+:$PATH}}"
 
 # Resolve bins at RUN time. NEVER pin generation-time paths: a versioned node path or a
 # version-pinned plugin dir rots on the next upgrade and the fire then dies silently.
-CLAUDE_BIN="$(command -v claude || true)"
-[ -x "$CLAUDE_BIN" ] || CLAUDE_BIN="$HOME/.local/bin/claude"   # claude 2.x standalone launcher (stable, unversioned)
-CONDUCTOR="$(command -v conductor || true)"
-[ -x "$CONDUCTOR" ] || CONDUCTOR="$(ls -d "$HOME"/.claude/plugins/cache/*/conductor/*/bin/conductor 2>/dev/null | sort -V | tail -1)"
+{h.resume_bin_resolution()}
 
 # Fail LOUD if a bin is unresolvable — silence is the real defect; a stalled run must be visible.
-if [ ! -x "$CLAUDE_BIN" ] || [ ! -x "${{CONDUCTOR:-}}" ]; then
-    printf '%s driver-unresolved claude=%s conductor=%s\\n' "$(ts)" "$CLAUDE_BIN" "${{CONDUCTOR:-}}" >> "$LOG"
-    exit 3
-fi
+{h.resume_unresolved_guard()}
 
-# Owner/machine env (merge-verify command, plugin dirs, docker host, extra claude flags). Kept
+# Owner/machine env (merge-verify command, plugin dirs, docker host, extra host flags). Kept
 # OUT of this generated file so regeneration never clobbers it. SAFETY: the file can carry the
 # bypass flag and a shell-executed CONDUCTOR_MERGE_VERIFY, so a group- or world-writable copy is
 # a privilege-escalation vector — refuse it LOUD (env-unsafe, exit 5) before sourcing, like
@@ -227,38 +268,37 @@ done
 # non-zero = the fire errored out. Reconcile's log-tail warns on either.
 #
 # PERMISSION OPT-IN (owner decision — NOT defaulted): an autonomous phase runs gh PR create/merge,
-# push, docker, broad edits, and subagents. A headless `-p` session can't answer permission
+# push, docker, broad edits, and subagents. A headless session can't answer permission
 # prompts, so if none of those are pre-authorized it STALLS on the first one — the same
 # silent-stall CLASS this driver otherwise fixes. To let unattended fires complete, set in
-# resume-env.sh EITHER a least-privilege allowlist (point claude at a scoped settings.json) OR, for
-# full autonomy, CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions". The default here
+# resume-env.sh EITHER a least-privilege posture ({h.FLAGS_VAR}="{h.POSTURE_EXAMPLES["scoped"]}")
+# OR, for full autonomy, {h.FLAGS_VAR}="{h.POSTURE_EXAMPLES["full-bypass"]}". The default here
 # is EMPTY (supervised only): a full-access agent firing every heartbeat is a standing security
 # posture, so the owner opts in explicitly, never the generator.
 # Re-parse the owner's flags with THEIR OWN quoting (a bare unquoted expansion would word-split
-# a quoted `--settings '/path with space'` into fragments). eval adds no new trust surface here:
+# a quoted flag value containing a space into fragments). eval adds no new trust surface here:
 # resume-env.sh is already sourced — i.e. executed — owner-owned, 0600-guarded content.
-eval "set -- ${{CONDUCTOR_RESUME_CLAUDE_FLAGS:-}}"
+# The variable is this HOST's: the other host's flag vocabulary is not merely unnecessary here,
+# it would be smuggled into an argv that cannot parse it.
+eval "set -- ${{{h.FLAGS_VAR}:-}}"
 # POSTURE VISIBILITY (audit, review A-4/A-6): label every fire with the permission posture
 # DERIVED from the SAME parsed argv the fire executes with — never a constant, never the raw
 # flag value or a settings path (the log must not leak them), and never a second divergent
-# parse (a quoted 'bypassPermissions' value must log what it executes). EXACT argv-token
-# comparison, not substring matching, so a flag VALUE merely containing a flag-looking token
-# (even with spaces) cannot mislabel the fire. Bypass wins when both appear: the more
-# privileged posture is the honest label. bypassPermissions counts only as the VALUE of a
-# preceding --permission-mode (its other full-bypass spelling).
+# parse (a quoted value must log what it executes). EXACT argv-token comparison, not substring
+# matching, so a flag VALUE merely containing a flag-looking token (even with spaces) cannot
+# mislabel the fire. Bypass wins when both appear: the more privileged posture is the honest
+# label. The arms below are the {h.id} vocabulary and only that: the other host's flags are
+# not recognized because they never reach this fire.
 POSTURE="supervised"
 prev=""
 for arg in "$@"; do
     case "$arg" in
-        --dangerously-skip-permissions) POSTURE="full-bypass" ;;
-        --permission-mode=bypassPermissions) POSTURE="full-bypass" ;;
-        bypassPermissions) [ "$prev" = "--permission-mode" ] && POSTURE="full-bypass" ;;
-        --settings|--settings=*) [ "$POSTURE" = "full-bypass" ] || POSTURE="scoped" ;;
+{h.resume_posture_arms()}
     esac
     prev="$arg"
 done
 printf '%s fire-start posture=%s\\n' "$(ts)" "$POSTURE" >> "$LOG"
-"$CLAUDE_BIN" -p "/conductor:autodev" "$@" >> "$LOG" 2>&1
+{h.resume_fire_command()} >> "$LOG" 2>&1
 rc=$?
 printf '%s fire-end rc=%s\\n' "$(ts)" "$rc" >> "$LOG"
 exit "$rc"
@@ -325,52 +365,34 @@ def _write(project: str, worktree: str, out: str | None, force: bool = False) ->
     # file that exists but sets no posture (empty FLAGS, unrelated exports) still stalls
     # unattended fires, so it still gets the nudge. Point at both opt-ins without choosing.
     env_path = os.path.join(os.path.dirname(out) or ".", "resume-env.sh")
-    if not _posture_decided(env_path):
+    host = runhost.adapter(project)
+    if not _posture_decided(env_path, host):
         print(
             f"note: unattended fires need permissions pre-authorized or they STALL on the "
             f"first prompt. Pick a posture in {env_path}:\n"
-            f'  (scoped) CONDUCTOR_RESUME_CLAUDE_FLAGS="--settings <path-to-scoped-settings.json>"\n'
-            f"           — least privilege: allowlist git/gh/pytest/ruff/pyright/conductor/docker\n"
-            f'  (full)   CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"\n'
-            f"           — standing full-access posture; your explicit call, never defaulted.",
+            f'  (scoped) {host.FLAGS_VAR}="{host.POSTURE_EXAMPLES["scoped"]}"\n'
+            f"           — {host.POSTURE_NOTES['scoped']}\n"
+            f'  (full)   {host.FLAGS_VAR}="{host.POSTURE_EXAMPLES["full-bypass"]}"\n'
+            f"           — {host.POSTURE_NOTES['full-bypass']}",
             file=sys.stderr,
         )
     return 0
 
 
-_FLAGS_VAR = "CONDUCTOR_RESUME_CLAUDE_FLAGS"
 # A shell variable-assignment word (`NAME=...`) — used to tell a line of persistent
 # assignments apart from a command with a temporary env prefix.
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
-def _posture_of(args: list[str]) -> str:
-    """The posture label for a parsed flags argv — the Python transliteration of the
-    DRIVER's exact-token fire-start derivation. Probe and driver must agree, or write
-    re-nudges an owner who already decided (training them to ignore it). Exact tokens,
-    never substrings; bypass wins over scoped."""
-    posture = "supervised"
-    prev = ""
-    for arg in args:
-        if arg in (
-            "--dangerously-skip-permissions",
-            "--permission-mode=bypassPermissions",
-        ) or (arg == "bypassPermissions" and prev == "--permission-mode"):
-            posture = "full-bypass"
-        elif (
-            arg == "--settings" or arg.startswith("--settings=")
-        ) and posture != "full-bypass":
-            posture = "scoped"
-        prev = arg
-    return posture
-
-
-def _posture_decided(env_path: str) -> bool:
+def _posture_decided(env_path: str, host: base.HostAdapter) -> bool:
     """Has the owner picked a permission posture in resume-env.sh? DECIDED iff an ACTIVE
-    CONDUCTOR_RESUME_CLAUDE_FLAGS assignment VALUE carries a bypass or --settings posture.
-    Lines are parsed shell-wise (shlex, comments stripped) so a commented-out example line
-    or a comment tail on an empty assignment never counts as a decision. Absent/unreadable
-    file, malformed line, or a posture-less value is UNDECIDED (nudge fires)."""
+    assignment of THIS HOST's flags variable carries a non-supervised posture. The other
+    host's variable decides nothing: its flags never reach this run's fire, so an owner who
+    set them still needs telling. Lines are parsed shell-wise (shlex, comments stripped) so a
+    commented-out example line or a comment tail on an empty assignment never counts as a
+    decision. Absent/unreadable file, malformed line, or a posture-less value is UNDECIDED
+    (nudge fires)."""
+    flags_var = host.FLAGS_VAR
     if not os.path.isfile(env_path):
         return False
     try:
@@ -392,7 +414,7 @@ def _posture_decided(env_path: str) -> bool:
         if not words:
             continue
         if words[0] == "unset":
-            if _FLAGS_VAR in words[1:]:
+            if flags_var in words[1:]:
                 final_value = None
             continue
         if words[0] in ("export", "declare", "typeset"):
@@ -402,15 +424,17 @@ def _posture_decided(env_path: str) -> bool:
         else:  # a command line (possibly temp-env-prefixed) — nothing persists
             continue
         for word in assigns:
-            if word.startswith(f"{_FLAGS_VAR}="):
-                final_value = word[len(_FLAGS_VAR) + 1 :]
+            if word.startswith(f"{flags_var}="):
+                final_value = word[len(flags_var) + 1 :]
     if final_value is None:
         return False
     try:
         args = shlex.split(final_value)
     except ValueError:  # malformed value — undecided, fail toward nudging
         return False
-    return _posture_of(args) != "supervised"
+    # The DRIVER's own derivation, not a second one: probe and driver must agree or `write`
+    # re-nudges an owner who already decided, training them to ignore the nudge.
+    return host.posture_of(args) != "supervised"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -456,8 +480,7 @@ def main(argv: list[str] | None = None) -> int:
             # main_root on a non-repo path: name the failure, never traceback.
             detail = (e.stderr or "").strip()
             print(
-                f"cannot resolve main root for {args.project}: "
-                f"{detail or e}",
+                f"cannot resolve main root for {args.project}: {detail or e}",
                 file=sys.stderr,
             )
             return 1
