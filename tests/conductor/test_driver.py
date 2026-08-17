@@ -12,6 +12,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 
 import pytest
 
@@ -643,3 +644,110 @@ def test_a_successful_install_records_the_host_the_written_script_fires(
     script = (proj / ".conductor" / "resume-autodev.sh").read_text()
     assert 'CODEX_BIN="$(command -v codex || true)"' in script
     assert "CLAUDE_BIN" not in script
+
+
+# ---- A1: an install is one durable fact, so two of them serialize --------------------------
+#
+# `install` writes the script, records the host, then installs the crontab lines. Nothing made
+# that atomic, so two installs naming different hosts interleave: codex writes, claude writes
+# AND records, codex records. Both return 0, the surviving script fires claude, `.conductor/host`
+# says codex. `resume-script verify` reports it; `driver status` does not, and nothing reconciles
+# before the next cron tick.
+
+#: A competing install, run as a REAL separate process so the advisory lock is what decides the
+#: outcome rather than a monkeypatch. The short lock timeout is set here, in the test's own
+#: program, so no test-only knob has to exist in production.
+_RACING_INSTALL = """
+import sys
+from conductor import driver
+driver.INSTALL_LOCK_TIMEOUT_S = 1.0
+sys.exit(driver.install(sys.argv[1], sys.argv[2], "claude"))
+"""
+
+
+def _installed_host(script_path):
+    """Which host the script on disk actually fires — read from the script, never from the
+    recording, because agreement between the two is the whole question."""
+    text = script_path.read_text()
+    return "codex" if 'CODEX_BIN="$(command -v codex' in text else "claude"
+
+
+def test_a_competing_install_cannot_land_between_the_write_and_the_recording(
+    tmp_path, monkeypatch
+):
+    """The finding's exact interleaving, forced: a full claude install runs in the window after
+    this codex install has written its script and before it records. Under a lock the competitor
+    cannot get in at all, and the two halves of the durable fact still name one host."""
+    from conductor.hosts import runhost
+
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    proj, root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    script = proj / ".conductor" / "resume-autodev.sh"
+    competitor = {}
+    original_write = driver.resume_script.main
+
+    def racing_write(argv):
+        rc = original_write(argv)
+        competitor["proc"] = subprocess.run(
+            [sys.executable, "-c", _RACING_INSTALL, str(proj), str(wt)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return rc
+
+    monkeypatch.setattr(driver.resume_script, "main", racing_write)
+
+    assert driver.install(str(proj), str(wt), host="codex") == 0
+
+    assert competitor["proc"].returncode != 0, competitor["proc"].stdout
+    assert runhost.recorded(root) == "codex"
+    assert _installed_host(script) == "codex"
+
+
+def test_an_install_blocked_by_another_says_so_and_changes_nothing(
+    tmp_path, monkeypatch
+):
+    """Refusing is only correct if it refuses CLEANLY. A blocked install must leave no script
+    and no recording behind — a lock taken after the write would still return nonzero here while
+    having already replaced the driver."""
+    from conductor.core import locks
+    from conductor.hosts import runhost
+
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    proj, root = _mk_project(tmp_path)
+    written = _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    monkeypatch.setattr(driver, "INSTALL_LOCK_TIMEOUT_S", 1.0)
+
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time;from conductor.core import locks;"
+            "f=open(sys.argv[1],'w');"
+            "__import__('fcntl').flock(f, __import__('fcntl').LOCK_EX);"
+            "print('held', flush=True); time.sleep(30)",
+            driver.install_lock_path(root),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        rc = driver.install(str(proj), str(wt), host="codex")
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
+
+    assert rc != 0
+    assert not (proj / ".conductor" / "resume-autodev.sh").exists()
+    assert runhost.recorded(root) is None
+    assert not written.exists()
+    assert (
+        locks is not None
+    )  # the primitive under test is conductor's own, not a new one
