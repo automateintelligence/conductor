@@ -50,10 +50,20 @@ _INSTALL_CACHE = ("plugins", "cache")
 #: so it cannot import from here. Reads ``codex plugin list --json`` on stdin, takes a plugin
 #: name in argv, prints that plugin's INSTALLED root (or nothing). Single quotes are forbidden
 #: inside it: the driver wraps it in shell single quotes.
+#:
+#: The two ``isinstance`` guards mirror ``_claims_from_json`` exactly, and they are the whole
+#: reason the mirror is stated twice rather than assumed: without them this comprehension called
+#: ``.get()`` on every element of ``installed[]`` and on the parsed document itself, so a single
+#: unexpected element — ``{"installed":[null, <a valid conductor entry>]}`` — made this program
+#: die with ``AttributeError`` and resolve nothing while the Python parser returned the valid
+#: root. Preflight greened and the cron driver stopped, which is the one failure shape neither
+#: side can see from where it stands.
 PLUGIN_ROOT_SNIPPET = (
     "import json,os,sys;"
     'h=os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex");'
-    'e=[p for p in json.load(sys.stdin).get("installed") or [] if p.get("name")==sys.argv[1]'
+    "j=json.load(sys.stdin);"
+    'e=[p for p in ((j.get("installed") if isinstance(j,dict) else None) or [])'
+    ' if isinstance(p,dict) and p.get("name")==sys.argv[1]'
     ' and p.get("enabled") is True and p.get("marketplaceName") and p.get("version")];'
     'd=[os.path.join(h,"plugins","cache",p["marketplaceName"],p["name"],p["version"])'
     " for p in e];"

@@ -36,13 +36,21 @@ _RECORDED_INSTALLED_ROOTS = {
 }
 
 
-def _recorded(codex_home, *, keep=None, on_disk=None):
+#: Elements `installed[]` is not supposed to contain. Nothing says a future codex-cli, a
+#: partially-written cache, or a `--json` bug cannot emit one, and the two parsers disagreed on
+#: every one of them: the Python mirror skipped them and the shell comprehension called `.get()`
+#: on them, so `{"installed":[null, <a valid conductor entry>]}` made preflight resolve the
+#: plugin while the cron driver crashed and resolved nothing. Preflight green, cron stopped.
+_JUNK_ENTRIES = (None, "conductor", 123, [], {"name": None}, {})
+
+
+def _recorded(codex_home, *, keep=None, on_disk=None, junk=()):
     """The recorded payload with its placeholders bound to `codex_home`.
 
     `keep` selects which recorded entries appear in `installed[]`, so one artefact can pose the
     single-plugin question and the collision question separately. `on_disk` (default: everything
     kept) selects which installed roots are actually materialised, because a derived root that
-    does not exist must not be reported.
+    does not exist must not be reported. `junk` prepends elements that are not entries at all.
     """
     with open(_FIXTURE, encoding="utf-8") as f:
         raw = f.read()
@@ -65,6 +73,9 @@ def _recorded(codex_home, *, keep=None, on_disk=None):
         root = codex_home / _RECORDED_INSTALLED_ROOTS[entry["pluginId"]]
         (root / "skills" / "start").mkdir(parents=True, exist_ok=True)
         (root / "skills" / "start" / "SKILL.md").write_text("---\nname: start\n---\n")
+    # FIRST, so an entry that is not an entry cannot be skipped by luck of ordering: a parser
+    # that stops at the first surprise never reaches the valid entries behind it.
+    data["installed"] = list(junk) + data["installed"]
     return json.dumps(data)
 
 
@@ -150,6 +161,17 @@ def test_an_unambiguous_name_alongside_a_collision_still_resolves(codex_home):
 # ------------------------------------------------- the driver's own parser answers identically
 
 
+def _snippet(payload, name, codex_home):
+    return subprocess.run(
+        [sys.executable, "-c", codex.PLUGIN_ROOT_SNIPPET, name],
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, codex.CONFIG_DIR_ENV: str(codex_home)},
+    )
+
+
 @pytest.mark.parametrize(
     "keep",
     [
@@ -160,21 +182,39 @@ def test_an_unambiguous_name_alongside_a_collision_still_resolves(codex_home):
         None,
     ],
 )
+@pytest.mark.parametrize(
+    "junk",
+    [(), _JUNK_ENTRIES[:1], _JUNK_ENTRIES],
+    ids=["clean", "one-null", "all-junk"],
+)
 def test_the_cron_snippet_agrees_with_the_python_parser_on_every_recorded_state(
-    codex_home, keep
+    codex_home, keep, junk
 ):
     """The driver cannot import conductor — that is the problem the snippet solves — so the only
-    defence against the two parsers drifting is running both over the same recorded payload."""
-    payload = _recorded(codex_home, keep=keep)
+    defence against the two parsers drifting is running both over the same recorded payload.
+
+    The matrix used to be all-object arrays, which is the one shape the two parsers could not
+    disagree on: the shell comprehension called `.get()` on every element while the Python
+    mirror skipped non-dicts, so `[null, <valid entry>]` resolved under preflight and crashed
+    under cron. STDERR is asserted empty for the same reason the answer is: a parser that
+    answers "" by raising is not agreeing, it is failing in a way this comparison would call
+    agreement everywhere the right answer happens to be "" too."""
+    payload = _recorded(codex_home, keep=keep, junk=junk)
     from_python = codex.plugin_roots_from_json(payload)
 
     for name in ("superpowers", "spec-craft", "conductor", "absent"):
-        proc = subprocess.run(
-            [sys.executable, "-c", codex.PLUGIN_ROOT_SNIPPET, name],
-            input=payload,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env={**os.environ, codex.CONFIG_DIR_ENV: str(codex_home)},
-        )
+        proc = _snippet(payload, name, codex_home)
+        assert proc.stderr == "", (name, proc.stderr)
         assert proc.stdout.strip() == from_python.get(name, ""), (name, proc.stderr)
+
+
+def test_neither_parser_treats_an_unexpected_top_level_shape_as_an_installed_plugin():
+    """`installed[]` missing, or the whole document being something other than an object, is a
+    legitimate answer ("this machine reports no plugin identities") and both parsers already
+    agreed on it — except that the shell one reached it by raising `AttributeError`, which is
+    only indistinguishable from the right answer while the right answer is empty."""
+    for payload in ("[]", '"nope"', "null", "42", '{"installed": null}', "{}"):
+        proc = _snippet(payload, "conductor", "/nonexistent-codex-home")
+        assert proc.stderr == "", (payload, proc.stderr)
+        assert proc.stdout.strip() == ""
+        assert codex.plugin_roots_from_json(payload) == {}
