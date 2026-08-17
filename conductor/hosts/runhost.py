@@ -1,0 +1,77 @@
+"""The host a given run launches — durable, per project, one resolver.
+
+The scheduler fires a generated shell driver out of cron. Whatever decides "spawn ``codex``,
+not ``claude``" has to be readable from a bare cron environment with no session, no plugin
+context, and no live agent to ask, which is why the answer is a file next to
+``.conductor/run_branch`` rather than anything inferred at fire time.
+
+Resolution order, most explicit first:
+
+1. ``$CONDUCTOR_HOST`` — an operator override, validated.
+2. ``<project>/.conductor/host`` — what ``/conductor:start`` recorded for this run.
+3. ``claude`` — the legacy default.
+
+Step 3 is the compatibility guarantee, not a guess: every run installed before this module
+existed has no host file, and each of those must keep rendering and firing byte-for-byte as it
+does today. A file that exists but does not name a supported host is the opposite case —
+something wrote it — so it raises. Falling back there would launch the wrong agent, and a cron
+log that says nothing about it is the failure class this repository is built around.
+"""
+
+from __future__ import annotations
+
+import os
+
+from conductor.core.atomic import write_atomic
+from conductor.hosts.base import HOST_IDS, HostAdapter, UnknownHost, load
+
+#: Operator override. Set it to move one fire onto the other host without editing state.
+HOST_ENV = "CONDUCTOR_HOST"
+
+#: The host every run recorded before A1 shipped. Absent file == this.
+DEFAULT_HOST = "claude"
+
+
+def host_file(project_root: str) -> str:
+    """``<project_root>/.conductor/host`` — the recorded host for this project's run."""
+    return os.path.join(project_root, ".conductor", "host")
+
+
+def _validated(host_id: str, *, source: str) -> str:
+    if host_id not in HOST_IDS:
+        raise UnknownHost(
+            f"unknown host {host_id!r} from {source}; supported hosts are {HOST_IDS}"
+        )
+    return host_id
+
+
+def resolve(project_root: str) -> str:
+    """The host id this project's run launches. Never returns an unsupported host."""
+    override = os.environ.get(HOST_ENV)
+    if override is not None and override.strip():
+        return _validated(override.strip(), source=f"${HOST_ENV}")
+    path = host_file(project_root)
+    try:
+        with open(path, encoding="utf-8") as f:
+            recorded = f.read().strip()
+    except OSError:
+        return DEFAULT_HOST
+    return _validated(recorded, source=path)
+
+
+def record(project_root: str, host_id: str) -> str:
+    """Record ``host_id`` as this project's host and return the file path.
+
+    Validated BEFORE the write, so a typo never leaves a file behind that the next resolve
+    would refuse — the run would then be unlaunchable until someone deleted it by hand.
+    """
+    _validated(host_id, source="record()")
+    path = host_file(project_root)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    write_atomic(path, f"{host_id}\n")
+    return path
+
+
+def adapter(project_root: str) -> HostAdapter:
+    """The adapter for this project's recorded host."""
+    return load(resolve(project_root))
