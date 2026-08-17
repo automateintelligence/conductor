@@ -36,25 +36,41 @@ def _codex_manifest():
     return json.load(open(os.path.join(ROOT, ".codex-plugin", "plugin.json")))
 
 
-# Fields accepted by codex-cli 0.147.0's plugin manifest reader, observed across
-# all 180 manifests in the installed `openai-curated` catalog. Codex does not
-# reject unknown keys -- an unsupported field is silently ignored -- so this set
-# is the only thing standing between us and a manifest that claims something the
-# host never reads.
+# Fields codex-cli 0.147.0 actually READS, taken from the legacy manifest
+# parser's `RawPluginManifest` struct in codex-rs/core-plugins/src/manifest.rs
+# (lines 45-68, commit be6e8eac029b183056b7e4402879f15d2c85f61b). The struct
+# carries `#[serde(rename_all = "camelCase")]`, so its `mcp_servers` field is
+# read from JSON as `mcpServers`. The destructuring in
+# `resolve_raw_plugin_manifest` (same file, lines 295-305) is exhaustive, which
+# makes this the complete set.
+#
+# Verified against a scratch CODEX_HOME install of this plugin: a wrong-typed
+# value for a field in this set fails the install with "missing or invalid
+# plugin.json", while a wrong-typed value for a field outside it installs
+# cleanly -- `RawPluginManifest` has no `deny_unknown_fields`, so anything not
+# listed here is silently discarded by the host.
 CODEX_MANIFEST_FIELDS = {
     "name",
     "version",
     "description",
-    "author",
     "keywords",
-    "interface",
-    "repository",
-    "license",
-    "homepage",
-    "apps",
     "skills",
     "mcpServers",
+    "apps",
+    "hooks",
+    "interface",
 }
+
+# Fields we keep in .codex-plugin/plugin.json only to mirror
+# .claude-plugin/plugin.json. Codex discards these. They are listed separately
+# from CODEX_MANIFEST_FIELDS so the schema test records them as inert rather
+# than claiming the host honours them.
+CODEX_INERT_MIRROR_FIELDS = {"author"}
+
+
+def _unsupported_codex_fields(manifest):
+    """Manifest keys codex neither reads nor that we knowingly carry as inert."""
+    return set(manifest) - CODEX_MANIFEST_FIELDS - CODEX_INERT_MIRROR_FIELDS
 
 
 def test_codex_plugin_manifest_schema():
@@ -64,8 +80,29 @@ def test_codex_plugin_manifest_schema():
         "semver version required"
     )
     assert isinstance(data.get("author"), dict), "author must be an object"
-    unknown = set(data) - CODEX_MANIFEST_FIELDS
+    unknown = _unsupported_codex_fields(data)
     assert not unknown, f"codex ignores unknown manifest fields; drop {sorted(unknown)}"
+
+
+def test_codex_schema_accepts_hooks_field():
+    # codex reads `hooks` (manifest.rs line 65) and accepts both the string and
+    # the array form. An earlier whitelist omitted it, so this suite rejected a
+    # manifest the host installs without complaint.
+    for hooks in ("./hooks.json", ["./hooks.json"]):
+        manifest = {"name": "conductor", "version": "0.9.3", "hooks": hooks}
+        assert _unsupported_codex_fields(manifest) == set(), (
+            f"hooks={hooks!r} is valid for codex but this suite rejected it"
+        )
+
+
+def test_codex_schema_does_not_claim_codex_reads_claude_only_fields():
+    # These four are absent from `RawPluginManifest`; codex silently discards
+    # them. Whitelisting them as read-by-codex is what this test guards against.
+    for field in ("author", "repository", "license", "homepage"):
+        assert field not in CODEX_MANIFEST_FIELDS, (
+            f"codex-cli 0.147.0 does not read {field!r}; it must not be listed "
+            "as a field the host honours"
+        )
 
 
 def test_codex_manifest_does_not_claim_dependencies():
