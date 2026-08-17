@@ -235,6 +235,8 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             "skip reason=lock-held",
             "skip reason=gate-green",
             "only exclusion between os-driver fires",
+            # contention is the only flock failure that may skip; broken locking is fail-loud
+            "lock-unavailable",
             # ...and the overlap that scope leaves open, which the owner has to be told about
             # because nothing detects it.
             "takes that lock",

@@ -226,10 +226,26 @@ mkdir -p "$PROJECT/.conductor"
 #     `/conductor:autodev` — never opens this file, so a Tier-A tick and a Tier-B fire can work
 #     the same run branch concurrently and nothing detects it. Do not describe this lock as
 #     fire-vs-fire exclusion in general; it is driver-vs-driver only.
-exec 9>"$PROJECT/.conductor/resume.lock"
-if ! flock -n 9; then
-    printf '%s skip reason=lock-held lock=%s\\n' "$(ts)" "$PROJECT/.conductor/resume.lock" >> "$LOG"
+#     CONTENTION vs BROKEN LOCKING are different outcomes and must not share a reason tag.
+#     `if ! flock -n 9` treated every non-zero status as "someone else holds it": no `flock`
+#     binary (bash exits 127), a bad descriptor because `exec 9>` failed, a filesystem with no
+#     locking, a usage error. Each logged `skip reason=lock-held` and exited 0, so a machine
+#     that CANNOT lock stalled forever behind the most reassuring line in the taxonomy. util-linux
+#     documents the discrimination: under -n the CONFLICT status is whatever `-E` asks for, and
+#     everything else is a sysexits error. LOCK_BUSY is picked outside both the sysexits range
+#     (64-78) and bash's 126/127, so no error can be mistaken for a held lock. A busy lock is a
+#     logged skip; anything else is fail-loud (exit 6), like driver-unresolved and env-unsafe.
+LOCK_BUSY=100
+LOCKFILE="$PROJECT/.conductor/resume.lock"
+exec 9>"$LOCKFILE"
+flock -n -E "$LOCK_BUSY" 9
+lock_rc=$?
+if [ "$lock_rc" -eq "$LOCK_BUSY" ]; then
+    printf '%s skip reason=lock-held lock=%s\\n' "$(ts)" "$LOCKFILE" >> "$LOG"
     exit 0
+elif [ "$lock_rc" -ne 0 ]; then
+    printf '%s lock-unavailable rc=%s lock=%s\\n' "$(ts)" "$lock_rc" "$LOCKFILE" >> "$LOG"
+    exit 6
 fi
 
 # (b) finished runs get no-op fires: exit once the spec done-gate is green.

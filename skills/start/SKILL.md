@@ -174,7 +174,10 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      `flock -n <project>/.conductor/resume.lock` held for the whole fire — the ONLY exclusion
      between OS-driver fires; (b) exit once `conductor assert run --level spec` is green. Both
      no-op paths log `skip reason=lock-held` / `skip reason=gate-green`, so a blocked run is
-     never silent.
+     never silent. Contention is the ONLY flock failure that skips: locking that is broken or
+     unavailable (no `flock` binary, unopenable lock path, a filesystem that cannot lock) is
+     fail-loud — `lock-unavailable rc=<status>`, exit 6 — because it never clears on its own,
+     and `driver status` names it like `driver-unresolved`.
      - **Only Tier B contends on that lock. Neither the in-session `CronCreate` tick registered
        above nor a hand-run `/conductor:autodev` takes that lock**, so a Tier-A tick and a
        Tier-B fire can run the same run branch at the same time, and nothing detects it. The

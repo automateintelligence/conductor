@@ -527,7 +527,9 @@ def test_topology_off_line_emitted_without_run_branch(monkeypatch, tmp_path, cap
     err = capsys.readouterr().err
     assert err.count("topology-off:no-run_branch") == 1
     assert not any(b.startswith("base-mismatch") for b in out["blockers"])
-    assert not any("topology-off" in b for b in out["blockers"])  # info, never a blocker
+    assert not any(
+        "topology-off" in b for b in out["blockers"]
+    )  # info, never a blocker
 
 
 def test_topology_off_line_absent_with_run_branch_file(monkeypatch, tmp_path, capsys):
@@ -540,7 +542,9 @@ def test_topology_off_line_absent_with_run_branch_file(monkeypatch, tmp_path, ca
 
 
 def test_topology_off_line_absent_with_env(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))  # no file, but env configures it
+    monkeypatch.setenv(
+        "CONDUCTOR_HOME", str(tmp_path)
+    )  # no file, but env configures it
     monkeypatch.setenv("CONDUCTOR_RUN_BRANCH", "conductor/run-eval")
     _base_call(base="conductor/run-eval")
     assert "topology-off:no-run_branch" not in capsys.readouterr().err

@@ -29,8 +29,15 @@ import pytest
 from conductor import resume_script as rs
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("flock") is None or shutil.which("bash") is None,
-    reason="driver execution needs bash + flock",
+    shutil.which("bash") is None, reason="driver execution needs bash"
+)
+
+# Only for tests that exercise REAL kernel locking. It used to skip the whole module, which
+# meant the one host class where the driver's flock handling actually matters — a machine
+# without util-linux — ran no coverage of it at all. The stub-flock tests below deliberately
+# carry no such marker: they must run everywhere, including there.
+_needs_real_flock = pytest.mark.skipif(
+    shutil.which("flock") is None, reason="exercises real kernel locking"
 )
 
 # Bounded waits: every wait is on a FILE MARKER, never a fixed sleep, so the outcome is
@@ -152,6 +159,15 @@ class Rig:
         _wait_for_cwd(proc.pid, cwd)
         return proc
 
+    def plant(self, name: str, body: str) -> Path:
+        """Shadow a binary the driver resolves through its own PATH repair, which puts
+        `$HOME/.local/bin` FIRST. Used to give `flock` a chosen exit status without needing
+        `flock` to be absent from the machine running the tests."""
+        stub = self.home / ".local" / "bin" / name
+        stub.write_text(body)
+        stub.chmod(0o755)
+        return stub
+
     def adopt_pidfile(self, pidfile: Path, what: str) -> int:
         """Register a descendant the test spawned INDIRECTLY (through the fake worker) so
         teardown can reach it. It is not a tracked Popen — nothing else would ever reap it."""
@@ -233,6 +249,7 @@ def make_rig(tmp_path):
 # ---- 1. the self-PID vector: the driver must not block on its own process ----
 
 
+@_needs_real_flock
 def test_driver_fires_under_a_dot_claude_path_despite_matching_its_own_argv(make_rig):
     """conductor itself lives at `~/.claude/conductor`, so the driver's own command line
     carries the substring `claude` and its own cwd is the worktree it just cd'd into. The
@@ -249,6 +266,7 @@ def test_driver_fires_under_a_dot_claude_path_despite_matching_its_own_argv(make
 # ---- 2. the path-independent vector: a decoy tool shell holding the project cwd ----
 
 
+@_needs_real_flock
 def test_a_decoy_tool_shell_in_the_project_cwd_does_not_block_a_fire(make_rig):
     """Agent tool shells (`zsh -c source .../shell-snapshots/...`) match `pgrep -f claude`
     regardless of the project path. One of them sitting in the project directory must not
@@ -263,6 +281,7 @@ def test_a_decoy_tool_shell_in_the_project_cwd_does_not_block_a_fire(make_rig):
     assert len(rig.worker_calls()) == 1, rig.worker_calls()
 
 
+@_needs_real_flock
 def test_a_decoy_tool_shell_in_the_worktree_cwd_does_not_block_a_fire(make_rig):
     """Same vector from the other matched directory — the worktree the driver resumes in."""
     rig = make_rig("plain-host-wt")
@@ -278,6 +297,7 @@ def test_a_decoy_tool_shell_in_the_worktree_cwd_does_not_block_a_fire(make_rig):
 # ---- 3. the flock: OS-driver vs OS-driver only, and contention is EVIDENCE ----
 
 
+@_needs_real_flock
 def test_two_driver_invocations_serialize_on_the_lock(make_rig):
     """With the pgrep heuristic gone, `flock -n 9` on `<project>/.conductor/resume.lock` is
     the only thing keeping two OS-DRIVER fires off one run branch (it excludes nothing else —
@@ -302,6 +322,7 @@ def test_two_driver_invocations_serialize_on_the_lock(make_rig):
     assert first.wait(timeout=_DEADLINE) == 0
 
 
+@_needs_real_flock
 @pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
 def test_a_detached_descendant_of_a_finished_fire_does_not_hold_the_lock(make_rig):
     """The lock descriptor must NOT be inheritable by the worker.
@@ -327,9 +348,96 @@ def test_a_detached_descendant_of_a_finished_fire_does_not_hold_the_lock(make_ri
     assert len(rig.worker_calls()) == 2, rig.worker_calls()
 
 
+# ---- 3b. contention is ONE reason flock fails; broken locking is not contention ----
+#
+# `if ! flock -n 9` treated every non-zero status as "someone else holds it": a missing
+# `flock` binary (bash 127), a bad descriptor, a filesystem with no locking, a usage error.
+# All logged `skip reason=lock-held` and exited 0, so a machine that CANNOT lock stalled
+# forever behind the most reassuring line in the taxonomy.
+
+# A contended lock, reported ONLY through the documented channel: util-linux exits with the
+# `-E` status on conflict under -n. If the caller never asked for a distinguishable conflict
+# code, this stub reports the lock FREE — so a driver that cannot tell contention from
+# breakage cannot satisfy the test by treating any non-zero status as busy.
+_FLOCK_CONFLICTS = """#!/usr/bin/env bash
+code=""
+while [ $# -gt 0 ]; do
+    case "$1" in -E) shift; code="$1" ;; esac
+    shift
+done
+exit "${code:-0}"
+"""
+
+
+def _flock_exits(rc: int) -> str:
+    return f"#!/usr/bin/env bash\nexit {rc}\n"
+
+
+@_needs_real_flock
+def test_an_unopenable_lock_file_is_not_reported_as_contention(make_rig):
+    """No stub anywhere: the lock PATH is a directory, so `exec 9>` fails (bash reports it
+    and carries on with fd 9 closed) and flock then fails on a bad descriptor. Locking is
+    broken, not busy, and it will stay broken on every future fire."""
+    rig = make_rig("plain-host-unopenable")
+    (rig.project / ".conductor" / "resume.lock").mkdir()
+
+    proc = rig.run()
+
+    log = rig.log_text()
+    assert "skip reason=lock-held" not in log, log
+    assert "lock-unavailable" in log, log
+    assert proc.returncode != 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert rig.worker_calls() == [], rig.worker_calls()
+
+
+def test_a_flock_binary_that_cannot_run_fails_loud_instead_of_skipping(make_rig):
+    """127 is what bash reports when `flock` is not on PATH at all — a machine without
+    util-linux. Simulated with a stub so the test does not depend on flock being absent
+    from the host, which is also the one condition under which it could never be tested."""
+    rig = make_rig("plain-host-noflock")
+    rig.plant("flock", _flock_exits(127))
+
+    proc = rig.run()
+
+    log = rig.log_text()
+    assert "skip reason=lock-held" not in log, log
+    assert "lock-unavailable" in log, log
+    assert "127" in log, log  # the status is NAMED, so the cause is diagnosable
+    assert proc.returncode != 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert rig.worker_calls() == [], rig.worker_calls()
+
+
+def test_a_flock_usage_or_os_error_fails_loud_instead_of_skipping(make_rig):
+    """flock's own errors use sysexits (64 usage, 71 OS error, ...) — a filesystem that
+    cannot lock, a build too old for `-E`, an internal failure. None of them is contention."""
+    rig = make_rig("plain-host-flockerr")
+    rig.plant("flock", _flock_exits(64))
+
+    proc = rig.run()
+
+    assert "skip reason=lock-held" not in rig.log_text(), rig.log_text()
+    assert "lock-unavailable" in rig.log_text(), rig.log_text()
+    assert proc.returncode != 0, (proc.returncode, proc.stdout, proc.stderr)
+
+
+def test_only_the_documented_conflict_status_reports_lock_held(make_rig):
+    """The other side of the discrimination: a fire that skips must have skipped because
+    flock reported ITS DOCUMENTED conflict status, not merely because it exited non-zero."""
+    rig = make_rig("plain-host-conflict")
+    rig.plant("flock", _FLOCK_CONFLICTS)
+
+    proc = rig.run()
+
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert "skip reason=lock-held" in rig.log_text(), rig.log_text()
+    assert "lock-unavailable" not in rig.log_text(), rig.log_text()
+    assert rig.worker_calls() == [], rig.worker_calls()
+
+
 # ---- 4. a real fire reaches the worker and is distinguishable in the log ----
 
 
+@_needs_real_flock
 def test_a_fire_reaches_the_worker_and_logs_a_distinguishable_outcome(make_rig):
     """End-to-end through the driver's own bin resolution: the worker runs in the RUN
     WORKTREE with the autodev prompt, and the log carries a bracketed fire whose rc is the
@@ -352,6 +460,7 @@ def test_a_fire_reaches_the_worker_and_logs_a_distinguishable_outcome(make_rig):
 # ---- 5. the other silent `exit 0`: a green done-gate ----
 
 
+@_needs_real_flock
 def test_a_green_done_gate_skip_is_logged(make_rig):
     """`conductor assert run --level spec` going green is a legitimate no-op, but it must
     still be evidence: same taxonomy, different reason, and no worker fired."""

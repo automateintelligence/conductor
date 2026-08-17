@@ -13,6 +13,8 @@ import os
 import shlex
 import subprocess
 
+import pytest
+
 from conductor import driver, resume_script
 
 # ---- fixtures ----------------------------------------------------------------
@@ -199,6 +201,28 @@ def test_status_recent_driver_unresolved_flips_nonzero_and_is_named(
     )
     assert driver.status(str(proj)) == 1
     # the offending line is printed VERBATIM, not just counted into an exit code
+    assert bad in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "lock-unavailable rc=127 lock=/p/.conductor/resume.lock",
+        "env-unsafe mode=666 /p/.conductor/resume-env.sh",
+        "worktree-missing /p/.worktrees/run-x",
+    ],
+)
+def test_status_names_every_fail_loud_exit_the_driver_can_log(
+    tmp_path, monkeypatch, capsys, tag
+):
+    """`driver-unresolved` was the only fail-loud tag status recognised, so the driver's
+    other refusals-to-fire — locking broken or unavailable, a world-writable env file, a
+    missing worktree — exited non-zero into a log that reported "recent fires clean". Every
+    tag the template can print has to be a tag status reports."""
+    proj = _durable(tmp_path, monkeypatch)
+    bad = f"{_now()} {tag}"
+    (proj / ".conductor" / "resume-autodev.log").write_text(f"{bad}\n")
+    assert driver.status(str(proj)) == 1
     assert bad in capsys.readouterr().out
 
 

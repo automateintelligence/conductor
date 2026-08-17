@@ -97,5 +97,7 @@ if __name__ == "__main__":
     for cmd in missing:
         print(f"MISSING: {cmd}", file=sys.stderr)
     if ok:  # the documented "verify" step must confirm success, not print a blank line
-        print(f"preflight OK: {len(REQUIRED_COMMANDS)}/{len(REQUIRED_COMMANDS)} conducted skills resolved")
+        print(
+            f"preflight OK: {len(REQUIRED_COMMANDS)}/{len(REQUIRED_COMMANDS)} conducted skills resolved"
+        )
     sys.exit(0 if ok else 1)

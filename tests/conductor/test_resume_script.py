@@ -253,8 +253,9 @@ def test_render_keeps_both_guards_as_EXECUTABLE_lines():
         ln for ln in _render().splitlines() if not ln.lstrip().startswith("#")
     )
     # (a) one fire at a time. Scope: OS-driver vs OS-driver — the in-session CronCreate tier
-    # takes no lock, so this is not fire-vs-anything exclusion.
-    assert "flock -n 9" in code
+    # takes no lock, so this is not fire-vs-anything exclusion. `-E` is load-bearing, not
+    # decoration: it is what separates a held lock from locking being broken.
+    assert 'flock -n -E "$LOCK_BUSY" 9' in code
     assert "assert run --level spec" in code  # (b) done-gate-green no-op
     # resumes in the worktree, never the owner checkout
     assert 'CONDUCTOR_HOME="$WORKTREE"' in code

@@ -33,6 +33,17 @@ _RECENT_HOURS_ENV = "CONDUCTOR_DRIVER_RECENT_HOURS"
 _RECENT_HOURS_DEFAULT = 24.0
 _FIRE_END_RE = re.compile(r"fire-end rc=(\d+)")
 _FIRE_START = "fire-start"
+# Every tag the generated driver prints when it REFUSES to fire — each one is a loud
+# non-zero exit, none of them is a skip. One tuple, so a new fail-loud path in the template
+# has exactly one place to be registered here; `driver-unresolved` alone left the others
+# (locking broken or unavailable, world-writable env file, missing worktree) reading as
+# "recent fires clean".
+_FAIL_TAGS = (
+    "driver-unresolved",
+    "lock-unavailable",
+    "env-unsafe",
+    "worktree-missing",
+)
 _SKIP_RE = re.compile(r"skip reason=(\S+)")
 # How long an unmatched `fire-start` may stay in flight before status calls it stalled. A
 # hung fire (a headless `-p` blocked on a permission prompt it cannot answer) and a long
@@ -158,7 +169,7 @@ def _is_recent(line: str, now: datetime.datetime, hours: float) -> bool:
 
 
 def _recent_failures(lines: list[str]) -> list[str]:
-    """The recent `driver-unresolved` / `fire-end rc=<non-zero>` lines, verbatim."""
+    """The recent fail-loud tag lines and `fire-end rc=<non-zero>` lines, verbatim."""
     now = datetime.datetime.now().astimezone()
     hours = _recent_hours()
     failures = []
@@ -166,7 +177,7 @@ def _recent_failures(lines: list[str]) -> list[str]:
         if not line.strip():
             continue
         m = _FIRE_END_RE.search(line)
-        failing = "driver-unresolved" in line or (
+        failing = any(tag in line for tag in _FAIL_TAGS) or (
             m is not None and int(m.group(1)) != 0
         )
         if failing and _is_recent(line, now, hours):
