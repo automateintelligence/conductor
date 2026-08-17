@@ -502,6 +502,62 @@ def test_a_symlinked_root_is_followed_out_of_the_repo_by_design(tmp_path, monkey
     )
 
 
+# --- the parsing rules each carry their own weight ------------------------------------
+#
+# A mutation audit removed each of these individually and the suite stayed green. Every one
+# is a real behaviour whose loss is SILENT: a root that matches nothing produces no error,
+# just a prose fallback that quietly resolves to None, which `freeze` then reports as
+# `unidentifiable-assertions-source` — pointing at the goal, not at the variable.
+
+
+def test_an_empty_variable_falls_back_to_the_default_root(monkeypatch):
+    # `CONDUCTOR_SPEC_ROOTS=` is how a shell spells "unset" when a wrapper always assigns it;
+    # it must default, not join the "set but names no directory" refusal
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "")
+    assert paths.spec_roots() == paths.DEFAULT_SPEC_ROOTS
+    assert paths.spec_from_goal_text("Implement docs/specs/alpha.md\n") == (
+        "docs/specs/alpha.md"
+    )
+
+
+@pytest.mark.parametrize("value", ["~/specs", "~", "~user/specs"])
+def test_a_tilde_root_is_refused_rather_than_joined_onto_the_project(
+    monkeypatch, value
+):
+    # nothing expands `~` here, so the root would be joined literally into
+    # `<repo>/~/specs` — a directory that cannot exist, i.e. a root that silently
+    # matches nothing. Same failure mode as an absolute root, same refusal.
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", value)
+    with pytest.raises(paths.InvalidSpecRoots, match="CONDUCTOR_SPEC_ROOTS"):
+        paths.spec_roots()
+
+
+def test_a_regex_metacharacter_in_a_root_is_matched_literally(monkeypatch):
+    # `.` unescaped is "any character", so this root would match the real `docs/specs/`
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/s.ecs")
+    assert paths.spec_from_goal_text("Implement docs/specs/alpha.md\n") is None
+
+
+def test_a_root_whose_directory_name_really_contains_a_dot_still_resolves(monkeypatch):
+    # escaping must make the literal spelling WORK, not merely make the pattern fail
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/s.ecs")
+    assert paths.spec_from_goal_text("Implement docs/s.ecs/alpha.md\n") == (
+        "docs/s.ecs/alpha.md"
+    )
+
+
+def test_whitespace_around_a_separator_is_trimmed(monkeypatch):
+    # `docs/specs: docs/other` is what a human types; without the trim the second root is
+    # ` docs/other`, which matches no prose and globs no directory
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS", f"docs/specs:{os.pathsep.join((' docs/other ',))}"
+    )
+    assert paths.spec_roots() == ("docs/specs", "docs/other")
+    assert paths.spec_from_goal_text("Implement docs/other/alpha.md\n") == (
+        "docs/other/alpha.md"
+    )
+
+
 def test_the_roots_are_read_per_call_not_frozen_at_import(monkeypatch):
     monkeypatch.delenv("CONDUCTOR_SPEC_ROOTS", raising=False)
     assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST}\n") is None

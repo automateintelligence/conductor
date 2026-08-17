@@ -734,6 +734,28 @@ def test_an_unusable_spec_roots_value_makes_the_freeze_cli_refuse(
     assert not os.path.exists(baseline)
 
 
+def test_the_unidentifiable_goal_refusal_names_the_configured_roots(
+    tmp_path, monkeypatch
+):
+    # The diagnostic is the ONLY thing that tells an operator where conductor looked. Built
+    # from the live `spec_roots()`, a hardcoded `docs/specs/<name>.md` here would send a
+    # project that configured other roots to a directory conductor never searched — and the
+    # message's own advice ("set CONDUCTOR_SPEC_ROOTS") is then advice they already took.
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS", os.pathsep.join(("docs/other", _DUAL_HOST_ROOT))
+    )
+    manifest, baseline = _setup(tmp_path)
+    dot = tmp_path / ".conductor"
+    dot.mkdir(exist_ok=True)
+    (dot / "goal.md").write_text("Make the thing work, no path named here\n")
+    with pytest.raises(Exception, match="unidentifiable-assertions-source") as excinfo:
+        freeze.record(manifest, baseline, str(tmp_path))
+    message = str(excinfo.value)
+    assert "docs/other/<name>.md" in message
+    assert f"{_DUAL_HOST_ROOT}/<name>.md" in message
+    assert "docs/specs/<name>.md" not in message  # the unconfigured default
+
+
 # --- the no-goal glob treats a root as a LITERAL directory, never a pattern -------------
 #
 # The roots are `re.escape`d for the prose scan, so a regex metacharacter in one cannot widen
