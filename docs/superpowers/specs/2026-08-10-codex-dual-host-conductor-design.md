@@ -600,6 +600,94 @@ Conductor never merges any of these default-branch pull requests.
 - Conductor, spec-craft, and marketplace public descriptions name both Claude Code and Codex.
 - All unit, integration, end-to-end, manifest, and installation smoke gates pass with no known safety or migration errors.
 
+## Expectations
+
+The acceptance criteria above are the owner's original definition of done. This section adds only
+the conditions that were left implicit — mostly at the seams the Codex ground-truth review
+(`docs/reviews/2026-08-12-codex-host-ground-truth.md`) exposed, where a result can look correct on
+a Claude machine and be wrong on a Codex one. Nothing here restates an acceptance criterion.
+
+### Success scenarios
+
+- **S1 — one installed host is enough to work.** On a workstation where only one of the two hosts
+  is installed, a run still starts, takes ownership, dispatches implementation, and advances phase
+  work on the installed host. The missing opposite host blocks the *phase merge* — recorded as
+  `blocked-pending-opposite-host` with the exact installation command — and does not block starting
+  or advancing the run. Dual installation is required to finish a phase, not to begin one.
+- **S2 — the Codex worker launches on a stock Codex install.** A Conductor fire on a machine
+  carrying only an official Codex CLI at or above the host floor — no third-party `AGENTS.md`, no
+  oh-my-codex, no community skill-dispatch convention present — reaches Conductor's autodev
+  behavior. Whether the launch names a skill path, inlines the instruction, or uses some other
+  mechanism is an implementation choice; what must hold is that no part of the launch depends on a
+  convention Conductor does not itself install.
+- **S3 — spec-craft behaves identically on both hosts.** Invoking the same spec-craft skill against
+  the same spec file produces the same written result under Claude Code and under Codex, including
+  when the spec path is supplied as an argument, embedded in a sentence, or omitted entirely. The
+  host-neutral input resolution replaces `$ARGUMENTS`, and it is the *behavior* that must match, not
+  merely the manifests.
+- **S4 — the run has a reachable finish line of its own.** The work Conductor performs autonomously
+  is done when the final integration-branch pull request is open and the run sits at
+  `awaiting-team-merge` with no outstanding review debt. The acceptance criteria that require merged
+  public state in three repositories — public marketplace installs, published repository
+  descriptions, post-merge public smokes — belong to the release, not to the run, and their absence
+  is never evidence that the run is incomplete.
+
+### Failure scenarios (fail-closed)
+
+- **F1 — installs cleanly, then reaches for the wrong host.** A Codex-published Conductor package
+  that installs without error and then attempts to spawn `claude` at its first fire is a failure,
+  not a partial success. Installation succeeding is never accepted as evidence of host support; the
+  condition that decides it is a first fire on a machine with the other host absent entirely.
+- **F2 — a probe that hangs instead of failing.** Every Conductor-initiated host invocation —
+  version check, capability probe, preflight, worker launch, reviewer launch — either completes or
+  reports a bounded, actionable failure. An invocation that blocks indefinitely is a failure of this
+  expectation even though nothing errored, because an unattended fire that hangs leaves a stuck
+  owner rather than a recoverable one, and the run's own failure reporting never runs.
+- **F3 — dual-host in name only.** A result where both manifests, both catalog entries, and both
+  sets of public text exist, but the Codex execution path was never exercised because host-specific
+  vocabulary still lives in the shared core, is a failure. The observable symptom is that removing
+  or renaming the Claude executable changes behavior in code that is supposed to be host-neutral.
+
+### Must-nots
+
+- **M1 — no host vocabulary in the core.** No shared core module may contain a Claude slash-command
+  invocation, a Codex dollar-prefixed invocation, `CLAUDE_PLUGIN_ROOT`, a host-specific permission
+  or sandbox flag value, or an assumption that there is exactly one installation directory. These
+  belong to adapters only. This is stated in §"System architecture" as a design constraint; it is
+  repeated here because it is also a condition of done.
+- **M2 — never relocate under a live run.** The old editable checkout must not be renamed, moved,
+  quarantined, or removed while any run holds a live process, a registered worktree, an installed
+  schedule, or a hook resolving beneath it. Absolute linked-worktree metadata does not survive the
+  rename, so the damage — work committed under a quarantined path, worktree registrations pointing
+  at a directory that no longer exists — is discovered late and is not cleanly reversible.
+- **M3 — host-native session resume is not a continuation mechanism.** Codex's native session
+  resume must not be used to carry a run forward between fires. Every fire is a cold start that
+  reconciles from durable evidence, on both hosts. This is an explicit non-goal rather than an
+  oversight: one reconciliation model is the reason a mid-run takeover is a state transition instead
+  of a translation, and a second model would let the two disagree silently.
+- **M4 — no collateral regression of sibling products.** Applying dual-host wording across the
+  marketplace must not narrow any existing product's description to a single host. Bubo is already
+  dual-host and its public text must not come back Claude-only.
+
+### Open questions
+
+These are places the spec genuinely does not determine what done means. They are recorded rather
+than resolved, and should be settled by the owner before the affected plan is written.
+
+- **Preflight versus review policy.** S1 above reads §"Reviewer routing" as authoritative: a missing
+  opposite host blocks the phase. §"Failure handling" also says "missing required plugin capability
+  blocks the run," which can be read to mean the opposite host is a launch prerequisite. If the
+  second reading is intended, S1 is wrong and a single-host workstation is unsupported outright.
+- **Is the final-PR prohibition list exhaustive?** §"Branch, worktree, and pull-request model"
+  enumerates merge, squash, rebase, force-push, close, base mutation, auto-merge enablement, and
+  merge-queue enrollment, then adds "or any equivalent action." A gate can only check a finite list.
+  Either the enumeration is the contract, or something must define how an unlisted equivalent action
+  is recognized.
+- **Codex native subagent availability.** §"System architecture" allows either a native Codex
+  subagent or a fresh non-interactive child process. Which one is available at the host floor was
+  not established. Done should not be defined against whichever branch happens to be implemented
+  first.
+
 ## References
 
 - OpenAI, Build plugins: https://learn.chatgpt.com/docs/build-plugins
