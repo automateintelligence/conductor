@@ -154,7 +154,10 @@ def test_unmatched_phase_and_issue_reported():
     )
     report = align.align("o/r", _plan(), g)
     assert "Phase 2 — Reporting (A8)" in report["unmatched_phases"]
-    assert "Phase 3 — Glue — OPTIONAL" in report["unmatched_phases"]  # gateless
+    # A gateless phase is unmatchABLE, not unmatched: it gets its own bucket so the
+    # owner's "these need attention" list stays the phases that really are missing.
+    assert "Phase 3 — Glue — OPTIONAL" not in report["unmatched_phases"]
+    assert report["gateless_phases"] == ["Phase 3 — Glue — OPTIONAL"]
     assert report["unmatched_issues"] == [99]
 
 
@@ -169,6 +172,65 @@ def test_milestone_ambiguous_when_matches_span_two():
     report = align.align("o/r", _plan(), g, apply=True)
     assert report["milestone"] == "ambiguous"
     g.update_milestone_title.assert_not_called()
+
+
+def test_gateless_phase_does_not_dilute_unmatched_phases():
+    # Every GATED phase matches, so the owner's unmatched list must be empty — the
+    # `gate: none` phase belongs in gateless_phases, not in it.
+    g = _gh(
+        [{"number": 1, "title": "W"}],
+        {
+            1: [
+                {"number": 10, "title": "x (A3, A4)", "body": ""},
+                {"number": 11, "title": "y (A8)", "body": ""},
+            ]
+        },
+    )
+    report = align.align("o/r", _plan(), g)
+    assert report["unmatched_phases"] == []
+    assert report["gateless_phases"] == ["Phase 3 — Glue — OPTIONAL"]
+    assert sorted(m["issue"] for m in report["matches"]) == [10, 11]
+
+
+def test_markerless_issue_is_reported_for_hand_pairing():
+    # The other half of the gateless pair: an issue with neither a conductor-assertions
+    # marker nor heading tokens was dropped from every bucket, so the owner could not see
+    # the issue that the gateless phase needs pairing with.
+    g = _gh(
+        [{"number": 1, "title": "W"}],
+        {
+            1: [
+                {"number": 10, "title": "x (A3, A4)", "body": ""},
+                {"number": 42, "title": "Phase 3 - glue (optional)", "body": ""},
+            ]
+        },
+    )
+    report = align.align("o/r", _plan(), g)
+    assert report["markerless_issues"] == [
+        {"number": 42, "title": "Phase 3 - glue (optional)"}
+    ]
+    # ...and it stays OUT of unmatched_issues, which means "carries a token set that no
+    # plan phase claims" — task sub-issues live in the same milestone and are markerless.
+    assert report["unmatched_issues"] == []
+    assert [m["issue"] for m in report["matches"]] == [10]
+
+
+def test_matched_issue_never_counted_markerless():
+    g = _gh(
+        [{"number": 1, "title": "W"}],
+        {
+            1: [
+                {
+                    "number": 10,
+                    "title": "old title",
+                    "body": "<!-- conductor-assertions: A3,A4 -->",
+                }
+            ]
+        },
+    )
+    report = align.align("o/r", _plan(), g)
+    assert report["markerless_issues"] == []
+    assert [m["issue"] for m in report["matches"]] == [10]
 
 
 # --- codex PR-31 round 1 ---
