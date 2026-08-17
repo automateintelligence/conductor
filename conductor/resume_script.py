@@ -9,8 +9,8 @@ claude/plugin upgrade and every headless fire died silently. Making the script m
 the root cause: one source of truth, resolved at RUN time, verifiable on reconcile.
 
 Split of concerns the render enforces:
-- MECHANICAL (this module owns, regenerable): bin resolution, PATH repair, fail-loud, the three
-  guards (no-double-drive, done-gate-green exit, flock), the fire.
+- MECHANICAL (this module owns, regenerable): bin resolution, PATH repair, fail-loud, the two
+  guards (flock, done-gate-green exit) with every early exit logged as `skip reason=`, the fire.
 - OWNER/MACHINE config (never baked here, sourced from `<project>/.conductor/resume-env.sh` so
   regeneration can never clobber it): `CONDUCTOR_MERGE_VERIFY`, `CONDUCTOR_PLUGIN_DIRS`,
   `DOCKER_HOST`, `CONDUCTOR_RESUME_CLAUDE_FLAGS`.
@@ -32,7 +32,7 @@ import sys
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and
 # `/conductor:start` reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 4
+TEMPLATE_VERSION = 5
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
@@ -205,21 +205,35 @@ export CONDUCTOR_HOME="$WORKTREE"
 cd "$WORKTREE" || {{ printf '%s worktree-missing %s\\n' "$(ts)" "$WORKTREE" >> "$LOG"; exit 4; }}
 mkdir -p "$PROJECT/.conductor"
 
-# (c) one headless fire at a time — hold the lock in the main checkout for the whole fire.
+# (a) ONE headless fire at a time — the flock in the main checkout, held for the whole fire, is
+#     the SOLE fire-vs-fire mutual exclusion. It is sound because both contenders are this same
+#     generated driver contending on one named file: no process-name matching, no host
+#     assumptions, released by the kernel if a fire dies.
+#
+#     A `pgrep -f 'claude'` + /proc cwd heuristic used to sit here as a second guard. It was
+#     removed because it could not work: the `cd "$WORKTREE"` above means the fire's OWN cwd
+#     always matched, and `pgrep -f claude` matches the driver's own command line whenever the
+#     project path contains `claude` — true of every project under `~/.claude/`, i.e. conductor's
+#     own. Every fire took the silent `exit 0` branch, permanently. It also matched unrelated
+#     agent tool shells regardless of path, and matched NOTHING on a Codex host (fail-open).
+#     Do NOT reintroduce a process-name heuristic: anything that must exclude a driver has to
+#     contend on THIS lock. See docs/reviews/2026-08-12-codex-host-ground-truth.md.
+#
+#     KNOWN GAP (owner-visible, deliberate): an INTERACTIVE `/conductor:autodev` does not take
+#     this lock, so it can now overlap with a cron fire. Nothing detects that.
 exec 9>"$PROJECT/.conductor/resume.lock"
-flock -n 9 || exit 0
-
-# (a) never double-drive: exit if a claude process already holds the project OR worktree cwd (a
-#     live terminal session or a prior fire is then the sole driver).
-for pid in $(pgrep -f 'claude' 2>/dev/null); do
-    cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
-    case "$cwd" in
-        "$PROJECT"|"$PROJECT"/*|"$WORKTREE"|"$WORKTREE"/*) exit 0 ;;
-    esac
-done
+if ! flock -n 9; then
+    printf '%s skip reason=lock-held lock=%s\\n' "$(ts)" "$PROJECT/.conductor/resume.lock" >> "$LOG"
+    exit 0
+fi
 
 # (b) finished runs get no-op fires: exit once the spec done-gate is green.
-"$CONDUCTOR" assert run --level spec >/dev/null 2>&1 && exit 0
+#     EVERY early exit logs a `skip reason=` line. A bare `exit 0` is what let a permanently
+#     blocked run look identical to a healthy no-op in resume-autodev.log for weeks.
+if "$CONDUCTOR" assert run --level spec >/dev/null 2>&1; then
+    printf '%s skip reason=gate-green\\n' "$(ts)" >> "$LOG"
+    exit 0
+fi
 
 # One headless phase of progress, in the run worktree. Bracket the fire in the log so a stalled
 # or crash-looping driver is visible: `fire-start` with no matching `fire-end` = a hung fire
@@ -456,8 +470,7 @@ def main(argv: list[str] | None = None) -> int:
             # main_root on a non-repo path: name the failure, never traceback.
             detail = (e.stderr or "").strip()
             print(
-                f"cannot resolve main root for {args.project}: "
-                f"{detail or e}",
+                f"cannot resolve main root for {args.project}: {detail or e}",
                 file=sys.stderr,
             )
             return 1

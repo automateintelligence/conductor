@@ -240,14 +240,42 @@ def test_write_nudge_fires_on_command_prefix_temp_env(tmp_path, capsys):
     assert "unattended" in err
 
 
-def test_render_preserves_the_three_guards():
+def test_render_preserves_the_two_guards():
+    """Shape-level smoke only. This assertion USED to also require `/proc/$pid/cwd` — the
+    pgrep double-drive heuristic — and that substring check is exactly why a guard that
+    never once worked shipped green: it proved the text was emitted, never that the bash
+    did anything. The heuristic is gone; the behaviour these guards are supposed to have is
+    now proven by executing the driver in tests/conductor/test_resume_driver_exec.py."""
     s = _render()
-    assert "flock -n 9" in s  # (c) one fire at a time
-    assert "/proc/$pid/cwd" in s  # (a) no double-drive (cwd detection)
+    assert "flock -n 9" in s  # (a) one fire at a time — the SOLE fire-vs-fire exclusion
     assert "assert run --level spec" in s  # (b) done-gate-green no-op
     assert (
         'CONDUCTOR_HOME="$WORKTREE"' in s
     )  # resumes in the worktree, not owner checkout
+
+
+def test_render_has_no_process_name_double_drive_heuristic():
+    """Regression pin on the REMOVAL. A `pgrep`/`/proc/<pid>/cwd` guard cannot work here:
+    the driver `cd`s to the worktree before it would run, so its own cwd always matches, and
+    `pgrep -f claude` matches its own argv under any path containing `claude` (every project
+    under ~/.claude/). It also matched unrelated agent tool shells, and matched nothing at
+    all on a Codex host. Exclusion belongs on the lock, not on process names.
+
+    Asserts on EXECUTABLE lines only: the render deliberately keeps a comment naming the
+    removed heuristic so it is not reinvented, and that comment must not read as the code."""
+    code = "\n".join(
+        ln for ln in _render().splitlines() if not ln.lstrip().startswith("#")
+    )
+    assert "pgrep" not in code
+    assert "/proc/" not in code
+
+
+def test_render_logs_a_reason_for_every_silent_early_exit():
+    """A bare `exit 0` made a permanently blocked run indistinguishable from a healthy
+    no-op fire in resume-autodev.log. Both no-op paths must leave greppable evidence."""
+    s = _render()
+    assert "skip reason=lock-held" in s
+    assert "skip reason=gate-green" in s
 
 
 def test_render_is_deterministic():
@@ -788,8 +816,13 @@ def test_main_root_identical_from_linked_worktree(tmp_path):
         ["git", "-C", str(proj), "commit", "--allow-empty", "-q", "-m", "x"],
         check=True,
         timeout=30,
-        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        },
     )
     wt = tmp_path / "wt"
     subprocess.run(
@@ -917,7 +950,9 @@ def test_install_cron_quotes_a_root_with_spaces(tmp_path, monkeypatch):
         assert ln.endswith(rs.cron_marker(main_root)), ln
 
 
-def test_install_cron_on_a_non_repo_fails_with_a_named_reason(tmp_path, monkeypatch, capsys):
+def test_install_cron_on_a_non_repo_fails_with_a_named_reason(
+    tmp_path, monkeypatch, capsys
+):
     _stub_crontab(tmp_path, monkeypatch)
     not_repo = tmp_path / "plain"
     not_repo.mkdir()

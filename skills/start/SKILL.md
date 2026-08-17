@@ -171,9 +171,16 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      `docs/reviews/2026-07-05-conductor-tier-b-driver-robustness.md`). It fires `claude -p
      "/conductor:autodev"` from the RUN WORKTREE (never the owner's checkout; autodev, not start —
      a headless one-shot must do a phase, not register a cron that dies with it), guarding: (a)
-     exit if a claude process already holds the worktree/project cwd (never double-drive); (b)
-     exit once `conductor assert run --level spec` is green; (c) `flock -n
-     <project>/.conductor/resume.lock` for the whole fire.
+     `flock -n <project>/.conductor/resume.lock` held for the whole fire — the SOLE fire-vs-fire
+     exclusion; (b) exit once `conductor assert run --level spec` is green. Both no-op paths log
+     `skip reason=lock-held` / `skip reason=gate-green`, so a blocked run is never silent.
+     - **An interactive `/conductor:autodev` does NOT take that lock and can overlap a cron
+       fire.** The driver used to carry a `pgrep -f 'claude'` + `/proc/<pid>/cwd` guard for this;
+       it never worked (it matched the fire's own process under any path containing `claude` —
+       i.e. every project under `~/.claude/` — and matched nothing on a Codex host) and was
+       removed rather than retuned. Anything that must exclude a driver has to contend on the
+       same lock; do not reintroduce process-name matching. If you are driving a run by hand,
+       `conductor driver status` / the crontab is the thing to check first.
    - **Machine/run-specific env goes in `<main-root>/.conductor/resume-env.sh`** (gitignored),
      which the driver sources — NEVER inline in the driver, so regeneration can't clobber it. Put
      the owner-owned `CONDUCTOR_MERGE_VERIFY` there (plus any dev-mode `CONDUCTOR_PLUGIN_DIRS` or
