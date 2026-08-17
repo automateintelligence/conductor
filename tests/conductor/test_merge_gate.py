@@ -527,7 +527,9 @@ def test_topology_off_line_emitted_without_run_branch(monkeypatch, tmp_path, cap
     err = capsys.readouterr().err
     assert err.count("topology-off:no-run_branch") == 1
     assert not any(b.startswith("base-mismatch") for b in out["blockers"])
-    assert not any("topology-off" in b for b in out["blockers"])  # info, never a blocker
+    assert not any(
+        "topology-off" in b for b in out["blockers"]
+    )  # info, never a blocker
 
 
 def test_topology_off_line_absent_with_run_branch_file(monkeypatch, tmp_path, capsys):
@@ -540,7 +542,9 @@ def test_topology_off_line_absent_with_run_branch_file(monkeypatch, tmp_path, ca
 
 
 def test_topology_off_line_absent_with_env(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))  # no file, but env configures it
+    monkeypatch.setenv(
+        "CONDUCTOR_HOME", str(tmp_path)
+    )  # no file, but env configures it
     monkeypatch.setenv("CONDUCTOR_RUN_BRANCH", "conductor/run-eval")
     _base_call(base="conductor/run-eval")
     assert "topology-off:no-run_branch" not in capsys.readouterr().err
@@ -557,3 +561,62 @@ def test_empty_run_branch_file_fails_closed(monkeypatch, tmp_path):
         b.startswith("process-check-error") and "run-branch-empty" in b
         for b in out["blockers"]
     )
+
+
+# ------------------------------------------------------- host-derived review-marker default
+#
+# A1. `CONDUCTOR_REVIEW_MARKER` was always env-overridable, but its DEFAULT hardcoded one
+# host's name inside merge-gate logic. On a Codex-hosted run the reviewer is Claude, so the
+# gate counted comments carrying a word the reviewer had no reason to write, and every phase
+# blocked on `reviews:0/2` with two real reviews sitting on the PR.
+
+
+def test_default_marker_on_a_claude_run_is_unchanged():
+    assert merge_gate.default_review_marker("claude") == "Codex review"
+
+
+def test_default_marker_on_a_codex_run_names_claude():
+    assert merge_gate.default_review_marker("codex") == "Claude review"
+
+
+def test_the_default_marker_never_names_the_runs_own_host():
+    for host_id in ("claude", "codex"):
+        assert host_id not in merge_gate.default_review_marker(host_id).lower()
+
+
+def test_a_codex_run_counts_claude_review_comments(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
+    d = _clean()
+    d["comments"] = [
+        _rc("2026-06-01T00:00:00Z", body="Claude review: pass"),
+        _rc("2026-06-02T00:00:00Z", body="Claude review: pass"),
+    ]
+    assert _call(d)["ok"]
+
+
+def test_a_codex_run_does_not_count_codex_review_comments(monkeypatch):
+    # The same-host review the opposite-host policy forbids must not satisfy the gate.
+    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
+    d = _clean()  # _clean()'s comments are "Codex review: pass"
+    assert "reviews:0/2" in _call(d)["blockers"]
+
+
+def test_a_claude_run_still_does_not_count_claude_review_comments(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_HOST", "claude")
+    d = _clean()
+    d["comments"] = [
+        _rc("2026-06-01T00:00:00Z", body="Claude review: pass"),
+        _rc("2026-06-02T00:00:00Z", body="Claude review: pass"),
+    ]
+    assert "reviews:0/2" in _call(d)["blockers"]
+
+
+def test_an_explicit_marker_still_overrides_the_host_derived_default(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
+    monkeypatch.setenv("CONDUCTOR_REVIEW_MARKER", "LGTM-bot")
+    d = _clean()
+    d["comments"] = [
+        _rc("2026-06-01T00:00:00Z", body="LGTM-bot ok"),
+        _rc("2026-06-02T00:00:00Z", body="LGTM-bot ok"),
+    ]
+    assert _call(d)["ok"]
