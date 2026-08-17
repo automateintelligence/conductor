@@ -65,16 +65,48 @@ PLUGIN_ROOT_SNIPPET = (
     'e=[p for p in ((j.get("installed") if isinstance(j,dict) else None) or [])'
     ' if isinstance(p,dict) and p.get("name")==sys.argv[1]'
     ' and p.get("enabled") is True and p.get("marketplaceName") and p.get("version")];'
-    'd=[os.path.join(h,"plugins","cache",p["marketplaceName"],p["name"],p["version"])'
-    " for p in e];"
-    "d=sorted(set(x for x in d if os.path.isdir(x)));"
-    'print(d[0] if len(d)==1 else "")'
+    'a=sorted(set(os.path.join(h,"plugins","cache",p["marketplaceName"],p["name"],p["version"])'
+    " for p in e));"
+    "d=[x for x in a if os.path.isdir(x)];"
+    "print(d[0]) if len(d)==1 else sys.exit(3 if a and not d else 2)"
 )
+
+#: What ``PLUGIN_ROOT_SNIPPET`` exits with, and the only way it can report its third state.
+#: Its stdout is a path the driver is about to exec, so it cannot also carry "codex listed this
+#: plugin and its root is gone" — but the driver must be able to say that instead of reporting
+#: the same bare `driver-unresolved` a genuinely uninstalled plugin gets. Mirrors
+#: ``unverifiable_plugins_from_json``.
+PLUGIN_ROOT_RC_UNVERIFIABLE = 3
+PLUGIN_ROOT_RC_NONE = 2
 
 
 def config_root() -> str:
     """The Codex config root: ``$CODEX_HOME``, else ``~/.codex``."""
     return os.environ.get(CONFIG_DIR_ENV) or os.path.expanduser("~/.codex")
+
+
+def _derived_root(entry: dict, home: str) -> str | None:
+    """One ``installed[]`` entry -> the directory its IDENTITY implies, unchecked, or None.
+
+    Split from ``_installed_root`` because "codex reports this plugin installed and enabled" and
+    "the tree that claim implies is there" are two different facts, and collapsing them into one
+    None discarded the difference between a plugin that is absent and one whose install root
+    moved. Preflight needs both to tell an owner which of those it is.
+    """
+    # DISABLED is not installed, for every purpose Conductor has. 0.147.0 keeps a disabled
+    # plugin in ``installed[]`` with ``"enabled": false`` and its tree on disk, but its loader
+    # returns before loading any capability — so its skills resolve to nothing at run time, and
+    # the cron driver pointing ``$CONDUCTOR`` at its ``bin/conductor`` execs the very plugin the
+    # operator turned off. ``is True`` rather than truthiness: a version that stops emitting the
+    # field leaves us unable to tell, and "cannot tell" has to read as "do not use it".
+    if entry.get("enabled") is not True:
+        return None
+    name = entry.get("name")
+    market = entry.get("marketplaceName")
+    version = entry.get("version")
+    if not all(isinstance(v, str) and v for v in (name, market, version)):
+        return None
+    return os.path.join(home, *_INSTALL_CACHE, str(market), str(name), str(version))
 
 
 def _installed_root(entry: dict, home: str) -> str | None:
@@ -97,21 +129,8 @@ def _installed_root(entry: dict, home: str) -> str | None:
     degrades the gate to ``unverified`` — instead of silently naming a wrong directory the way
     ``source.path`` did.
     """
-    # DISABLED is not installed, for every purpose Conductor has. 0.147.0 keeps a disabled
-    # plugin in ``installed[]`` with ``"enabled": false`` and its tree on disk, but its loader
-    # returns before loading any capability — so its skills resolve to nothing at run time, and
-    # the cron driver pointing ``$CONDUCTOR`` at its ``bin/conductor`` execs the very plugin the
-    # operator turned off. ``is True`` rather than truthiness: a version that stops emitting the
-    # field leaves us unable to tell, and "cannot tell" has to read as "do not use it".
-    if entry.get("enabled") is not True:
-        return None
-    name = entry.get("name")
-    market = entry.get("marketplaceName")
-    version = entry.get("version")
-    if not all(isinstance(v, str) and v for v in (name, market, version)):
-        return None
-    root = os.path.join(home, *_INSTALL_CACHE, str(market), str(name), str(version))
-    return root if os.path.isdir(root) else None
+    root = _derived_root(entry, home)
+    return root if root and os.path.isdir(root) else None
 
 
 def plugin_roots_from_json(text: str) -> dict[str, str]:
@@ -156,26 +175,56 @@ def contested_roots_from_json(text: str) -> list[str]:
     )
 
 
-def _claims_from_json(text: str) -> dict[str, set[str]]:
-    """``{plugin name: every enabled, on-disk install root claiming it}``."""
+def unverifiable_plugins_from_json(text: str) -> frozenset[str]:
+    """Names Codex REPORTS as installed and enabled but whose install root is not on disk.
+
+    The third state, and the reason the gate has three. Codex's answer carries an identity, and
+    the layout that identity implies is checked rather than trusted (``_installed_root``) — but
+    when the check fails the claim was simply dropped, which made a moved cache and an
+    uninstalled plugin the same answer. It is not: preflight then reported ``missing`` and told
+    the owner to install ``spec-craft``, a plugin they already have, while the actual fault went
+    unnamed. Reported here so ``unverified`` can say which of the two it is.
+
+    A name with ANY on-disk root is excluded: two listings of which one is really installed
+    resolve normally, and a name whose roots merely collide is ``contested``, not this.
+    """
+    entries = _entries_from_json(text)
+    home = config_root()
+    reported = {
+        str(e["name"]) for e in entries if _derived_root(e, home) and e.get("name")
+    }
+    return frozenset(reported - set(_claims_from_json(text)))
+
+
+def _entries_from_json(text: str) -> list[dict]:
+    """The dict elements of ``installed[]``, from output that may be neither.
+
+    Nothing here raises — malformed or unexpected output means "this machine reports no plugin
+    identities", which is a legitimate answer preflight degrades on, not an error. The two
+    ``isinstance`` filters are mirrored verbatim in ``PLUGIN_ROOT_SNIPPET``.
+    """
     try:
         data = json.loads(text)
     except (ValueError, TypeError):
-        return {}
+        return []
+    listed = (data.get("installed") if isinstance(data, dict) else None) or []
+    return [e for e in listed if isinstance(e, dict)]
+
+
+def _claims_from_json(text: str) -> dict[str, set[str]]:
+    """``{plugin name: every enabled, on-disk install root claiming it}``."""
     home = config_root()
     claims: dict[str, set[str]] = {}
-    for entry in (data.get("installed") if isinstance(data, dict) else None) or []:
-        if not isinstance(entry, dict):
-            continue
+    for entry in _entries_from_json(text):
         root = _installed_root(entry, home)
         if root:
             claims.setdefault(str(entry["name"]), set()).add(root)
     return claims
 
 
-def installed_plugins() -> tuple[dict[str, str], list[str]]:
-    """``({attributable name: root}, [contested roots])``, or two empties if Codex cannot be
-    asked.
+def installed_plugins() -> tuple[dict[str, str], list[str], frozenset[str]]:
+    """``({attributable name: root}, [contested roots], {unverifiable names})``, or three
+    empties if Codex cannot be asked.
 
     Asking the host is the only way to attribute a skill to a plugin on Codex: skill directories
     are flat and carry no plugin qualifier, so nothing on disk says whose a skill is. What comes
@@ -185,14 +234,14 @@ def installed_plugins() -> tuple[dict[str, str], list[str]]:
     (ground truth §"Codex help hangs"); a timeout because a preflight that hangs is worse than
     one that reports less.
 
-    ONE invocation answers both halves. Splitting them into two functions would mean shelling
-    out to the CLI twice per preflight and, worse, letting the two answers come from different
-    moments — a plugin installed in between would be attributable to one and contested to the
-    other.
+    ONE invocation answers all three. They are a PARTITION of a single answer — attributable,
+    ambiguous, unlocatable — so splitting them into separate functions would mean shelling out
+    to the CLI once per part and, worse, letting the parts come from different moments: a plugin
+    installed in between would be attributable to one and absent from another.
     """
     exe = shutil.which("codex")
     if not exe:
-        return {}, []
+        return {}, [], frozenset()
     try:
         proc = subprocess.run(
             [exe, "plugin", "list", "--json"],
@@ -202,10 +251,14 @@ def installed_plugins() -> tuple[dict[str, str], list[str]]:
             timeout=PLUGIN_LIST_TIMEOUT_S,
         )
     except (OSError, subprocess.SubprocessError):
-        return {}, []
+        return {}, [], frozenset()
     if proc.returncode != 0:
-        return {}, []
-    return plugin_roots_from_json(proc.stdout), contested_roots_from_json(proc.stdout)
+        return {}, [], frozenset()
+    return (
+        plugin_roots_from_json(proc.stdout),
+        contested_roots_from_json(proc.stdout),
+        unverifiable_plugins_from_json(proc.stdout),
+    )
 
 
 class CodexAdapter:
@@ -291,7 +344,15 @@ class CodexAdapter:
             + textwrap.indent(self.plugin_list_lookup(), "    ")
             + "\n"
             '    CODEX_CONDUCTOR_DIR="$(printf \'%s\' "$CODEX_PLUGIN_JSON" '
-            f"| python3 -c '{PLUGIN_ROOT_SNIPPET}' conductor 2>/dev/null || true)\"\n"
+            f"| python3 -c '{PLUGIN_ROOT_SNIPPET}' conductor 2>/dev/null)\"\n"
+            "    CODEX_ROOT_RC=$?\n"
+            "    # Codex LISTED conductor and its install root is not there. Distinct from\n"
+            "    # `driver-unresolved`, which is also what an uninstalled plugin produces: this\n"
+            "    # says the plugin is installed and its tree moved, so an owner reading the log\n"
+            "    # goes and looks at the cache instead of reinstalling what they already have.\n"
+            f'    [ "$CODEX_ROOT_RC" -ne {PLUGIN_ROOT_RC_UNVERIFIABLE} ] || '
+            "printf '%s plugin-root-unverified plugin=conductor home=%s\\n' "
+            '"$(ts)" "${CODEX_HOME:-$HOME/.codex}" >> "$LOG"\n'
             '    [ -z "$CODEX_CONDUCTOR_DIR" ] || CONDUCTOR="$CODEX_CONDUCTOR_DIR/bin/conductor"\n'
             "fi\n"
             "# Conductor's skill tree, derived from the RESOLVED bin at RUN time — never a\n"
@@ -504,7 +565,11 @@ class CodexAdapter:
         return skill if skill.startswith("$") else f"${skill.rsplit(':', 1)[-1]}"
 
     def discovered_commands(self, *, project_root: str | None = None) -> set[str]:
-        """Invocable command names on this machine, all bare.
+        return self.host_skills(project_root=project_root).commands
+
+    def host_skills(self, *, project_root: str | None = None) -> discovery.HostSkills:
+        """Invocable command names on this machine, all bare, plus the plugins Codex lists but
+        cannot be shown to hold.
 
         Three verified roots: ``$CODEX_HOME/skills/``, ``$CODEX_HOME/prompts/`` (the analogue
         of Claude's slash commands), and the project-local ``./.codex/skills/`` the
@@ -520,13 +585,18 @@ class CodexAdapter:
         dropping them would report a present skill missing; but neither root's claim on the name
         survives the other, so qualifying them would hand a stranger's copy the required
         plugin's identity. Bare is the third answer: present, unattributed, ``unverified``.
+
+        A plugin whose root is NOT ON DISK contributes no names at all — there is nothing there
+        to enumerate — so it travels in the second half of the answer instead. Without it,
+        "codex says spec-craft is installed and its tree is gone" and "spec-craft was never
+        installed" arrive at preflight as the same empty contribution.
         """
         home = self.source_root()
         project = project_root or os.getcwd()
         cmds = discovery.skill_names(f"{home}/skills/*/SKILL.md")
         cmds |= discovery.command_names(f"{home}/prompts/*.md")
         cmds |= discovery.skill_names(f"{project}/.{self.id}/skills/*/SKILL.md")
-        attributed, contested = installed_plugins()
+        attributed, contested, unverifiable = installed_plugins()
         for name, root in attributed.items():
             cmds |= discovery.qualified(name, root)
         for root in contested:
@@ -536,4 +606,4 @@ class CodexAdapter:
         )
         for root in discovery.dev_plugin_roots():
             cmds |= discovery.scan_plugin_dir(root, (f".{self.id}-plugin",))
-        return cmds
+        return discovery.HostSkills(cmds, unverifiable)

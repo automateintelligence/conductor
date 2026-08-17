@@ -84,7 +84,12 @@ def available_commands(
     return discovery.adapter_for(host).discovered_commands(project_root=project_root)
 
 
-def _resolve(name: str, adapter: discovery.CommandDiscovery, avail: set[str]) -> str:
+def _resolve(
+    name: str,
+    adapter: discovery.CommandDiscovery,
+    avail: set[str],
+    unlocatable: frozenset[str],
+) -> str:
     """One required skill -> ``ok`` | ``unverified`` | ``missing``.
 
     The name is matched AS THIS HOST RESOLVES IT, and the plugin qualifier is evidence that is
@@ -99,6 +104,10 @@ def _resolve(name: str, adapter: discovery.CommandDiscovery, avail: set[str]) ->
     * A skill of the required name with NO attribution — a flat ``$CODEX_HOME/skills/`` dir —
       is invocable, so it is not missing, but its identity is not recoverable from a directory
       name. That is ``unverified``: reported, never counted as a pass.
+    * A skill whose plugin the host LISTS as installed but cannot locate on disk is also
+      ``unverified``, and for the same reason the state exists: the host has made a claim that
+      could not be checked. Calling it ``missing`` says "this plugin is not installed", which is
+      not what the host reported, and sends the owner to reinstall something they already have.
 
     A requirement that names no plugin claims no identity, so a plugin's copy satisfies it.
     """
@@ -109,7 +118,9 @@ def _resolve(name: str, adapter: discovery.CommandDiscovery, avail: set[str]) ->
         plugin = name.split(":", 1)[0]
         if f"{plugin}:{rendered}" in avail:
             return "ok"
-        return "unverified" if rendered in avail else "missing"
+        if rendered in avail or plugin in unlocatable:
+            return "unverified"
+        return "missing"
     if rendered in avail or any(a.endswith(f":{rendered}") for a in avail):
         return "ok"
     return "missing"
@@ -119,6 +130,7 @@ def _advice(
     adapter: discovery.CommandDiscovery,
     unresolved: list[str],
     unverified: list[str],
+    unlocatable: frozenset[str] = frozenset(),
 ) -> list[str]:
     """One actionable line per missing skill, one per unverifiable one, then the dependency
     note when it applies.
@@ -126,6 +138,12 @@ def _advice(
     An unverifiable skill gets its own wording because the remedy is different: the skill IS
     there, so "install it" is wrong advice and an owner who follows it learns to ignore the
     gate. What is missing is the plugin's claim on it.
+
+    ``unverified`` has TWO causes and they do not share a remedy, so they do not share a
+    sentence. A flat, hand-copied skill is installed and merely unattributable — install the
+    plugin properly. A plugin the host lists but cannot locate is a BROKEN install: the owner
+    has it, the tree the host named is not there, and telling them to install it points at the
+    one thing that is not wrong.
 
     The note is the Track A answer to a packaging fact A3 verified against codex-cli 0.147.0:
     ``.codex-plugin/plugin.json`` has no ``dependencies`` field — the 180 manifests in the
@@ -151,11 +169,21 @@ def _advice(
             )
     for name in unverified:
         plugin = name.split(":", 1)[0]
-        lines.append(
-            f"{adapter.native_invocation(name)} — present, but {adapter.id} cannot verify it is "
-            f"the `{plugin}` plugin's: it resolves as an unattributed skill. Install `{plugin}` "
-            f"as a {adapter.id} plugin so its identity is recoverable."
-        )
+        if plugin in unlocatable:
+            lines.append(
+                f"{adapter.native_invocation(name)} — {adapter.id} lists the `{plugin}` plugin "
+                f"as installed and enabled, but the install root that identity implies is NOT "
+                f"ON DISK, so nothing of it can be loaded. That is a broken or relocated "
+                f"install, not a missing plugin: check "
+                f"`$CODEX_HOME/plugins/cache/<marketplace>/{plugin}/<version>` against "
+                f"`codex plugin list --json` before reinstalling."
+            )
+        else:
+            lines.append(
+                f"{adapter.native_invocation(name)} — present, but {adapter.id} cannot verify it "
+                f"is the `{plugin}` plugin's: it resolves as an unattributed skill. Install "
+                f"`{plugin}` as a {adapter.id} plugin so its identity is recoverable."
+            )
     if plugins and not adapter.resolves_plugin_dependencies:
         lines.append(
             f"NOTE: {adapter.id} does not resolve plugin dependencies, so installing conductor "
@@ -174,15 +202,19 @@ def check(
     host = host_id or runhost.resolve(project_root or os.getcwd())
     adapter = discovery.adapter_for(host)
     names = required if required is not None else required_commands(host)
-    avail = (
-        available
-        if available is not None
-        else available_commands(host_id=host, project_root=project_root)
-    )
+    # ONE snapshot: which names are invocable and which plugins the host cannot account for are
+    # two halves of a single answer, and asking for them separately would let them describe
+    # different moments. A caller that supplies `available` has supplied a set of names and
+    # nothing else, so it knows of no unlocatable plugin — never a leftover from another host.
+    if available is not None:
+        avail, unlocatable = available, frozenset()
+    else:
+        snapshot = adapter.host_skills(project_root=project_root)
+        avail, unlocatable = snapshot.commands, snapshot.unverifiable_plugins
     # Match on the name AS THIS HOST RESOLVES IT: `native_invocation` is the single place that
     # knows Claude keeps the plugin qualifier and Codex drops it, so matching and reporting
     # cannot drift apart into a preflight that greens on a name it then prints differently.
-    outcomes = [(name, _resolve(name, adapter, avail)) for name in names]
+    outcomes = [(name, _resolve(name, adapter, avail, unlocatable)) for name in names]
     unresolved = [name for name, out in outcomes if out == "missing"]
     unverified = [name for name, out in outcomes if out == "unverified"]
     # `ok` is a PASS, not an absence of hard failures: a skill whose plugin identity could not
@@ -191,7 +223,7 @@ def check(
         "ok": not unresolved and not unverified,
         "missing": [adapter.native_invocation(name) for name in unresolved],
         "unverified": [adapter.native_invocation(name) for name in unverified],
-        "advice": _advice(adapter, unresolved, unverified),
+        "advice": _advice(adapter, unresolved, unverified, unlocatable),
     }
 
 

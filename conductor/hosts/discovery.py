@@ -17,7 +17,7 @@ from __future__ import annotations
 import glob
 import json
 import os
-from typing import Protocol, cast
+from typing import NamedTuple, Protocol, cast
 
 from conductor.hosts.base import HOST_IDS, load
 
@@ -37,6 +37,23 @@ ALL_MANIFEST_DIRS = tuple(f".{host_id}-plugin" for host_id in HOST_IDS)
 
 #: Host-neutral escape hatch for dev / uninstalled trees, honoured by every host.
 PLUGIN_DIRS_ENV = "CONDUCTOR_PLUGIN_DIRS"
+
+
+class HostSkills(NamedTuple):
+    """ONE host snapshot: what is invocable, and which plugins the host cannot account for.
+
+    Both halves come from a single question to the host, because on Codex they are a partition
+    of one ``codex plugin list --json`` answer. Asking twice would let the halves come from
+    different moments and disagree about a plugin installed in between — and disagreement here
+    is precisely the state preflight exists to report.
+    """
+
+    commands: set[str]
+    #: Plugins the host REPORTS as installed and enabled but whose contents it cannot locate.
+    #: Not the same fact as "no skills of that plugin were discovered": a plugin that is simply
+    #: absent contributes nothing here, and preflight tells those two apart because the remedy
+    #: differs — install it, versus repair an install that is already there.
+    unverifiable_plugins: frozenset[str]
 
 
 class CommandDiscovery(Protocol):
@@ -59,6 +76,7 @@ class CommandDiscovery(Protocol):
     def source_root(self) -> str: ...
     def native_invocation(self, skill: str) -> str: ...
     def discovered_commands(self, *, project_root: str | None = None) -> set[str]: ...
+    def host_skills(self, *, project_root: str | None = None) -> HostSkills: ...
 
 
 def adapter_for(host_id: str) -> CommandDiscovery:

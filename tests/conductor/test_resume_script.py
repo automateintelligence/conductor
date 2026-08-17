@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import time
@@ -1203,6 +1204,7 @@ def _mk_codex_harness(
     plugin_list_ignores_term=False,
     conductor_plugin_disabled=False,
     second_marketplace=None,
+    plugin_root_missing=False,
 ):
     """A Codex-recorded run on a machine that installed conductor the way a Codex user does:
     as a PLUGIN, whose bin is therefore NOT on PATH (skills/start/SKILL.md says exactly this).
@@ -1302,6 +1304,11 @@ def _mk_codex_harness(
     stub_conductor = (bindir if on_path else plugin_root / "bin") / "conductor"
     stub_conductor.write_text("#!/bin/sh\nexit 1\n")  # gate not green -> proceed
     os.chmod(stub_conductor, 0o755)
+    if plugin_root_missing:
+        # Codex still LISTS the plugin; only the tree its identity implies is gone — the
+        # machine where the cache moved under a version bump, or an install landed half
+        # written. Indistinguishable from "never installed" until the driver says which.
+        shutil.rmtree(plugin_root)
     runhost.record(str(project), "codex")
     driver = project / ".conductor" / "resume-autodev.sh"
     driver.write_text(rs.render(str(project), str(worktree)))
@@ -1568,6 +1575,52 @@ def test_a_term_ignoring_plugin_lookup_is_still_bounded(tmp_path, monkeypatch):
     assert elapsed < 6, (elapsed, log)
     assert proc.returncode == 3, (proc.returncode, log)
     assert not argv_file.exists()
+
+
+def test_a_conductor_plugin_codex_lists_but_cannot_locate_names_that_in_the_log(
+    tmp_path,
+):
+    """The driver's half of the three-state answer. Codex reports conductor installed and
+    enabled and the root that identity implies is gone; the fire still has to fail closed, but
+    `driver-unresolved` alone is also exactly what an uninstalled plugin produces, so the log
+    sent an owner to reinstall a plugin `codex plugin list` was reporting the whole time."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "root-gone"
+    base.mkdir()
+    project, driver, home, argv_file, _c = _mk_codex_harness(
+        base, plugin_root_missing=True
+    )
+
+    proc = _fire_driver(driver, home)
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert "plugin-root-unverified" in log, log
+    assert "plugin=conductor" in log, log
+    # ...and it still fails CLOSED: no resolvable conductor is exit 3, never a fire.
+    assert "driver-unresolved" in log, log
+    assert proc.returncode == 3, (proc.returncode, log)
+    assert not argv_file.exists()
+
+
+def test_a_conductor_plugin_that_is_simply_absent_claims_no_moved_root(tmp_path):
+    """The other side of the same distinction: nothing listed means nothing to say about a
+    root, and a driver that logged `plugin-root-unverified` there would be inventing an install
+    to explain a plugin that was never installed."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "not-installed"
+    base.mkdir()
+    project, driver, home, _argv, _c = _mk_codex_harness(
+        base, install_conductor_plugin=False
+    )
+
+    proc = _fire_driver(driver, home)
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert "plugin-root-unverified" not in log, log
+    assert "driver-unresolved" in log, log
+    assert proc.returncode == 3, (proc.returncode, log)
 
 
 def test_a_rival_marketplaces_conductor_is_never_exec_d_by_the_driver(tmp_path):

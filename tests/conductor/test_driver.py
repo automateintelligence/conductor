@@ -232,6 +232,19 @@ def test_status_recent_plugin_list_timeout_flips_nonzero_and_is_named(
     assert bad in capsys.readouterr().out
 
 
+def test_status_recent_plugin_root_unverified_flips_nonzero_and_is_named(
+    tmp_path, monkeypatch, capsys
+):
+    """The other pre-`fire-start` marker. It is emitted alongside `driver-unresolved`, and it is
+    the half that says WHICH failure it is — codex lists the plugin and its tree is gone, rather
+    than the plugin being absent — so status has to print it, not just the generic one."""
+    proj = _durable(tmp_path, monkeypatch)
+    bad = f"{_now()} plugin-root-unverified plugin=conductor home=/home/u/.codex"
+    (proj / ".conductor" / "resume-autodev.log").write_text(f"{bad}\n")
+    assert driver.status(str(proj)) == 1
+    assert bad in capsys.readouterr().out
+
+
 def test_status_clean_recent_log_stays_zero(tmp_path, monkeypatch, capsys):
     proj = _durable(tmp_path, monkeypatch)
     (proj / ".conductor" / "resume-autodev.log").write_text(

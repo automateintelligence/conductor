@@ -113,6 +113,38 @@ def test_a_root_that_is_not_on_disk_is_reported_as_no_root_at_all(codex_home):
     assert codex.plugin_roots_from_json(payload) == {}
 
 
+def test_a_root_that_is_not_on_disk_is_still_a_plugin_codex_says_is_installed(
+    codex_home,
+):
+    """ "No root" and "no such plugin" are different answers and were the same value. Codex
+    REPORTED superpowers installed and enabled; only the tree that claim implies is absent. The
+    gate needs the difference to tell an owner "your install moved" instead of "install this",
+    so the claim survives the failed check as its own fact."""
+    payload = _recorded(codex_home, keep={"superpowers@trusted-market"}, on_disk=set())
+
+    assert codex.unverifiable_plugins_from_json(payload) == frozenset({"superpowers"})
+    # a disabled plugin is not installed for any purpose here, so it is not unverifiable either
+    assert (
+        codex.unverifiable_plugins_from_json(
+            _recorded(codex_home, keep={"spec-craft@trusted-market"}, on_disk=set())
+        )
+        == frozenset()
+    )
+
+
+def test_a_plugin_with_one_real_root_is_never_also_unverifiable(codex_home):
+    """Two listings of which one is really installed resolve normally; the failed derivation of
+    the other is not a second, contradictory answer about the same name."""
+    payload = _recorded(
+        codex_home,
+        keep={"conductor@evil-market", "conductor@trusted-market"},
+        on_disk={"conductor@trusted-market"},
+    )
+
+    assert set(codex.plugin_roots_from_json(payload)) == {"conductor"}
+    assert codex.unverifiable_plugins_from_json(payload) == frozenset()
+
+
 # ------------------------------------------------------------ disabled plugins are not usable
 
 
@@ -172,6 +204,29 @@ def _snippet(payload, name, codex_home):
     )
 
 
+#: The snippet's exit codes, as the three states it can be in. It cannot print a third answer —
+#: its stdout is a path the driver execs — so the state that is neither "here is the root" nor
+#: "nothing to say" has to leave by the exit status.
+_SNIPPET_STATE = {0: "root", 3: "unverifiable", 2: "none"}
+
+
+def _python_state(payload, name):
+    """The Python parser's three-state answer for one plugin name."""
+    roots = codex.plugin_roots_from_json(payload)
+    if name in roots:
+        return "root", roots[name]
+    if name in codex.unverifiable_plugins_from_json(payload):
+        return "unverifiable", ""
+    return "none", ""
+
+
+def _snippet_state(payload, name, codex_home):
+    proc = _snippet(payload, name, codex_home)
+    assert proc.stderr == "", (name, proc.stderr)
+    assert proc.returncode in _SNIPPET_STATE, (name, proc.returncode, proc.stderr)
+    return _SNIPPET_STATE[proc.returncode], proc.stdout.strip()
+
+
 @pytest.mark.parametrize(
     "keep",
     [
@@ -187,25 +242,29 @@ def _snippet(payload, name, codex_home):
     [(), _JUNK_ENTRIES[:1], _JUNK_ENTRIES],
     ids=["clean", "one-null", "all-junk"],
 )
+@pytest.mark.parametrize("all_on_disk", [True, False], ids=["on-disk", "roots-gone"])
 def test_the_cron_snippet_agrees_with_the_python_parser_on_every_recorded_state(
-    codex_home, keep, junk
+    codex_home, keep, junk, all_on_disk
 ):
     """The driver cannot import conductor — that is the problem the snippet solves — so the only
     defence against the two parsers drifting is running both over the same recorded payload.
 
-    The matrix used to be all-object arrays, which is the one shape the two parsers could not
-    disagree on: the shell comprehension called `.get()` on every element while the Python
-    mirror skipped non-dicts, so `[null, <valid entry>]` resolved under preflight and crashed
-    under cron. STDERR is asserted empty for the same reason the answer is: a parser that
-    answers "" by raising is not agreeing, it is failing in a way this comparison would call
-    agreement everywhere the right answer happens to be "" too."""
-    payload = _recorded(codex_home, keep=keep, junk=junk)
-    from_python = codex.plugin_roots_from_json(payload)
+    The matrix used to be all-object arrays with every root materialised, which is the shape the
+    two parsers could not disagree on. Both omissions hid a real state: the shell comprehension
+    called `.get()` on every element while the Python mirror skipped non-dicts, and neither side
+    could express "codex lists this plugin but its root is not there" — the state that made
+    preflight say `missing` and advise reinstalling a plugin the owner already had. STDERR is
+    asserted empty for the same reason the answer is: a parser that answers "" by raising is not
+    agreeing, it is failing in a way this comparison would call agreement everywhere the right
+    answer happens to be "" too."""
+    payload = _recorded(
+        codex_home, keep=keep, junk=junk, on_disk=None if all_on_disk else set()
+    )
 
     for name in ("superpowers", "spec-craft", "conductor", "absent"):
-        proc = _snippet(payload, name, codex_home)
-        assert proc.stderr == "", (name, proc.stderr)
-        assert proc.stdout.strip() == from_python.get(name, ""), (name, proc.stderr)
+        assert _snippet_state(payload, name, codex_home) == _python_state(
+            payload, name
+        ), name
 
 
 def test_neither_parser_treats_an_unexpected_top_level_shape_as_an_installed_plugin():

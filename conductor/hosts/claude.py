@@ -168,8 +168,18 @@ class ClaudeAdapter:
         return skill if skill.startswith("/") else f"/{skill}"
 
     def discovered_commands(self, *, project_root: str | None = None) -> set[str]:
+        return self.host_skills(project_root=project_root).commands
+
+    def host_skills(self, *, project_root: str | None = None) -> discovery.HostSkills:
         """Invocable command names on this machine. User skills bare, plugin skills and
         commands as ``<plugin>:<name>``.
+
+        ``unverifiable_plugins`` is always empty here, and that is a property of Claude rather
+        than a stub: nothing on this host REPORTS an installed plugin separately from the tree
+        that holds it. The cache glob below IS the report, so a plugin whose directory is gone
+        is indistinguishable from one that was never installed — there is no third state to
+        surface. Codex has one because its CLI answers with an identity and the tree that
+        identity implies is a separate fact that can be false.
 
         The marketplace-cache leg derives the plugin name from the cache PATH segment
         (``plugins/cache/<marketplace>/<plugin>/<version>/``) rather than from the manifest,
@@ -191,4 +201,4 @@ class ClaudeAdapter:
         )
         for root in discovery.dev_plugin_roots(PLUGIN_ROOT_ENV):
             cmds |= discovery.scan_plugin_dir(root, (f".{self.id}-plugin",))
-        return cmds
+        return discovery.HostSkills(cmds, frozenset())

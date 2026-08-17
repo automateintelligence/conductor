@@ -40,7 +40,11 @@ _FIRE_END_RE = re.compile(r"fire-end rc=(\d+)")
 #: plugin lookup is cut off it is the only line that fire ever writes — and status matching just
 #: two shapes greened exactly that driver. A marker the driver emits and this list omits is a
 #: silent stall by construction, so they are added together.
-_FAILURE_MARKERS = ("driver-unresolved", "plugin-list-timeout")
+_FAILURE_MARKERS = (
+    "driver-unresolved",
+    "plugin-list-timeout",
+    "plugin-root-unverified",
+)
 # Only this many trailing log lines are considered "the recent tail" — the recency
 # window does the real filtering; this just bounds work on a long-lived log.
 _TAIL_LINES = 500

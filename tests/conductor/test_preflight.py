@@ -181,6 +181,7 @@ def _codex_install(
     flat_only=False,
     without=(),
     pin_host=True,
+    roots_missing=(),
 ):
     """A Codex machine with the conducted stack installed the way Codex installs it.
 
@@ -200,6 +201,11 @@ def _codex_install(
     `pin_host=False` withholds `$CONDUCTOR_HOST` so the caller can make preflight DERIVE the
     host instead of being handed it; the Claude root is then pointed somewhere empty so a
     wrong derivation cannot quietly pass off this machine's real `~/.claude`.
+
+    `roots_missing` names plugins codex still REPORTS as installed and enabled but whose
+    install root is not on disk — the machine where the cache moved under a version bump, or an
+    install landed half-written. It is a distinct state from both "installed" and "absent", and
+    no fixture could express it while every listed plugin's root was unconditionally created.
     """
     if pin_host:
         monkeypatch.setenv("CONDUCTOR_HOST", "codex")
@@ -218,6 +224,9 @@ def _codex_install(
         root = _installed_root(home, plugin)
         source = tmp_path / "codex-marketplace" / "plugins" / plugin
         source.mkdir(parents=True)
+        sources[plugin] = source
+        if plugin in roots_missing:
+            continue  # listed by `plugin list`, but nothing at the root that identity implies
         root.mkdir(parents=True)
         for name in skills:
             if name in without:
@@ -225,7 +234,6 @@ def _codex_install(
             d = (home / "skills" / name) if flat_only else (root / "skills" / name)
             d.mkdir(parents=True)
             (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
-        sources[plugin] = source
     _stub_codex_on_path(tmp_path, monkeypatch, {} if flat_only else sources)
     return home
 
@@ -249,6 +257,45 @@ def test_a_hand_copied_codex_stack_is_reported_unverifiable_not_healthy(
     assert "$writing-plans" in out["unverified"]
     # environment-provided skills claim no plugin, so they are not in question
     assert "$document-release" not in out["unverified"]
+
+
+def test_a_plugin_codex_lists_but_cannot_locate_is_unverified_never_missing(
+    tmp_path, monkeypatch
+):
+    """The three-state gate exists for exactly this: codex REPORTS `spec-craft` installed and
+    enabled, and the install root that identity implies is not there. Dropping the claim made it
+    indistinguishable from an absent plugin, so the gate reported `missing` and advised
+    reinstalling a plugin the owner already has — sending them to fix the one thing that is not
+    broken while the real fault (a moved or half-written cache) goes unnamed."""
+    _codex_install(tmp_path, monkeypatch, roots_missing=("spec-craft",))
+    out = preflight.check(project_root=str(tmp_path / "project"))
+
+    assert not out["ok"], out
+    assert "$expectations" in out["unverified"], out
+    assert "$executable-assertions" in out["unverified"], out
+    assert out["missing"] == [], out
+    # the other plugins are still fine — this is per-plugin, not a whole-machine degrade
+    assert "$writing-plans" not in out["unverified"], out
+    advice = "\n".join(out["advice"]).lower()
+    assert "install it" not in advice, advice
+    assert "not on disk" in advice, advice
+    assert "spec-craft" in advice
+
+
+def test_the_unverified_advice_says_which_of_the_two_causes_it_is(
+    tmp_path, monkeypatch
+):
+    """`unverified` has two causes and one remedy each, so one shared sentence is wrong for
+    whichever case it is not: a hand-copied flat skill IS installed and just unattributable
+    (install the plugin), while a listed-but-unlocatable root is a broken install (repair it,
+    do not treat it as absent). Reporting the first wording for the second is what would make
+    an owner reinstall a plugin that is already there."""
+    _codex_install(tmp_path, monkeypatch, flat_only=True)
+    flat = "\n".join(
+        preflight.check(project_root=str(tmp_path / "p"))["advice"]
+    ).lower()
+    assert "unattributed skill" in flat
+    assert "not on disk" not in flat
 
 
 _CLAUDE_CACHE_SKILLS = (
