@@ -106,6 +106,20 @@ def _adr_refs(value: str) -> tuple[list[str], list[str]]:
 # phases forever). issue-sync's parser stays unchecked-only by design (done work must not
 # respawn sub-issues); only the lint uses this broader form.
 _TASK_ANY = re.compile(r"^- \[[ xX]\] .+$", re.MULTILINE)
+# A task-shaped line whose marker is neither ` ` nor `x`/`X` is counted as NOTHING: it is
+# not a task (issue-sync's `_TASK` is `^- \[ \] (.+)$`, so no sub-issue is ever created for
+# it), not done, and not tickable (phase-done's `_UNTICKED` rewrites `- [ ]` only, so the
+# marker survives every phase-done forever). The work vanishes silently. `_TASK_ANY` only
+# catches the case where a phase's tasks are ALL non-standard; one `[~]` beside one `[ ]`
+# left nothing to fire at all, which is why this is a hard finding and not a warning.
+# The fix is at lint time, deliberately: teaching `_TASK` to accept `[~]` would spawn
+# sub-issues for half-done work, which is a different — and unrequested — behaviour.
+# Anchored at column 0 exactly like `_TASK`/`_TASK_ANY`, so an INDENTED checkbox is out of
+# scope here for the same reason it is out of scope there: it was never going to become a
+# task, whatever its marker. Fenced code is not stripped, also matching `_TASK`/`_TASK_ANY`
+# — a column-0 `- [ ] x` inside a fence really does become a sub-issue today, so a `[~]`
+# there is a real inconsistency and not a false positive.
+_TASK_ODD_MARKER = re.compile(r"^- \[[^ xX\]\n]\] .+$", re.MULTILINE)
 # The per-phase recipe's load-bearing markers: self-review per task, codex review of the PR,
 # the merge gate, and the PR<->phase-issue link. Substring, case-insensitive.
 _RECIPE_NEEDLES = ("/code-review", "codex", "merge-gate", "closes #")
@@ -170,6 +184,9 @@ def lint(text: str, spec_path: str | None = None) -> list[str]:
         title = parsed[0]
         if not _TASK_ANY.search(section):
             reasons.append(f"phase-no-tasks:{title}")
+        # The whole line, so the reason is greppable straight back to the source line.
+        for m in _TASK_ODD_MARKER.finditer(section):
+            reasons.append(f"phase-task-marker-unknown:{title}:{m.group(0).rstrip()}")
         if not _SPEC_POINTER.search(section):
             reasons.append(f"phase-no-spec-pointer:{title}")
         # The decisions leg of the same binding. `**ADRs:** none` passes; a MISSING line

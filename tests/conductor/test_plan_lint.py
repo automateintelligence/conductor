@@ -149,6 +149,88 @@ def test_blank_checkbox_line_is_not_a_task():
     assert "phase-no-tasks:Phase 2 — Reporting (A8)" in reasons
 
 
+# --- non-standard checkbox markers -----------------------------------------------------
+# `- [~] something` is counted as NOTHING: issue-sync's `_TASK` (`^- \[ \] (.+)$`) never
+# sees it, so no sub-issue is ever created for it, and phase-done's `_UNTICKED` rewrites
+# `- [ ]` only, so it can never be ticked either. It vanishes silently. Rejecting it at
+# lint time is the fix — teaching `_TASK` to accept `[~]` would spawn sub-issues for
+# half-done work instead.
+
+_MARKER = "phase-task-marker-unknown:"
+
+
+def test_partial_marker_beside_a_valid_task_is_flagged():
+    # The exact hole: `_TASK_ANY` still matches the SIBLING `- [ ]` line, so phase-no-tasks
+    # stays quiet and the `[~]` line is dropped with nothing said about it.
+    text = GOOD_PLAN.replace("- [ ] Implement scoring", "- [~] Implement scoring")
+    reasons = plan_lint.lint(text)
+    assert f"{_MARKER}Phase 1 — Scoring (A3, A4):- [~] Implement scoring" in reasons, (
+        reasons
+    )
+    assert not any(r.startswith("phase-no-tasks:") for r in reasons)
+
+
+def test_partial_marker_is_a_hard_finding_not_a_warning(tmp_path, capsys):
+    # A silently-dropped task is a correctness problem: exit 1, on stderr, no `warn:`.
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        GOOD_PLAN.replace("- [ ] Implement report", "- [~] Implement report")
+    )
+    assert plan_lint.main([str(plan)]) == 1
+    err = capsys.readouterr().err
+    assert f"{_MARKER}Phase 2 — Reporting (A8):- [~] Implement report" in err
+    assert "warn:phase-task" not in err
+
+
+def test_every_non_standard_marker_is_flagged_not_just_tilde():
+    for marker in ("~", "-", ">", "?", "/"):
+        text = GOOD_PLAN.replace(
+            "- [ ] Implement report", f"- [{marker}] Implement report"
+        )
+        reasons = plan_lint.lint(text)
+        assert (
+            f"{_MARKER}Phase 2 — Reporting (A8):- [{marker}] Implement report"
+            in reasons
+        ), marker
+
+
+def test_all_partial_phase_reports_no_tasks_once_plus_one_finding_per_line():
+    # An all-`[~]` phase already fires phase-no-tasks; the marker findings must ADD the
+    # line-level detail, not restate the phase-level one a second time.
+    text = GOOD_PLAN.replace(
+        "- [ ] Write failing tests", "- [~] Write failing tests"
+    ).replace("- [ ] Implement scoring", "- [~] Implement scoring")
+    reasons = plan_lint.lint(text)
+    title = "Phase 1 — Scoring (A3, A4)"
+    assert [r for r in reasons if r.startswith("phase-no-tasks:")] == [
+        f"phase-no-tasks:{title}"
+    ]
+    assert [r for r in reasons if r.startswith(_MARKER)] == [
+        f"{_MARKER}{title}:- [~] Write failing tests",
+        f"{_MARKER}{title}:- [~] Implement scoring",
+    ]
+
+
+def test_standard_markers_and_checklist_refs_produce_no_marker_finding():
+    # `[ ]`, `[x]`, `[X]`, and phase_done's `- [ ] #123` checklist refs are all legitimate.
+    text = GOOD_PLAN.replace("- [ ] Write failing tests", "- [x] Write failing tests")
+    text = text.replace(
+        "- [ ] Implement scoring", "- [X] Implement scoring\n- [ ] #123"
+    )
+    assert plan_lint.lint(text) == []
+
+
+def test_conductors_own_superpowers_plans_carry_no_marker_finding():
+    # Guards against a check so broad it fails plans already committed to this repo.
+    for name in (
+        "2026-08-10-plan-01-run-identity-registry.md",
+        "2026-08-10-plan-04-host-adapters.md",
+    ):
+        path = os.path.join(ROOT, "docs", "superpowers", "plans", name)
+        text = open(path, encoding="utf-8").read()
+        assert [r for r in plan_lint.lint(text) if r.startswith(_MARKER)] == [], name
+
+
 # --- **ADRs:** pointer line (0.9.0) ----------------------------------------------------
 # Live finding 2026-08-01: two architectural decisions existed ONLY in ADRs, so nothing
 # carried them to a worker resuming a later phase, which could undo either while the
