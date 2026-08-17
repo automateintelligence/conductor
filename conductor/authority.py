@@ -23,6 +23,7 @@ import re
 import shlex
 import sys
 
+from conductor.hosts import base
 from ledger.sync import parse_plan_md
 
 # The privileged operations one autodev phase performs (the per-phase recipe: implement on
@@ -41,23 +42,26 @@ RECIPE_PRIVILEGED_OPS: frozenset[str] = frozenset(
     }
 )
 
-# Affirmative EXACT matches only — substring/prefix matching would let an ambiguous or
-# token-embedded mode string over-grant ("bypassPermissions extra" MUST stay supervised).
-_BYPASS_MODES = frozenset({"bypassPermissions"})
-_MODE_POSTURE = {"default": "supervised", "plan": "supervised", "acceptEdits": "scoped"}
-
 _KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
 
-def resolve_posture(mode: str | None) -> str:
-    """Fail-closed: anything not an affirmatively-recognized bypass mode never returns a
-    bypass posture; unknown/empty/None/ambiguous resolves to supervised (spec A2)."""
+def resolve_posture(mode: str | None, *, host: str = "claude") -> str:
+    """Fail-closed: anything not an affirmatively-recognized mode for THIS host resolves to
+    supervised (spec A2). Never returns a bypass posture for an unrecognized string.
+
+    The mode vocabulary belongs to the host, not to this module: Claude's is a permission mode
+    (``bypassPermissions``, ``acceptEdits``) and Codex's is a sandbox
+    (``danger-full-access``, ``workspace-write``). They do not map onto each other and they do
+    not transfer — a stray ``bypassPermissions`` on a Codex session grants nothing there, and
+    resolving it to full-bypass would be exactly the over-grant A2 forbids.
+
+    ``host`` defaults to claude because that is what this function has always meant, and
+    frozen assertion A2 pins the single-argument form.
+    """
+    adapter = base.load(host)
     if not isinstance(mode, str):
         return "supervised"
-    m = mode.strip()
-    if m in _BYPASS_MODES:
-        return "full-bypass"
-    return _MODE_POSTURE.get(m, "supervised")
+    return adapter.session_posture(mode.strip())
 
 
 def write_resume_env(project_root: str, env: dict[str, str]) -> str:

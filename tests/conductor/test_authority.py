@@ -5,6 +5,8 @@ pin the public interface; these unit tests cover the same contract plus the edge
 import os
 import stat
 
+import pytest
+
 from conductor import authority
 
 # ---- RECIPE_PRIVILEGED_OPS: one declared set, each recipe verb a DISTINCT entry ----
@@ -269,3 +271,74 @@ def test_main_rejects_unknown_subcommand():
 
     with pytest.raises(SystemExit):
         authority.main(["wibble"])
+
+
+# ---- A1: the permission vocabulary belongs to the HOST, not to this module ----
+
+# Literal, never `base.HOST_IDS`: parametrizing over the value under test would let a
+# falsifier that shrinks HOST_IDS DELETE cases instead of failing them.
+A1_HOSTS = ("claude", "codex")
+
+
+def test_the_host_matrix_covers_exactly_the_supported_hosts():
+    from conductor.hosts import base
+
+    assert A1_HOSTS == base.HOST_IDS
+
+
+def test_the_default_host_keeps_the_frozen_claude_contract():
+    """`resolve_posture(mode)` with no host is pinned by frozen assertion A2 and by
+    skills/start/SKILL.md. It must keep meaning exactly what it meant before A1."""
+    assert authority.resolve_posture("bypassPermissions") == "full-bypass"
+    assert authority.resolve_posture("acceptEdits") == "scoped"
+    assert authority.resolve_posture("danger-full-access") == "supervised"
+
+
+def test_codex_sandbox_modes_resolve_on_the_codex_host():
+    assert (
+        authority.resolve_posture("danger-full-access", host="codex") == "full-bypass"
+    )
+    assert authority.resolve_posture("workspace-write", host="codex") == "scoped"
+    assert authority.resolve_posture("read-only", host="codex") == "supervised"
+
+
+def test_a_permission_mode_does_not_transfer_between_hosts():
+    """Claude's `bypassPermissions` grants nothing on a Codex session and vice versa. A mode
+    string that over-grants across hosts is the fail-closed invariant A2 exists to prevent,
+    now with two vocabularies to confuse."""
+    assert authority.resolve_posture("bypassPermissions", host="codex") == "supervised"
+    assert authority.resolve_posture("acceptEdits", host="codex") == "supervised"
+    assert (
+        authority.resolve_posture("danger-full-access", host="claude") == "supervised"
+    )
+    assert authority.resolve_posture("workspace-write", host="claude") == "supervised"
+
+
+@pytest.mark.parametrize("host_id", A1_HOSTS)
+def test_every_host_fails_closed_on_garbage(host_id):
+    for mode in GARBAGE + [None, 0, [], object()]:
+        p = authority.resolve_posture(mode, host=host_id)  # type: ignore[arg-type]
+        assert p == "supervised", (host_id, mode, p)
+
+
+@pytest.mark.parametrize("host_id", A1_HOSTS)
+def test_every_hosts_posture_vocabulary_is_the_shared_closed_set(host_id):
+    from conductor.hosts import base
+
+    for mode in [
+        "bypassPermissions",
+        "acceptEdits",
+        "default",
+        "plan",
+        "read-only",
+        "workspace-write",
+        "danger-full-access",
+    ] + GARBAGE:
+        assert authority.resolve_posture(mode, host=host_id) in base.POSTURES
+
+
+def test_an_unsupported_host_is_refused_rather_than_defaulted_to_claude():
+    from conductor.hosts import base
+
+    with pytest.raises(base.UnknownHost):
+        authority.resolve_posture("bypassPermissions", host="gemini")
