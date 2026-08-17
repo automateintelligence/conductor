@@ -138,6 +138,39 @@ class HostAdapter(Protocol):
         posture: str = "scoped",
     ) -> DispatchResult: ...
 
+    # --- the generated cron driver (A1) ----------------------------------------------------
+    #
+    # The nineteen members above launch a host from Python. The Tier-B driver does not: it is
+    # a bash script cron fires, so what it needs from an adapter is SHELL TEXT plus the two
+    # variable names that text uses. Those cannot be expressed as argv, which is why they are
+    # their own group rather than a reinterpretation of ``worker_argv``.
+    #
+    # The no-shared-templating rule from this module's docstring applies unchanged, and
+    # ``tests/conductor/hosts/test_driver_text.py`` enforces it structurally: every member
+    # below must be defined in its own adapter module.
+
+    #: Shell variable holding this host's resolved executable (``CLAUDE_BIN`` / ``CODEX_BIN``).
+    BIN_VAR: str
+
+    #: The owner-flags variable this host's driver reads. One per host, deliberately: the
+    #: VALUE is that host's flag vocabulary, and a single shared name is how an owner's
+    #: ``--dangerously-skip-permissions`` would reach a ``codex exec`` argv.
+    FLAGS_VAR: str
+
+    #: posture name -> the flags an owner writes in ``resume-env.sh`` to choose it.
+    POSTURE_EXAMPLES: dict[str, str]
+
+    #: posture name -> one line of prose explaining what that posture grants.
+    POSTURE_NOTES: dict[str, str]
+
+    def resume_bin_resolution(self) -> str: ...
+    def resume_unresolved_guard(self) -> str: ...
+    def resume_posture_arms(self) -> str: ...
+    def resume_fire_command(self) -> str: ...
+    def posture_of(self, args: list[str]) -> str: ...
+    def session_posture(self, mode: str) -> str: ...
+    def scheduled_tasks_file(self) -> str | None: ...
+
 
 def opposite(host_id: str) -> str:
     """The default reviewer host for a run owned by ``host_id`` (design line 25)."""
