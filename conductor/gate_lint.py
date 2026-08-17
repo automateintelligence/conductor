@@ -194,6 +194,38 @@ def _resolve_test_files(
     return findings, files
 
 
+def _orphan_test_files(
+    gate_dir: str, referenced: set[str], repo_root: str
+) -> list[str]:
+    """Test files sitting in the gate directory that NO manifest command names.
+
+    `assertions/run.py` is entry-driven — it iterates the manifest and never scans the
+    directory — so an unreferenced test file is never executed while the gate still
+    reports all-green. That is a false green, so it is a hard finding.
+
+    Decidable only because `_check_command` rejects anything but the pinned argv shape:
+    every surviving command's paths are statically resolvable. A `::nodeid` selector
+    still NAMES the file, so `_resolve_test_files` already counts it as referenced.
+    conftest.py is exempt — it is support code no command ever names.
+
+    Caller contract: only run this when EVERY command passed the pin check. A rejected
+    command surrenders its paths, so its own test file would look unreferenced and draw
+    a false "named by no manifest command". Deferring costs nothing — the gate is
+    already red on that rejection, so no orphan can hide behind it to reach green.
+    """
+    if not os.path.isdir(gate_dir):
+        return []
+    findings = []
+    for path in freeze._collect_test_files(gate_dir):
+        if os.path.basename(path) == "conftest.py":
+            continue
+        if os.path.realpath(path) in referenced:
+            continue
+        rel = os.path.relpath(path, repo_root)
+        findings.append(f"orphan test file (named by no manifest command): {rel}")
+    return sorted(findings)
+
+
 def _is_negative_assert(node: ast.Assert) -> bool:
     for sub in ast.walk(node.test):
         if isinstance(sub, ast.Compare) and any(
@@ -280,17 +312,24 @@ def lint(manifest_path: str, repo_root: str) -> list[str]:
         return [f"manifest-unloadable: {exc}"]
     findings: list[str] = []
     linted: dict[str, list[str]] = {}
+    referenced: set[str] = set()
+    all_commands_pinned = True
     for entry in entries:
         aid = str(entry.get("id", "?"))
         raw = str(entry.get("command", "") or "")
         cmd_findings, path_tokens = _check_command(raw, repo_root)
+        all_commands_pinned = all_commands_pinned and not cmd_findings
         findings.extend(f"{aid}: {f}" for f in cmd_findings)
         file_findings, files = _resolve_test_files(path_tokens, repo_root)
         findings.extend(f"{aid}: {f}" for f in file_findings)
+        referenced.update(os.path.realpath(fp) for fp in files)
         for fp in files:
             if fp not in linted:
                 linted[fp] = _lint_test_file(fp, repo_root)
             findings.extend(f"{aid}: {f}" for f in linted[fp])
+    if all_commands_pinned:
+        gate_dir = os.path.dirname(os.path.abspath(manifest_path))
+        findings.extend(_orphan_test_files(gate_dir, referenced, repo_root))
     return list(dict.fromkeys(findings))
 
 
