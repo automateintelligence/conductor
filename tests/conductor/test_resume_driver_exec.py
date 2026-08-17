@@ -465,7 +465,11 @@ def test_an_unopenable_lock_file_is_not_reported_as_contention(make_rig):
     log = rig.log_text()
     assert "skip reason=lock-held" not in log, log
     assert "lock-unavailable" in log, log
-    assert proc.returncode != 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert proc.returncode == rs.EXIT_LOCK_UNAVAILABLE, (
+        proc.returncode,
+        proc.stdout,
+        proc.stderr,
+    )
     assert rig.worker_calls() == [], rig.worker_calls()
 
 
@@ -482,7 +486,13 @@ def test_a_flock_binary_that_cannot_run_fails_loud_instead_of_skipping(make_rig)
     assert "skip reason=lock-held" not in log, log
     assert "lock-unavailable" in log, log
     assert "127" in log, log  # the status is NAMED, so the cause is diagnosable
-    assert proc.returncode != 0, (proc.returncode, proc.stdout, proc.stderr)
+    # The exact status, not merely non-zero: `!= 0` was satisfied by the exit 6 that collided
+    # with the done-gate runner's EXIT_TAMPERED, so it could not have caught the collision.
+    assert proc.returncode == rs.EXIT_LOCK_UNAVAILABLE, (
+        proc.returncode,
+        proc.stdout,
+        proc.stderr,
+    )
     assert rig.worker_calls() == [], rig.worker_calls()
 
 
@@ -496,7 +506,11 @@ def test_a_flock_usage_or_os_error_fails_loud_instead_of_skipping(make_rig):
 
     assert "skip reason=lock-held" not in rig.log_text(), rig.log_text()
     assert "lock-unavailable" in rig.log_text(), rig.log_text()
-    assert proc.returncode != 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert proc.returncode == rs.EXIT_LOCK_UNAVAILABLE, (
+        proc.returncode,
+        proc.stdout,
+        proc.stderr,
+    )
 
 
 def test_only_the_documented_conflict_status_reports_lock_held(make_rig):

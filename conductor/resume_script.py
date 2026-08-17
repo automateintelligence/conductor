@@ -32,8 +32,37 @@ import sys
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and
 # `/conductor:start` reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 6
+TEMPLATE_VERSION = 7
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
+
+# The driver's OWN exit statuses — the whole contract for `.conductor/resume-autodev.sh`, in
+# one place because the render interpolates these and the table below is the only
+# documentation of them. They sit in a private 10x block because the driver propagates the
+# worker's rc VERBATIM (`exit "$rc"`), so any status the worker can produce is a status the
+# driver cannot own. `lock-unavailable` shipped as 6, which `assertions/run.py` already defines
+# as EXIT_TAMPERED: a worker that ran the done-gate and passed a 6 through was
+# indistinguishable from a machine that could not lock.
+#
+# Taken by someone else, and therefore unusable here:
+#   0-6       assertions/run.py's exit contract (EXIT_OK..EXIT_TAMPERED) — the worker runs the
+#             done-gate, so any of those can arrive as the propagated rc
+#   1, 2      the generic CLI failure statuses (conductor's own `return 1` / `return 2`)
+#   64-78     sysexits: flock's own error statuses, and conductor's usage exit (64)
+#   126, 127  bash's "found but not executable" / "command not found"
+#   128-165   killed by signal N
+#
+# KNOWN, DELIBERATE RESIDUAL: 0 and the propagated worker rc still overlap by construction —
+# `exit "$rc"` cannot be disambiguated without swallowing the worker's own status, which is
+# worse. So `$?` from the driver answers "did the DRIVER refuse, and why"; it does NOT answer
+# "did the phase succeed". That second question is answered by the `fire-end rc=` log line,
+# which is what `conductor driver status` reads. Do not add a driver code below 100.
+EXIT_LOCK_BUSY = (
+    100  # not an exit status: flock's `-E` conflict value (a logged skip, exit 0)
+)
+EXIT_LOCK_UNAVAILABLE = 101
+EXIT_DRIVER_UNRESOLVED = 102
+EXIT_WORKTREE_MISSING = 103
+EXIT_ENV_UNSAFE = 104
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
 # node-version-pinned bin path, or a plugin path pinned to a specific conductor version.
@@ -160,6 +189,19 @@ def render(project: str, worktree: str) -> str:
 # silently stalling. Machine/run-specific env (CONDUCTOR_MERGE_VERIFY, CONDUCTOR_PLUGIN_DIRS,
 # DOCKER_HOST, CONDUCTOR_RESUME_CLAUDE_FLAGS) lives in <project>/.conductor/resume-env.sh — this
 # script sources it and never bakes it in, so regeneration can never clobber owner config.
+#
+# EXIT STATUS TABLE — the complete contract, so nobody has to re-derive it from the branches:
+#   0                                 fired (the worker returned 0), or a LOGGED skip
+#                                     (`skip reason=lock-held`, `skip reason=gate-green`)
+#   {EXIT_LOCK_UNAVAILABLE}                               lock-unavailable — locking is BROKEN, not busy
+#   {EXIT_DRIVER_UNRESOLVED}                               driver-unresolved — claude and/or conductor did not resolve
+#   {EXIT_WORKTREE_MISSING}                               worktree-missing — the run worktree is gone
+#   {EXIT_ENV_UNSAFE}                               env-unsafe — resume-env.sh is group- or world-writable
+#   anything else                     the WORKER's own rc, propagated verbatim
+# The driver's own statuses live above 100 on purpose: everything at or below 78 is already
+# claimed by the done-gate runner's exit contract (0-6), sysexits (64-78), or bash (126/127),
+# and the propagated worker rc can be any of them. `$?` therefore tells you whether the DRIVER
+# refused and why; whether the PHASE succeeded is the `fire-end rc=` line in the log.
 set -u
 
 PROJECT={shlex.quote(project)}
@@ -180,13 +222,13 @@ CONDUCTOR="$(command -v conductor || true)"
 # Fail LOUD if a bin is unresolvable — silence is the real defect; a stalled run must be visible.
 if [ ! -x "$CLAUDE_BIN" ] || [ ! -x "${{CONDUCTOR:-}}" ]; then
     printf '%s driver-unresolved claude=%s conductor=%s\\n' "$(ts)" "$CLAUDE_BIN" "${{CONDUCTOR:-}}" >> "$LOG"
-    exit 3
+    exit {EXIT_DRIVER_UNRESOLVED}
 fi
 
 # Owner/machine env (merge-verify command, plugin dirs, docker host, extra claude flags). Kept
 # OUT of this generated file so regeneration never clobbers it. SAFETY: the file can carry the
 # bypass flag and a shell-executed CONDUCTOR_MERGE_VERIFY, so a group- or world-writable copy is
-# a privilege-escalation vector — refuse it LOUD (env-unsafe, exit 5) before sourcing, like
+# a privilege-escalation vector — refuse it LOUD (env-unsafe, exit {EXIT_ENV_UNSAFE}) before sourcing, like
 # driver-unresolved. Only a 0600 (or absent) file proceeds to the fire.
 ENV_FILE="$PROJECT/.conductor/resume-env.sh"
 if [ -f "$ENV_FILE" ]; then
@@ -194,7 +236,7 @@ if [ -f "$ENV_FILE" ]; then
     # FAIL-CLOSED: an unreadable mode (both stat forms failed) refuses like a writable one.
     if [ -z "$ENV_MODE" ] || [ $(( 8#$ENV_MODE & 8#022 )) -ne 0 ]; then
         printf '%s env-unsafe mode=%s %s\\n' "$(ts)" "$ENV_MODE" "$ENV_FILE" >> "$LOG"
-        exit 5
+        exit {EXIT_ENV_UNSAFE}
     fi
     . "$ENV_FILE"
 fi
@@ -202,7 +244,7 @@ fi
 # Run topology: the worker resumes in the worktree. Do NOT export CONDUCTOR_RUN_BRANCH — the CLI
 # reads .conductor/run_branch (single source of truth); a stale literal here would override it.
 export CONDUCTOR_HOME="$WORKTREE"
-cd "$WORKTREE" || {{ printf '%s worktree-missing %s\\n' "$(ts)" "$WORKTREE" >> "$LOG"; exit 4; }}
+cd "$WORKTREE" || {{ printf '%s worktree-missing %s\\n' "$(ts)" "$WORKTREE" >> "$LOG"; exit {EXIT_WORKTREE_MISSING}; }}
 mkdir -p "$PROJECT/.conductor"
 
 # (a) ONE headless fire at a time — the flock in the main checkout, held for the whole fire, is
@@ -234,8 +276,8 @@ mkdir -p "$PROJECT/.conductor"
 #     documents the discrimination: under -n the CONFLICT status is whatever `-E` asks for, and
 #     everything else is a sysexits error. LOCK_BUSY is picked outside both the sysexits range
 #     (64-78) and bash's 126/127, so no error can be mistaken for a held lock. A busy lock is a
-#     logged skip; anything else is fail-loud (exit 6), like driver-unresolved and env-unsafe.
-LOCK_BUSY=100
+#     logged skip; anything else is fail-loud (exit {EXIT_LOCK_UNAVAILABLE}), like driver-unresolved and env-unsafe.
+LOCK_BUSY={EXIT_LOCK_BUSY}
 LOCKFILE="$PROJECT/.conductor/resume.lock"
 exec 9>"$LOCKFILE"
 flock -n -E "$LOCK_BUSY" 9
@@ -245,7 +287,7 @@ if [ "$lock_rc" -eq "$LOCK_BUSY" ]; then
     exit 0
 elif [ "$lock_rc" -ne 0 ]; then
     printf '%s lock-unavailable rc=%s lock=%s\\n' "$(ts)" "$lock_rc" "$LOCKFILE" >> "$LOG"
-    exit 6
+    exit {EXIT_LOCK_UNAVAILABLE}
 fi
 
 # (b) finished runs get no-op fires: exit once the spec done-gate is green.

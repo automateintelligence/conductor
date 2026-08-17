@@ -6,6 +6,7 @@ import re
 import shlex
 import stat
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -14,9 +15,67 @@ from conductor import resume_script as rs
 PROJECT = "/home/u/programming/proj"
 WORKTREE = "/home/u/programming/proj-run-x"
 
+REPO = Path(rs.__file__).resolve().parents[1]
+
 
 def _render():
     return rs.render(PROJECT, WORKTREE)
+
+
+# ---- the driver's OWN exit statuses must be unreachable by anything else in `$?` ----
+
+_SYSEXITS = range(64, 79)  # flock's own error statuses; also conductor's own usage exit
+_SHELL_RESERVED = {
+    126: "bash: found but not executable",
+    127: "bash: command not found",
+}
+_SIGNALLED = range(128, 166)  # 128+N — killed by signal N
+
+
+def _gate_exit_contract() -> dict[int, str]:
+    """`assertions/run.py`'s documented exit codes, read from its SOURCE — importing it
+    resolves the project's gate at import time. These matter to the driver because the worker
+    runs that runner and the driver propagates the worker's rc unchanged."""
+    src = (REPO / "assertions" / "run.py").read_text(encoding="utf-8")
+    return {
+        int(value): name
+        for name, value in re.findall(r"(?m)^(EXIT_[A-Z_]+) = (\d+)$", src)
+    }
+
+
+def _render_exit_literals() -> set[int]:
+    """Every non-zero literal `exit N` the render mentions — in code AND in comments. The
+    comments here name the codes deliberately, so scanning them too keeps the documented table
+    from drifting away from the branches it describes."""
+    return {int(n) for n in re.findall(r"\bexit (\d+)\b", _render())} - {0}
+
+
+def test_the_drivers_own_exit_statuses_collide_with_nothing():
+    """A caller holding only `$?` must be able to tell the driver's own refusals apart from
+    every other producer of a status in that position. `lock-unavailable` shipped as exit 6,
+    which `assertions/run.py` already defines as EXIT_TAMPERED — and because the driver
+    propagates the worker's rc VERBATIM, a worker that ran the done-gate and passed a 6 through
+    was indistinguishable from a driver that could not lock at all.
+
+    Out of bounds for the driver, and why:
+      the gate contract   reachable through the propagated worker rc
+      64-78               sysexits: flock's own errors, and `conductor`'s usage exit
+      126, 127            bash's "not executable" / "not found"
+      128-165             killed by signal N
+    """
+    reserved: dict[int, str] = {}
+    reserved.update(_gate_exit_contract())
+    reserved.update({c: "sysexits (flock errors / conductor usage)" for c in _SYSEXITS})
+    reserved.update(_SHELL_RESERVED)
+    reserved.update({c: "killed by signal" for c in _SIGNALLED})
+
+    own = _render_exit_literals()
+    assert own, "the render emits no fail-loud exit at all"
+    clash = {code: reserved[code] for code in sorted(own) if code in reserved}
+    assert not clash, (
+        "the driver's own exit statuses must be unreachable by anything else a caller can see "
+        f"in $?; these are already taken: {clash}"
+    )
 
 
 # ---- the render bakes in NO version-pinned bin paths (the whole point) ----
@@ -48,7 +107,10 @@ def test_render_repairs_cron_path():
 def test_render_fails_loud_on_unresolvable_bin():
     s = _render()
     assert "driver-unresolved" in s
-    assert "exit 3" in s  # non-launch failure is surfaced + non-zero, never silent
+    # non-launch failure is surfaced + non-zero, never silent. The status comes from the
+    # module's own constant, not a literal: see test_the_drivers_own_exit_statuses_collide_
+    # with_nothing for why it may not be a small number.
+    assert f"exit {rs.EXIT_DRIVER_UNRESOLVED}" in s
 
 
 def test_render_does_not_export_run_branch():
@@ -484,11 +546,11 @@ def test_write_regenerates_clean_driver_without_force(tmp_path):
 
 
 def test_render_guards_env_file_permissions_before_sourcing():
-    """Static contract: the guard (env-unsafe + exit 5) appears BEFORE the sourcing line,
-    and the sourcing is inside the guarded block, not a bare `[ -f ... ] && .`."""
+    """Static contract: the guard (env-unsafe + its fail-loud exit) appears BEFORE the
+    sourcing line, and the sourcing is inside the guarded block, not a bare `[ -f ... ] && .`."""
     s = _render()
     assert "env-unsafe" in s
-    assert "exit 5" in s
+    assert f"exit {rs.EXIT_ENV_UNSAFE}" in s
     guard_at = s.index("env-unsafe")
     source_at = s.index('. "$ENV_FILE"')
     assert guard_at < source_at
@@ -536,7 +598,7 @@ def test_driver_refuses_writable_env_file_loud_and_never_fires(tmp_path, mode):
     os.chmod(env_file, mode)
     proc = _fire_driver(driver, home)
     log = (project / ".conductor" / "resume-autodev.log").read_text()
-    assert proc.returncode != 0
+    assert proc.returncode == rs.EXIT_ENV_UNSAFE, (proc.returncode, log)
     assert "env-unsafe" in log
     assert f"mode={mode:o}" in log
     assert not fired.exists()
