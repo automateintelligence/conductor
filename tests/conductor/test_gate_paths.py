@@ -137,6 +137,51 @@ def test_explicit_spec_field_silences_two_prose_candidates():
     assert paths.spec_from_goal_text(text) == "docs/specs/beta.md"
 
 
+# Two `spec:` FIELDS are the same ambiguity as two prose paths, one layer in: `search` took
+# the leftmost and re-created the very leftmost-wins defect the resolver exists to kill, this
+# time in the explicit field that is supposed to be the way OUT of it.
+
+
+def test_two_distinct_spec_fields_fail_closed_naming_both():
+    text = "spec: docs/specs/alpha.md\nspec: docs/specs/beta.md\n"
+    with pytest.raises(paths.AmbiguousSpecReference) as excinfo:
+        paths.spec_from_goal_text(text)
+    message = str(excinfo.value)
+    assert "docs/specs/alpha.md" in message and "docs/specs/beta.md" in message
+
+
+def test_the_same_spec_field_twice_is_not_ambiguous():
+    # mirrors the prose rule: a repeated declaration still declares ONE spec
+    text = "spec: docs/specs/beta.md\nspec: docs/specs/beta.md\n"
+    assert paths.spec_from_goal_text(text) == "docs/specs/beta.md"
+
+
+def test_spec_fields_differing_only_in_quoting_are_the_same_declaration():
+    text = "spec: docs/specs/beta.md\nspec: `docs/specs/beta.md`\n"
+    assert paths.spec_from_goal_text(text) == "docs/specs/beta.md"
+
+
+def test_two_distinct_spec_fields_fail_closed_even_outside_docs_specs():
+    # the field is root-agnostic, so the ambiguity check cannot lean on the prose regex
+    text = "spec: spec/alpha.md\nspec: spec/beta.md\n"
+    with pytest.raises(paths.AmbiguousSpecReference) as excinfo:
+        paths.spec_from_goal_text(text)
+    assert "spec/alpha.md" in str(excinfo.value)
+
+
+# The `spec:` field is the ONLY way a repo that does not keep specs under `docs/specs/` can
+# name one at all — the prose fallback hardcodes that root. Constraining the field to the
+# `docs/specs/*.md` shape would close the sole escape hatch, so it is deliberately not.
+
+
+def test_explicit_spec_field_outside_docs_specs_resolves(tmp_path):
+    assert paths.spec_from_goal_text("spec: spec/payments.md\n") == "spec/payments.md"
+    assert (
+        paths.spec_from_goal_text("spec: docs/requirements/payments.md\n")
+        == "docs/requirements/payments.md"
+    )
+
+
 def test_spec_from_goal_reads_the_goal_file_and_is_none_without_one(tmp_path):
     assert paths.spec_from_goal(str(tmp_path)) is None
     _write(tmp_path, ".conductor/goal.md", "spec: docs/specs/beta.md\n")
