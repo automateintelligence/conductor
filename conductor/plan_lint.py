@@ -116,10 +116,51 @@ _TASK_ANY = re.compile(r"^- \[[ xX]\] .+$", re.MULTILINE)
 # sub-issues for half-done work, which is a different — and unrequested — behaviour.
 # Anchored at column 0 exactly like `_TASK`/`_TASK_ANY`, so an INDENTED checkbox is out of
 # scope here for the same reason it is out of scope there: it was never going to become a
-# task, whatever its marker. Fenced code is not stripped, also matching `_TASK`/`_TASK_ANY`
-# — a column-0 `- [ ] x` inside a fence really does become a sub-issue today, so a `[~]`
-# there is a real inconsistency and not a false positive.
-_TASK_ODD_MARKER = re.compile(r"^- \[[^ xX\]\n]\] .+$", re.MULTILINE)
+# task, whatever its marker.
+# Matched per UNFENCED line (`_unfenced_lines`), unlike `_TASK`/`_TASK_ANY`, which scan the
+# raw section. That asymmetry is deliberate. Symmetry was the original argument — a column-0
+# `- [ ] x` inside a fence really does become a sub-issue today, so a `[~]` there is a real
+# inconsistency — but this check HARD-FAILS, and those do not. A plan documenting the
+# rejected shape the obvious way (showing it in a fenced example) failed its own lint, which
+# costs more than the misparse it mirrored: matching an existing SILENT bug does not justify
+# a new BLOCKING one. Teaching `_TASK` about fences is a real fix with a different blast
+# radius (it would stop creating sub-issues that today exist), so it is not made here.
+_TASK_ODD_MARKER = re.compile(r"^- \[[^ xX\]\n]\] .+$")
+# CommonMark fence: 3+ backticks or tildes, indented up to 3 spaces, optional info string.
+_FENCE = re.compile(r"^ {0,3}(?P<f>`{3,}|~{3,})(?P<info>.*)$")
+
+
+def _unfenced_lines(section: str) -> Iterator[str]:
+    """The section's lines with fenced code blocks removed, newlines stripped.
+
+    A fence closes only on the SAME character, run at least as long, and nothing but
+    whitespace after it — so a ``` inside a ~~~ block, and a ``` inside a ```` block, are
+    both content. Plans document markdown, so nested fences are ordinary here.
+
+    An UNTERMINATED fence runs to the end of the section, which is what CommonMark does with
+    an unclosed fence at the end of its container. It is also the safe direction for this
+    caller: the check it feeds is a hard failure, so a missed finding costs a warning nobody
+    got, while a false one costs a legitimate plan its exit 0. Scope is one phase section —
+    every caller iterates per section — so a fence someone forgot to close can silently
+    swallow at most the rest of its own phase, never the file.
+    """
+    fence: str | None = None
+    for line in section.split("\n"):
+        m = _FENCE.match(line)
+        if fence is None:
+            if m is not None:
+                fence = m.group("f")
+            else:
+                yield line
+        elif (
+            m is not None
+            and m.group("f")[0] == fence[0]
+            and len(m.group("f")) >= len(fence)
+            and not m.group("info").strip()
+        ):
+            fence = None
+
+
 # The per-phase recipe's load-bearing markers: self-review per task, codex review of the PR,
 # the merge gate, and the PR<->phase-issue link. Substring, case-insensitive.
 _RECIPE_NEEDLES = ("/code-review", "codex", "merge-gate", "closes #")
@@ -185,8 +226,9 @@ def lint(text: str, spec_path: str | None = None) -> list[str]:
         if not _TASK_ANY.search(section):
             reasons.append(f"phase-no-tasks:{title}")
         # The whole line, so the reason is greppable straight back to the source line.
-        for m in _TASK_ODD_MARKER.finditer(section):
-            reasons.append(f"phase-task-marker-unknown:{title}:{m.group(0).rstrip()}")
+        for line in _unfenced_lines(section):
+            if _TASK_ODD_MARKER.match(line):
+                reasons.append(f"phase-task-marker-unknown:{title}:{line.rstrip()}")
         if not _SPEC_POINTER.search(section):
             reasons.append(f"phase-no-spec-pointer:{title}")
         # The decisions leg of the same binding. `**ADRs:** none` passes; a MISSING line
