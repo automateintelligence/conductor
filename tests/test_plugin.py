@@ -2,6 +2,8 @@ import json
 import os
 import re
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -105,6 +107,34 @@ def test_codex_schema_does_not_claim_codex_reads_claude_only_fields():
         )
 
 
+def _codex_skills_pointers(manifest):
+    """The `skills` entry as a list of pointers.
+
+    codex accepts either a single string or an array of strings
+    (RawPluginManifestPaths, manifest.rs lines 129-135). Anything else is the
+    enum's `Invalid` arm and yields no pointers.
+    """
+    skills = manifest.get("skills")
+    if isinstance(skills, str):
+        return [skills]
+    if isinstance(skills, list):
+        return [entry for entry in skills if isinstance(entry, str)]
+    return []
+
+
+def _assert_skills_pointers_resolve(pointers):
+    assert pointers, "codex manifest must point at the skill directory"
+    for pointer in pointers:
+        skills_dir = os.path.normpath(os.path.join(ROOT, pointer))
+        assert os.path.isdir(skills_dir), f"{pointer} is not a directory"
+        found = [
+            name
+            for name in os.listdir(skills_dir)
+            if os.path.isfile(os.path.join(skills_dir, name, "SKILL.md"))
+        ]
+        assert found, f"no <name>/SKILL.md under {pointer}"
+
+
 def test_codex_manifest_does_not_claim_dependencies():
     # `dependencies` is a Claude plugin field. codex-cli 0.147.0 has no
     # counterpart and silently ignores it, so declaring it here would assert a
@@ -123,13 +153,18 @@ def test_codex_and_claude_manifests_do_not_drift():
 
 
 def test_codex_manifest_skills_pointer_resolves():
-    skills = _codex_manifest().get("skills")
-    assert skills, "codex manifest must point at the skill directory"
-    skills_dir = os.path.normpath(os.path.join(ROOT, skills))
-    assert os.path.isdir(skills_dir), f"{skills} is not a directory"
-    found = [
-        name
-        for name in os.listdir(skills_dir)
-        if os.path.isfile(os.path.join(skills_dir, name, "SKILL.md"))
-    ]
-    assert found, f"no <name>/SKILL.md under {skills}"
+    _assert_skills_pointers_resolve(_codex_skills_pointers(_codex_manifest()))
+
+
+@pytest.mark.parametrize(
+    "skills_value",
+    ["./skills/", ["./skills/"]],
+    ids=["string-form", "array-form"],
+)
+def test_codex_manifest_skills_pointer_forms_resolve(skills_value):
+    # codex reads `skills` as RawPluginManifestPaths, an untagged enum of
+    # Path(String) | Paths(Vec<String>) (manifest.rs lines 129-135), so both
+    # forms are valid manifests. Confirmed by installing each form into a
+    # scratch CODEX_HOME. The array form used to crash this check with
+    # "TypeError: join() argument must be str ... not 'list'".
+    _assert_skills_pointers_resolve(_codex_skills_pointers({"skills": skills_value}))
