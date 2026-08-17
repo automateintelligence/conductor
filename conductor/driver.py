@@ -38,11 +38,15 @@ _FIRE_END_RE = re.compile(r"fire-end rc=(\d+)")
 # window does the real filtering; this just bounds work on a long-lived log.
 _TAIL_LINES = 500
 
-#: How long a second `driver install` waits for the first to finish before refusing. An install
-#: is three short filesystem writes plus a `crontab` round trip, so anything slower than this is
-#: a stuck holder rather than a busy one, and waiting behind it forever is the failure this
-#: whole path exists to avoid.
-INSTALL_LOCK_TIMEOUT_S = 30.0
+#: How long a second writer waits for the first to finish before refusing. ONE value shared with
+#: `resume_script`, which is the other documented writer of the same file: two timeouts on one
+#: lock is two answers to "how long is a stuck holder".
+INSTALL_LOCK_TIMEOUT_S = resume_script.INSTALL_LOCK_TIMEOUT_S
+
+#: The advisory lock serializing every writer of this project's driver script. Defined in
+#: `resume_script` because the lock is keyed on the FILE, and that module owns the file — see
+#: `resume_script.install_lock_for`.
+install_lock_path = resume_script.install_lock_path
 
 
 def _crontab_lines() -> list[str]:
@@ -205,21 +209,6 @@ def status(project: str) -> int:
     return 0
 
 
-def install_lock_path(root: str) -> str:
-    """The advisory lock serializing `install` for one project's main checkout.
-
-    Its own file rather than the registry's ``project.lock``: reaching that one means resolving
-    a core state root, which pulls run-state machinery into a path whose whole job is writing
-    two files and a crontab stanza — and a project that has never had a run has no state root to
-    resolve. ``conductor.core.locks`` is separable from that: it is ``fcntl`` plus the global
-    order check and imports nothing from the state layer, so this is the existing primitive
-    under a distinct file, not a second locking scheme. ``kind="project"`` is that file's place
-    in the documented order (migration -> project -> owner -> state); nothing reached from
-    ``install`` takes a lock at all, so this cannot invert it.
-    """
-    return os.path.join(root, ".conductor", "install.lock")
-
-
 def install(project: str, worktree: str, host: str | None = None) -> int:
     """The fail-closed default for an unattended run — no durability judgment call:
     write the resume script (through `resume-script write`, so its inline-owner-env
@@ -256,7 +245,13 @@ def install(project: str, worktree: str, host: str | None = None) -> int:
     That state is not the self-healing kind: `resume-script verify` reports it, but `status`
     does not, and nothing reconciles before the next cron tick fires the wrong host. The lock
     covers the decision as well as the writes, because `chosen` reads the recording a competitor
-    is about to change."""
+    is about to change.
+
+    The lock is keyed on the driver SCRIPT, not on this entry point, because `install` is not
+    the only documented writer of it: `/conductor:start` reconcile regenerates a stale driver
+    with `conductor resume-script write` (skills/start/SKILL.md), which recreates this exact
+    split state through a public path — that write renders the RECORDED host, which is still the
+    old one until the line below runs. `resume_script._write` takes the same lock."""
     root = resume_script.main_root(project)
     lock = install_lock_path(root)
     os.makedirs(os.path.dirname(lock), exist_ok=True)
@@ -279,7 +274,7 @@ def _install_locked(root: str, worktree: str, host: str | None) -> int:
         if host
         else (runhost.recorded(root) or runhost.resolve(root))
     )
-    out = os.path.join(root, ".conductor", "resume-autodev.sh")
+    out = resume_script.driver_script_path(root)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     # `--host` explicitly, never via the recording: it is not written yet, and the render must
     # be the host this install decided on rather than the one the project is leaving behind.

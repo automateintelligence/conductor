@@ -708,6 +708,66 @@ def test_a_competing_install_cannot_land_between_the_write_and_the_recording(
     assert _installed_host(script) == "codex"
 
 
+#: The OTHER documented writer of the same file, run as a REAL separate process.
+#: `/conductor:start` reconcile is told to regenerate a stale driver with `conductor
+#: resume-script write` (skills/start/SKILL.md §RECONCILE), which is a public path into the very
+#: file `install` is half-way through writing. It passes no `--host`, so it renders the RECORDED
+#: host — which is still the OLD one at that instant, because `install` records last.
+_RACING_RESUME_WRITE = """
+import sys
+from conductor import resume_script
+resume_script.INSTALL_LOCK_TIMEOUT_S = 1.0
+sys.exit(resume_script.main(
+    ["write", "--project", sys.argv[1], "--worktree", sys.argv[2], "--out", sys.argv[3]]
+))
+"""
+
+
+def test_a_reconcile_write_cannot_land_between_the_install_write_and_the_recording(
+    tmp_path, monkeypatch
+):
+    """The split-state defect through the OTHER public path. Serializing `driver install`
+    against itself closes only one of the two documented writers: a reconcile
+    `resume-script write` landing in the same window rewrote the script back to claude, the
+    install then recorded codex, and BOTH returned 0 — `.conductor/host` said codex while the
+    installed script fired claude. The lock has to cover the file, not the entry point."""
+    from conductor.hosts import runhost
+
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    proj, root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    script = proj / ".conductor" / "resume-autodev.sh"
+    competitor = {}
+    original_write = driver.resume_script.main
+
+    def racing_write(argv):
+        rc = original_write(argv)
+        competitor["proc"] = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _RACING_RESUME_WRITE,
+                str(proj),
+                str(wt),
+                str(script),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return rc
+
+    monkeypatch.setattr(driver.resume_script, "main", racing_write)
+
+    assert driver.install(str(proj), str(wt), host="codex") == 0
+
+    assert competitor["proc"].returncode != 0, competitor["proc"].stderr
+    assert runhost.recorded(root) == "codex"
+    assert _installed_host(script) == "codex"
+
+
 def test_an_install_blocked_by_another_says_so_and_changes_nothing(
     tmp_path, monkeypatch
 ):

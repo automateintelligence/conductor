@@ -36,6 +36,7 @@ import stat
 import subprocess
 import sys
 
+from conductor.core import locks
 from conductor.hosts import base, runhost
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and
@@ -107,6 +108,50 @@ def main_root(path: str) -> str:
     from conductor.core.resolve import repo_root
 
     return repo_root(path)
+
+
+#: How long a writer waits for another one to finish before refusing. Writing the driver is
+#: three short filesystem writes plus a `crontab` round trip, so anything slower than this is a
+#: stuck holder rather than a busy one, and waiting behind it forever is the failure this whole
+#: path exists to avoid.
+INSTALL_LOCK_TIMEOUT_S = 30.0
+
+
+def driver_script_path(root: str) -> str:
+    """The Tier-B driver's installed location for one project's main checkout."""
+    return os.path.join(root, ".conductor", "resume-autodev.sh")
+
+
+def install_lock_for(script_path: str) -> str:
+    """The advisory lock serializing every writer of ONE driver script.
+
+    Keyed on the FILE being written, not on the entry point writing it. `driver install` and
+    `resume-script write` are both documented writers of `<root>/.conductor/resume-autodev.sh`
+    (`skills/start/SKILL.md` sends reconcile through the second one), and a lock held by only
+    one of them serializes nothing: a reconcile `write` landing between an install's write and
+    its `runhost.record` rewrote the script back to the recorded host, both processes returned
+    0, and the run was left with `.conductor/host` naming one host while the installed script
+    fired the other. Whoever is outermost takes it; a nested writer sees `locks.is_held` and
+    skips, because flock is per open-file-description and re-taking it would deadlock.
+    """
+    return os.path.join(
+        os.path.dirname(os.path.abspath(script_path)) or ".", "install.lock"
+    )
+
+
+def install_lock_path(root: str) -> str:
+    """`install_lock_for` the driver script of one project's main checkout.
+
+    Its own file rather than the registry's ``project.lock``: reaching that one means resolving
+    a core state root, which pulls run-state machinery into a path whose whole job is writing
+    two files and a crontab stanza — and a project that has never had a run has no state root to
+    resolve. ``conductor.core.locks`` is separable from that: it is ``fcntl`` plus the global
+    order check and imports nothing from the state layer, so this is the existing primitive
+    under a distinct file, not a second locking scheme. ``kind="project"`` is that file's place
+    in the documented order (migration -> project -> owner -> state); nothing reached from a
+    driver write takes a lock at all, so this cannot invert it.
+    """
+    return install_lock_for(driver_script_path(root))
 
 
 def cron_marker(root: str) -> str:
@@ -343,11 +388,37 @@ def _write(
 ) -> int:
     """`host` is for the caller that is INSTALLING a host, not reading one: `driver install`
     writes the script before it records the host, so at this moment `<project>/.conductor/host`
-    still names the host being replaced. Omitted, this stays the recorded host's driver."""
+    still names the host being replaced. Omitted, this stays the recorded host's driver.
+
+    SERIALIZED against every other writer of the same file (`install_lock_for`), which includes
+    `driver install` — whose durable fact is this script PLUS the host recording, so a write
+    landing inside it splits the two. Rendering happens before the lock because it only reads;
+    the read-modify-write of the target is what has to be exclusive. Writing to stdout takes
+    nothing: it mutates no file, so there is nothing for a competitor to interleave with."""
     text = render(project, worktree, host)
+    # The adapter of the host just WRITTEN, not the recorded one — naming the other host's flags
+    # variable would tell the owner to configure a posture this driver never reads.
+    h = base.load(host) if host else runhost.adapter(project)
     if out is None:
         sys.stdout.write(text)
         return 0
+    lock = install_lock_for(out)
+    # Outermost holder wins: `driver install` takes this same lock around the whole
+    # write-then-record, and flock is per open-file-description, so re-taking it here would
+    # deadlock rather than nest.
+    if locks.is_held(lock):
+        return _write_locked(out, text, force, h)
+    try:
+        with locks.hold(lock, kind="project", timeout=INSTALL_LOCK_TIMEOUT_S):
+            return _write_locked(out, text, force, h)
+    except locks.LockTimeout as e:
+        # Loud, and having changed nothing: the lock is taken before the target is even read.
+        print(f"resume-script write: {e}", file=sys.stderr)
+        return 1
+
+
+def _write_locked(out: str, text: str, force: bool, h: base.HostAdapter) -> int:
+    """`_write`'s body, under the driver-script lock: the read-modify-write of the target."""
     # No-clobber guard: never overwrite a driver that carries INLINE owner env — the
     # mechanical "verify fails -> write" reconcile path would otherwise silently drop the
     # owner's CONDUCTOR_MERGE_VERIFY etc. Refuse (exit 2) with the exact lines to migrate;
@@ -374,9 +445,6 @@ def _write(
     # file that exists but sets no posture (empty FLAGS, unrelated exports) still stalls
     # unattended fires, so it still gets the nudge. Point at both opt-ins without choosing.
     env_path = os.path.join(os.path.dirname(out) or ".", "resume-env.sh")
-    # The adapter of the host just WRITTEN, not the recorded one — naming the other host's flags
-    # variable would tell the owner to configure a posture this driver never reads.
-    h = base.load(host) if host else runhost.adapter(project)
     if not _posture_decided(env_path, h):
         print(
             f"note: unattended fires need permissions pre-authorized or they STALL on the "
