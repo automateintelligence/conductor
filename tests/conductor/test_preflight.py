@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+import subprocess
 
 import pytest
 
@@ -55,8 +57,13 @@ def test_discovers_plugin_dir_install(tmp_path, monkeypatch):  # dogfood: --plug
 
 
 def test_discovers_conductor_own_root(monkeypatch, tmp_path):
-    # dogfood: conductor's own skills always resolve
+    # dogfood: conductor's own skills always resolve — from ANY working directory. The suite
+    # runs from inside a conductor checkout, so a root derived from `.` rather than from
+    # `__file__` answers correctly here and nowhere else; the chdir is what tells them apart.
+    # Under cron the cwd is not a checkout, and self-discovery is the leg that has no fallback.
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "nonexistent"))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    monkeypatch.chdir(tmp_path)
     avail = preflight.available_commands()
     assert "conductor:assertions-to-tests" in avail
 
@@ -90,7 +97,11 @@ def _plugin_list_json(roots):
 
 
 def _stub_codex_on_path(tmp_path, monkeypatch, roots):
-    """A `codex` on PATH that reports `roots` as its installed plugins."""
+    """A `codex` on PATH that reports `roots` as its installed plugins.
+
+    `git` is carried across because host resolution shells out to it (`runhost._common_root`);
+    a PATH without it would silently degrade every derivation test to the literal-path branch.
+    """
     bindir = tmp_path / "stub-bin"
     bindir.mkdir(exist_ok=True)
     codex = bindir / "codex"
@@ -98,8 +109,15 @@ def _stub_codex_on_path(tmp_path, monkeypatch, roots):
         f"#!/bin/sh\nprintf '%s' '{_plugin_list_json(roots)}'\nexit 0\n",
     )
     os.chmod(codex, 0o755)
+    _link_git(bindir)
     monkeypatch.setenv("PATH", str(bindir))
     return bindir
+
+
+def _link_git(bindir):
+    git = bindir / "git"
+    if not git.exists():
+        git.symlink_to(shutil.which("git"))
 
 
 #: Which plugin owns each conducted skill. Environment-provided skills (no plugin in the
@@ -118,7 +136,13 @@ _PLUGIN_SKILLS = {
 
 
 def _codex_install(
-    tmp_path, monkeypatch, *, review_wrapper="claude", flat_only=False, without=()
+    tmp_path,
+    monkeypatch,
+    *,
+    review_wrapper="claude",
+    flat_only=False,
+    without=(),
+    pin_host=True,
 ):
     """A Codex machine with the conducted stack installed the way Codex installs it.
 
@@ -129,8 +153,16 @@ def _codex_install(
     `flat_only` is the machine where someone copied the skill directories in by hand: every
     name resolves, and not one of them can be attributed to the plugin that is supposed to
     own it.
+
+    `pin_host=False` withholds `$CONDUCTOR_HOST` so the caller can make preflight DERIVE the
+    host instead of being handed it; the Claude root is then pointed somewhere empty so a
+    wrong derivation cannot quietly pass off this machine's real `~/.claude`.
     """
-    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
+    if pin_host:
+        monkeypatch.setenv("CONDUCTOR_HOST", "codex")
+    else:
+        monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty-claude-home"))
     home = tmp_path / "codex-home"
     monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
@@ -173,30 +205,41 @@ def test_a_hand_copied_codex_stack_is_reported_unverifiable_not_healthy(
     assert "$document-release" not in out["unverified"]
 
 
-def test_preflight_still_succeeds_against_a_claude_install(tmp_path, monkeypatch):
-    monkeypatch.setenv("CONDUCTOR_HOST", "claude")
+_CLAUDE_CACHE_SKILLS = (
+    ("spec-craft", ["expectations", "executable-assertions"]),
+    ("conductor", ["assertions-to-tests"]),
+    (
+        "superpowers",
+        [
+            "subagent-driven-development",
+            "requesting-code-review",
+            "receiving-code-review",
+            "writing-plans",
+        ],
+    ),
+    ("gstack", ["code-review", "codex", "document-release"]),
+)
+
+
+def _claude_install(tmp_path, monkeypatch, *, without=()):
+    """A Claude machine with the conducted stack in its marketplace plugin cache."""
     home = tmp_path / "claude-home"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
     cache = home / "plugins" / "cache" / "market"
-    for plugin, skills in (
-        ("spec-craft", ["expectations", "executable-assertions"]),
-        ("conductor", ["assertions-to-tests"]),
-        (
-            "superpowers",
-            [
-                "subagent-driven-development",
-                "requesting-code-review",
-                "receiving-code-review",
-                "writing-plans",
-            ],
-        ),
-        ("gstack", ["code-review", "codex", "document-release"]),
-    ):
+    for plugin, skills in _CLAUDE_CACHE_SKILLS:
         for skill in skills:
+            if skill in without:
+                continue
             d = cache / plugin / "1.0" / "skills" / skill
             d.mkdir(parents=True)
             (d / "SKILL.md").write_text("---\n---\n")
+    return home
+
+
+def test_preflight_still_succeeds_against_a_claude_install(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_HOST", "claude")
+    _claude_install(tmp_path, monkeypatch)
     out = preflight.check(project_root=str(tmp_path / "project"))
     assert out["ok"], out["missing"]
 
@@ -416,3 +459,137 @@ def test_an_environment_provided_skill_is_not_advertised_as_a_plugin():
     advice = "\n".join(preflight.check(available=set(), host_id="claude")["advice"])
     line = next(a for a in advice.splitlines() if a.startswith("/document-release"))
     assert "environment-provided" in line
+
+
+# ----------------------------------------------------------- A1: preflight DERIVES its own host
+#
+# Every host case above hands `check` its answer — as `host_id=` or through `$CONDUCTOR_HOST`.
+# The one caller that matters does neither: `python -m conductor.preflight` resolves the host
+# from the project, and the whole point of that resolution is choosing WHICH ROOT to look in.
+# The two below supply nothing but the project, so the derivation is what is under test.
+
+
+def _git_repo(tmp_path, name):
+    proj = tmp_path / name
+    proj.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(proj)], check=True, timeout=30)
+    return proj
+
+
+def _bin_dir_without_codex(tmp_path, monkeypatch):
+    """A PATH carrying `git` and deliberately no `codex`.
+
+    Without this the machine running the suite lends a wrongly-derived Codex check its own real
+    `codex plugin list`, and a wrong root becomes indistinguishable from a right one.
+    """
+    bindir = tmp_path / "no-codex-bin"
+    bindir.mkdir(exist_ok=True)
+    _link_git(bindir)
+    monkeypatch.setenv("PATH", str(bindir))
+
+
+def test_a_project_with_no_recorded_host_is_preflighted_against_the_claude_root(
+    tmp_path, monkeypatch
+):
+    """No `host_id=`, no `$CONDUCTOR_HOST`, no `.conductor/host` — the pre-A1 state every
+    existing run is in. Nine of the ten requirements resolve out of the Claude plugin cache and
+    the withheld one is reported in Claude's own slash form, which no Codex-rooted check could
+    produce."""
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    proj = _git_repo(tmp_path, "proj")
+    _claude_install(tmp_path, monkeypatch, without=("expectations",))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-codex-home"))
+    _bin_dir_without_codex(tmp_path, monkeypatch)
+
+    out = preflight.check(project_root=str(proj))
+
+    assert out["missing"] == ["/spec-craft:expectations"], out
+
+
+def test_check_discovers_the_projects_own_codex_skills_not_the_current_directorys(
+    tmp_path, monkeypatch
+):
+    """``./.codex/skills/`` is one of the three verified Codex roots, and ``check`` is asked
+    about a PROJECT — never about wherever the process happens to be standing. Dropping
+    ``project_root`` on the way to discovery substitutes the cwd for it, which is some other
+    tree entirely under cron and in this suite alike."""
+    proj = tmp_path / "proj"
+    skill = proj / ".codex" / "skills" / "expectations"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-codex-home"))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    _bin_dir_without_codex(tmp_path, monkeypatch)
+
+    out = preflight.check(
+        required=["expectations"], host_id="codex", project_root=str(proj)
+    )
+
+    assert out["ok"], out
+
+
+def test_a_cached_plugin_is_named_by_its_cache_path_not_by_its_manifest(
+    tmp_path, monkeypatch
+):
+    """Claude's marketplace-cache leg takes the plugin name from the
+    ``plugins/cache/<marketplace>/<plugin>/<version>/`` segment, which is what conductor's
+    preflight has always done. Every other fixture here builds a cache whose path segment and
+    manifest agree, so nothing could tell the two sources apart — and switching to the manifest
+    would silently re-namespace every installed plugin's skills out from under the required
+    set. This is the one fixture where they disagree."""
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    root = home / "plugins" / "cache" / "market" / "spec-craft" / "1.0"
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text('{"name": "renamed-upstream"}')
+    skill = root / "skills" / "expectations"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\n---\n")
+
+    avail = preflight.available_commands(host_id="claude")
+
+    assert "spec-craft:expectations" in avail
+    assert "renamed-upstream:expectations" not in avail
+
+
+def test_a_manifestless_plugin_dir_contributes_nothing_on_either_host(
+    tmp_path, monkeypatch
+):
+    """A ``--plugin-dir`` root is named by its manifest, so a root without one is not "the
+    plugin its directory is called" — it is unattributable. Yielding its bare skill names would
+    satisfy ``spec-craft:expectations`` on a machine where spec-craft is not installed at all:
+    as a straight pass on Claude, and by downgrading the requirement to ``unverified`` on
+    Codex, which is the same false green one report line further down."""
+    plug = tmp_path / "spec-craft"
+    skill = plug / "skills" / "expectations"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty-claude-home"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-codex-home"))
+    _bin_dir_without_codex(tmp_path, monkeypatch)
+
+    for host in ("claude", "codex"):
+        avail = preflight.available_commands(
+            host_id=host, project_root=str(tmp_path / "project")
+        )
+        assert "expectations" not in avail, host
+        assert "spec-craft:expectations" not in avail, host
+
+
+def test_a_project_recorded_as_codex_is_preflighted_against_the_codex_root(
+    tmp_path, monkeypatch
+):
+    """The same derivation with the durable recording as its only input. The Claude root is
+    empty here, so resolving to the legacy default would report all ten missing in slash form
+    rather than the one withheld skill in Codex's."""
+    from conductor.hosts import runhost
+
+    proj = _git_repo(tmp_path, "proj")
+    _codex_install(tmp_path, monkeypatch, pin_host=False, without=("expectations",))
+    runhost.record(str(proj), "codex")
+
+    out = preflight.check(project_root=str(proj))
+
+    assert out["missing"] == ["$expectations"], out
