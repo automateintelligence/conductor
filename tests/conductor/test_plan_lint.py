@@ -317,6 +317,71 @@ def test_fenced_marker_does_not_fail_the_cli(tmp_path):
     assert plan_lint.main([str(plan)]) == 0
 
 
+# --- a fenced H2 is not a phase (codex round 2, finding 3) -------------------------------
+# `_phase_sections` split on every H2 BEFORE the fence filter ran, so a fenced example that
+# showed a phase heading was parsed as a REAL phase: the marker finding came back, joined by
+# every per-phase pointer failure the example could not possibly satisfy. Fence awareness has
+# to happen during the split, not after it.
+
+_FENCED_PHASE_EXAMPLE = "## Phase example (A99)\n\n- [~] documented example"
+
+
+def test_a_phase_shaped_heading_inside_a_fence_is_not_a_phase():
+    assert plan_lint.lint(_fenced("```md", "```", body=_FENCED_PHASE_EXAMPLE)) == []
+
+
+def test_a_fenced_phase_heading_is_not_claimable_by_title():
+    # `lint_phase_adrs` is autodev's pre-claim check and splits with the same helper: an
+    # example must not be claimable as a phase.
+    reasons, refs = plan_lint.lint_phase_adrs(
+        _fenced("```md", "```", body=_FENCED_PHASE_EXAMPLE), "Phase example (A99)"
+    )
+    assert reasons == ["phase-not-found:Phase example (A99)"]
+    assert refs == []
+
+
+def test_a_real_phase_after_a_fenced_phase_heading_is_still_linted():
+    # The fix must not blind the splitter — a REAL phase following the example still parses,
+    # and still reports its own failures.
+    text = (
+        _fenced("```md", "```", body=_FENCED_PHASE_EXAMPLE)
+        + "\n## Phase 3 — Glue (A9)\n\n- [ ] wire it up\n"
+    )
+    assert sorted(plan_lint.lint(text)) == [
+        "phase-no-adr-pointer:Phase 3 — Glue (A9)",
+        "phase-no-spec-pointer:Phase 3 — Glue (A9)",
+    ]
+
+
+def test_an_unterminated_fence_does_not_hide_the_headings_after_it():
+    # The asymmetry the splitter needs: a CLOSED fence hides a heading, an unclosed one does
+    # not. Reading the whole plan with one fence state would let a forgotten ``` swallow every
+    # following heading, merging the rest of the file into the phase that opened it — the
+    # already-committed leak test above is the same rule seen from the marker side.
+    text = GOOD_PLAN.replace(
+        "- [ ] Implement scoring",
+        "- [ ] Implement scoring\n\n```md\n- [~] documented example",
+    )
+    titles = [t for (t, _s, _i), _sec in plan_lint._phase_sections(text)]
+    assert titles == ["Phase 1 — Scoring (A3, A4)", "Phase 2 — Reporting (A8)"]
+
+
+def test_committed_plan_phase_titles_are_unchanged_by_fence_awareness():
+    # The plan in this repo that HAS phases, so "don't change the split for plans without
+    # fenced H2s" is checked against a real file and not only against fixtures.
+    path = os.path.join(ROOT, "docs", "plans", "2026-07-06-plan-self-enforcement.md")
+    text = open(path, encoding="utf-8").read()
+    titles = [t for (t, _s, _i), _sec in plan_lint._phase_sections(text)]
+    assert [t.split(" (")[0] for t in titles] == [
+        "Phase 1 — Session-mode-aware unattended authority",
+        'Phase 2 — README "Unattended authority" + canonical bypass spelling',
+        "Phase 3 — Posture visibility in the generated driver",
+        "Phase 4 — conductor gate lint + freeze covers the assertions source",
+        "Phase 5 — Single-sourced identifiers: run-branch name + default-branch",
+        "Phase 6 — conductor driver install|status",
+    ]
+
+
 # --- **ADRs:** pointer line (0.9.0) ----------------------------------------------------
 # Live finding 2026-08-01: two architectural decisions existed ONLY in ADRs, so nothing
 # carried them to a worker resuming a later phase, which could undo either while the

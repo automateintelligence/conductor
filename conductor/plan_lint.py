@@ -49,10 +49,95 @@ _EMPHASIS = " \t\r*`_"
 # Where ADRs conventionally live; used ONLY for the cheap dangling-reference warning.
 _ADR_DIRS = ("docs/adr", "docs/ADR", "docs/adrs", "docs/decisions")
 
+# CommonMark fence: 3+ backticks or tildes, indented up to 3 spaces, optional info string.
+_FENCE = re.compile(r"^ {0,3}(?P<f>`{3,}|~{3,})(?P<info>.*)$")
+
+
+def _fence_scan(text: str) -> Iterator[tuple[int, str, bool, str | None]]:
+    """(line-start offset, line without its newline, inside-a-fenced-block, fence still open
+    after this line) per line.
+
+    THE fence state machine for this module — the section splitter and the per-line marker
+    check both read it, so "what is fenced" cannot mean two things in one lint. A fence's own
+    delimiter lines count as inside: they are markup, never plan content.
+
+    A fence closes only on the SAME character, run at least as long, and nothing but
+    whitespace after it — so a ``` inside a ~~~ block, and a ``` inside a ```` block, are
+    both content. Plans document markdown, so nested fences are ordinary here.
+
+    An UNTERMINATED fence runs to the end of `text`, which is what CommonMark does with an
+    unclosed fence at the end of its container. It is also the safe direction for the marker
+    check: that check is a hard failure, so a missed finding costs a warning nobody got, while
+    a false one costs a legitimate plan its exit 0. The fourth element is what lets the
+    splitter take the OPPOSITE reading — see `_closed_fence_offsets`.
+    """
+    fence: str | None = None
+    pos = 0
+    for line in text.split("\n"):
+        m = _FENCE.match(line)
+        if fence is None:
+            inside = m is not None
+            if m is not None:
+                fence = m.group("f")
+        else:
+            inside = True
+            if (
+                m is not None
+                and m.group("f")[0] == fence[0]
+                and len(m.group("f")) >= len(fence)
+                and not m.group("info").strip()
+            ):
+                fence = None
+        yield pos, line, inside, fence
+        pos += len(line) + 1
+
+
+def _closed_fence_offsets(text: str) -> set[int]:
+    """Line-start offsets of lines inside a CLOSED fenced block, delimiters included.
+
+    Closed only, and that asymmetry against `_unfenced_lines` is the point. The splitter reads
+    the WHOLE plan, so an unterminated fence would run past every following heading and merge
+    the rest of the file into one phase — a forgotten ``` costing the plan its remaining
+    phases, their pointers reported as duplicates of the phase that swallowed them. A heading
+    is markup strong enough to bound the damage: an unterminated fence keeps suppressing the
+    marker check to the end of ITS OWN section (`_unfenced_lines`, which never sees more than
+    one section) while the headings after it stay headings."""
+    out: set[int] = set()
+    pending: list[int] = []
+    for pos, _line, inside, still_open in _fence_scan(text):
+        if inside:
+            pending.append(pos)
+        # Nothing open after this line, so any pending fence CLOSED on it.
+        if still_open is None:
+            out.update(pending)
+            pending.clear()
+    # A leftover `pending` is an unterminated fence — deliberately left unfenced.
+    return out
+
+
+def _unfenced_lines(section: str) -> Iterator[str]:
+    """The section's lines with fenced code blocks removed, newlines stripped.
+
+    Scope is one phase section — every caller iterates per section — so a fence someone
+    forgot to close can silently swallow at most the rest of its own phase, never the file.
+    """
+    for _pos, line, inside, _open in _fence_scan(section):
+        if not inside:
+            yield line
+
 
 def _phase_sections(text: str) -> Iterator[tuple[tuple[str, str, list[str]], str]]:
-    """Yield ((title, status, assertion-ids), section-body) per phase heading."""
-    headings = list(sync._H2_ANY.finditer(text))
+    """Yield ((title, status, assertion-ids), section-body) per phase heading.
+
+    An H2 inside a CLOSED fenced block is EXAMPLE TEXT, not a heading, and is skipped. This
+    happens during the split, not after it: filtering the lines of an already-split section
+    (what `_unfenced_lines` does for the marker check) is too late — a fenced
+    `## Phase example (A99)` had already become a section of its own, and every per-phase
+    requirement it could not satisfy became a hard failure against a heading nobody wrote as
+    a phase. A skipped heading does not end the enclosing phase's section either; the fence
+    it sits in is part of that phase's body, where the marker check already ignores it."""
+    fenced = _closed_fence_offsets(text)
+    headings = [m for m in sync._H2_ANY.finditer(text) if m.start() not in fenced]
     for i, m in enumerate(headings):
         parsed = sync._phase_heading(m.group(1))
         if parsed is None:
@@ -126,39 +211,6 @@ _TASK_ANY = re.compile(r"^- \[[ xX]\] .+$", re.MULTILINE)
 # a new BLOCKING one. Teaching `_TASK` about fences is a real fix with a different blast
 # radius (it would stop creating sub-issues that today exist), so it is not made here.
 _TASK_ODD_MARKER = re.compile(r"^- \[[^ xX\]\n]\] .+$")
-# CommonMark fence: 3+ backticks or tildes, indented up to 3 spaces, optional info string.
-_FENCE = re.compile(r"^ {0,3}(?P<f>`{3,}|~{3,})(?P<info>.*)$")
-
-
-def _unfenced_lines(section: str) -> Iterator[str]:
-    """The section's lines with fenced code blocks removed, newlines stripped.
-
-    A fence closes only on the SAME character, run at least as long, and nothing but
-    whitespace after it — so a ``` inside a ~~~ block, and a ``` inside a ```` block, are
-    both content. Plans document markdown, so nested fences are ordinary here.
-
-    An UNTERMINATED fence runs to the end of the section, which is what CommonMark does with
-    an unclosed fence at the end of its container. It is also the safe direction for this
-    caller: the check it feeds is a hard failure, so a missed finding costs a warning nobody
-    got, while a false one costs a legitimate plan its exit 0. Scope is one phase section —
-    every caller iterates per section — so a fence someone forgot to close can silently
-    swallow at most the rest of its own phase, never the file.
-    """
-    fence: str | None = None
-    for line in section.split("\n"):
-        m = _FENCE.match(line)
-        if fence is None:
-            if m is not None:
-                fence = m.group("f")
-            else:
-                yield line
-        elif (
-            m is not None
-            and m.group("f")[0] == fence[0]
-            and len(m.group("f")) >= len(fence)
-            and not m.group("info").strip()
-        ):
-            fence = None
 
 
 # The per-phase recipe's load-bearing markers: self-review per task, codex review of the PR,
