@@ -1221,7 +1221,9 @@ def test_a_codex_run_fires_the_codex_binary_with_an_exec_invocation(tmp_path):
     assert "/conductor:autodev" not in argv, argv
 
 
-def test_a_plugin_installed_conductor_survives_a_cron_fire_with_nothing_on_path(tmp_path):
+def test_a_plugin_installed_conductor_survives_a_cron_fire_with_nothing_on_path(
+    tmp_path,
+):
     """The install a Codex user actually has. `skills/start/SKILL.md` states that installed
     plugin binaries are NOT on PATH, nothing installs a shim, and nothing persists
     CODEX_PLUGIN_ROOT — so `command -v conductor` is empty at fire time and the whole run
@@ -1235,7 +1237,9 @@ def test_a_plugin_installed_conductor_survives_a_cron_fire_with_nothing_on_path(
     base = tmp_path / "plugin-install"
     base.mkdir()
     project, driver, home, argv_file, conductor = _mk_codex_harness(base)
-    assert not (home / ".local" / "bin" / "conductor").exists()  # the fixture's whole point
+    assert not (
+        home / ".local" / "bin" / "conductor"
+    ).exists()  # the fixture's whole point
     proc = _fire_driver(driver, home)
     log = (project / ".conductor" / "resume-autodev.log").read_text()
     assert proc.returncode == 0, (proc.stdout, proc.stderr, log)

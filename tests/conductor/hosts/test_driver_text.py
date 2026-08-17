@@ -170,7 +170,10 @@ def test_the_plugin_lookup_snippet_is_self_contained_and_shell_quotable():
 
     assert "'" not in codex.PLUGIN_ROOT_SNIPPET
     assert "conductor" not in codex.PLUGIN_ROOT_SNIPPET  # the name comes from argv
-    assert f"'{codex.PLUGIN_ROOT_SNIPPET}' conductor" in codex.CodexAdapter().resume_bin_resolution()
+    assert (
+        f"'{codex.PLUGIN_ROOT_SNIPPET}' conductor"
+        in codex.CodexAdapter().resume_bin_resolution()
+    )
 
 
 def test_codex_guard_fails_loud_when_the_skill_file_is_missing():

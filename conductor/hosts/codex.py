@@ -22,12 +22,7 @@ from conductor.hosts import discovery
 #: truth §"Session and config isolation"), so this is the Codex config root unconditionally.
 CONFIG_DIR_ENV = "CODEX_HOME"
 
-#: The subcommand that reports where Codex installed each plugin. A CLI contract (``--json`` is
-#: documented by ``codex plugin list --help`` on 0.147.0), which is what makes it usable where
-#: the cache LAYOUT is not: the only root ever observed was ``$CODEX_HOME/.tmp/plugins``.
-PLUGIN_LIST_ARGV: tuple[str, ...] = ("plugin", "list", "--json")
-
-#: The same lookup as ``installed_plugin_roots``, as a self-contained program the generated cron
+#: The plugin-root lookup as a self-contained program the generated cron
 #: driver can run before any conductor code is importable — that is the whole problem it solves,
 #: so it cannot import from here. Reads ``codex plugin list --json`` on stdin, takes a plugin
 #: name in argv, prints that plugin's install root (or nothing). Single quotes are forbidden
@@ -98,9 +93,9 @@ class CodexAdapter:
             "# Installed as a plugin? Ask codex where it put it — a CLI contract, not a\n"
             "# guessed cache layout, so a cache move or a version bump cannot rot it.\n"
             'if [ ! -x "${CONDUCTOR:-}" ] && [ -x "${CODEX_BIN:-}" ]; then\n'
-            "    CONDUCTOR_PLUGIN_DIR=\"$(\"$CODEX_BIN\" plugin list --json </dev/null 2>/dev/null "
+            '    CODEX_CONDUCTOR_DIR="$("$CODEX_BIN" plugin list --json </dev/null 2>/dev/null '
             f"| python3 -c '{PLUGIN_ROOT_SNIPPET}' conductor 2>/dev/null || true)\"\n"
-            '    [ -z "$CONDUCTOR_PLUGIN_DIR" ] || CONDUCTOR="$CONDUCTOR_PLUGIN_DIR/bin/conductor"\n'
+            '    [ -z "$CODEX_CONDUCTOR_DIR" ] || CONDUCTOR="$CODEX_CONDUCTOR_DIR/bin/conductor"\n'
             "fi\n"
             "# Conductor's skill tree, derived from the RESOLVED bin at RUN time — never a\n"
             "# baked path, and never from `.` (a cwd-derived tree is a wrong answer that looks\n"
