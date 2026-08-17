@@ -105,7 +105,19 @@ def _run_branch_slug(root: str) -> str | None:
 # repointed the gate slug and the frozen assertions source together — two independent
 # declarations that could not disagree, and so could not catch it. One resolver serves both.
 
-_SPEC_PATH_RE = re.compile(r"docs/specs/[^\s`'\"]+?\.md")
+# GREEDY to the token's LAST `.md`, and the token ends at markdown punctuation as well as at
+# whitespace/quotes. Both halves are load-bearing.
+#
+# Lazy stopped at the FIRST `.md`, so `docs/specs/foo.assertions.md.md` matched only as far as
+# `docs/specs/foo.assertions.md` and the `_ASSERTIONS_SUFFIX` check below then discarded that
+# prefix as a done-definition sibling. The real path was gone from the candidate list, so a
+# goal naming another spec too resolved SILENTLY to the other one instead of failing closed.
+# The suffix test only means anything once the candidate is the whole path.
+#
+# Greedy over an unrestricted class overshoots the other way: `[docs/specs/a.md](docs/specs/a.md)`
+# has no whitespace between the two, so one match would swallow `](` and yield
+# `docs/specs/a.md](docs/specs/a.md` as the spec. Link/bracket punctuation ends a path token.
+_SPEC_PATH_RE = re.compile(r"docs/specs/[^\s`'\"()\[\]<>]+\.md")
 # the done-definition sibling spec-craft writes next to a spec — never a spec itself
 _ASSERTIONS_SUFFIX = ".assertions.md"
 # an explicit declaration line, e.g. `spec: docs/specs/foo.md`

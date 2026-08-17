@@ -233,6 +233,36 @@ def test_an_explicit_spec_field_naming_an_assertions_file_is_honoured():
     )
 
 
+# codex round 2, finding 2: the exclusion above tested the LAZY match, not the path. A path
+# whose name merely CONTAINS `.assertions.md` — `docs/specs/foo.assertions.md.md` — matched
+# only as far as its first `.md`, and the suffix check then discarded that prefix as if it
+# were the sibling. The real path vanished, so a goal that also named another spec silently
+# resolved to the other one instead of failing closed. The candidate must be matched to its
+# token boundary BEFORE the suffix decides anything.
+
+
+def test_a_path_merely_prefixed_by_an_assertions_name_resolves_to_itself():
+    text = "Implement docs/specs/foo.assertions.md.md until done\n"
+    assert paths.spec_from_goal_text(text) == "docs/specs/foo.assertions.md.md"
+
+
+def test_a_path_merely_prefixed_by_an_assertions_name_is_not_silently_dropped():
+    text = "Implement docs/specs/foo.assertions.md.md alongside docs/specs/bar.md\n"
+    with pytest.raises(paths.AmbiguousSpecReference) as excinfo:
+        paths.spec_from_goal_text(text)
+    message = str(excinfo.value)
+    assert "docs/specs/foo.assertions.md.md" in message
+    assert "docs/specs/bar.md" in message
+
+
+def test_a_markdown_linked_spec_resolves_to_the_path_not_the_link_run():
+    # The fence around the fix: matching greedily over an unrestricted character class would
+    # swallow `](` and yield `docs/specs/beta.md](docs/specs/beta.md` as the "spec". Markdown
+    # link punctuation ends a path token.
+    text = "Implement [docs/specs/beta.md](docs/specs/beta.md) until done\n"
+    assert paths.spec_from_goal_text(text) == "docs/specs/beta.md"
+
+
 def test_spec_from_goal_reads_the_goal_file_and_is_none_without_one(tmp_path):
     assert paths.spec_from_goal(str(tmp_path)) is None
     _write(tmp_path, ".conductor/goal.md", "spec: docs/specs/beta.md\n")
