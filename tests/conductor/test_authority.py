@@ -166,6 +166,71 @@ def test_simple_value_round_trips_through_sh(tmp_path):
     assert proc.stdout == "cd backend && pytest -q"
 
 
+# ---- write_resume_env: the values must reach the driver's CHILD processes ----
+#
+# The driver SOURCES this file (resume_script.render: `. "$ENV_FILE"`) and then execs
+# `conductor assert run` and `claude -p /conductor:autodev`. Every variable here except
+# CONDUCTOR_RESUME_CLAUDE_FLAGS is consumed by one of those CHILDREN, not by the driver shell:
+# CONDUCTOR_SPEC_ROOTS and CONDUCTOR_PLUGIN_DIRS by `conductor`, CONDUCTOR_MERGE_VERIFY by
+# `conductor merge` (a grandchild), DOCKER_HOST by the docker CLI below that. A bare
+# `KEY=value` assignment is a SHELL variable: present in the driver, absent from every child.
+#
+# That is why the round-trip test above passed while the feature did nothing under cron — it
+# read the value back in the sourcing shell, which is the one place it was never missing.
+# `export` is the mechanism rather than passing values explicitly on each child's command line
+# because this file is OWNER-OWNED and hand-editable (resume_script's docstring: owner config
+# is never baked into the generated driver). An explicit pass would need the driver template to
+# enumerate every key the owner might set — a TEMPLATE_VERSION bump and a regeneration of every
+# installed driver per new variable, which is the rot this module exists to prevent — and it
+# would still only reach the direct child, not the docker grandchild.
+
+
+def _child_env(env_file: str, var: str) -> str:
+    """The value a CHILD process of the driver sees, having sourced the env file exactly as
+    `resume_script.render` does. The nested `sh -c` is a separate process, so it inherits only
+    what was EXPORTED — the precise distinction the bare assignment lost."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["sh", "-c", f'. "{env_file}" && sh -c \'printf %s "${var}"\''],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_spec_roots_reaches_a_child_process(tmp_path):
+    p = authority.write_resume_env(
+        str(tmp_path), {"CONDUCTOR_SPEC_ROOTS": "docs/specs:docs/superpowers/specs"}
+    )
+    assert _child_env(p, "CONDUCTOR_SPEC_ROOTS") == "docs/specs:docs/superpowers/specs"
+
+
+def test_every_owner_variable_reaches_a_child_process(tmp_path):
+    # the same defect applied to every key this writer emits, not just the new one
+    env = {
+        "CONDUCTOR_MERGE_VERIFY": "cd backend && pytest -q",
+        "CONDUCTOR_PLUGIN_DIRS": "/plugins/a:/plugins/b",
+        "DOCKER_HOST": "unix:///s",
+        "CONDUCTOR_RESUME_CLAUDE_FLAGS": "--settings /path/with space",
+    }
+    p = authority.write_resume_env(str(tmp_path), env)
+    for key, value in env.items():
+        assert _child_env(p, key) == value, key
+
+
+def test_quoting_survives_the_export(tmp_path):
+    # export must not change the serialization contract the driver's unquoted expansion needs
+    p = authority.write_resume_env(
+        str(tmp_path),
+        {"CONDUCTOR_RESUME_CLAUDE_FLAGS": "--settings /path/with space"},
+    )
+    text = open(p).read()
+    assert "CONDUCTOR_RESUME_CLAUDE_FLAGS='--settings /path/with space'\n" in text
+    assert "\"'" not in text  # never KEY="'...'"
+
+
 def test_invalid_key_names_are_rejected(tmp_path):
     import pytest
 

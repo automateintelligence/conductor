@@ -49,10 +49,108 @@ _EMPHASIS = " \t\r*`_"
 # Where ADRs conventionally live; used ONLY for the cheap dangling-reference warning.
 _ADR_DIRS = ("docs/adr", "docs/ADR", "docs/adrs", "docs/decisions")
 
+# CommonMark fence: 3+ backticks or tildes, indented up to 3 spaces, optional info string.
+_FENCE = re.compile(r"^ {0,3}(?P<f>`{3,}|~{3,})(?P<info>.*)$")
+
+
+def _opens_fence(m: re.Match[str]) -> bool:
+    """Whether a fence-shaped line actually OPENS a fenced block (CommonMark §4.5).
+
+    A backtick fence's info string may not contain a backtick — ```` ```md`x ```` is inline
+    code in a paragraph, not a fence. A tilde fence's info string may, and that asymmetry is
+    the spec's, not a shortcut here. Accepting any info text let a line that opens no fence in
+    any renderer open one in this parser, which then SUPPRESSED every marker finding to the end
+    of the phase: a false negative, and the quietest possible failure for a hard check."""
+    return not (m.group("f")[0] == "`" and "`" in m.group("info"))
+
+
+def _fence_scan(text: str) -> Iterator[tuple[int, str, bool, str | None]]:
+    """(line-start offset, line without its newline, inside-a-fenced-block, fence still open
+    after this line) per line.
+
+    THE fence state machine for this module — the section splitter and the per-line marker
+    check both read it, so "what is fenced" cannot mean two things in one lint. A fence's own
+    delimiter lines count as inside: they are markup, never plan content.
+
+    A fence closes only on the SAME character, run at least as long, and nothing but
+    whitespace after it — so a ``` inside a ~~~ block, and a ``` inside a ```` block, are
+    both content. Plans document markdown, so nested fences are ordinary here.
+
+    An UNTERMINATED fence runs to the end of `text`, which is what CommonMark does with an
+    unclosed fence at the end of its container. It is also the safe direction for the marker
+    check: that check is a hard failure, so a missed finding costs a warning nobody got, while
+    a false one costs a legitimate plan its exit 0. The fourth element is what lets the
+    splitter take the OPPOSITE reading — see `_closed_fence_offsets`.
+    """
+    fence: str | None = None
+    pos = 0
+    for line in text.split("\n"):
+        m = _FENCE.match(line)
+        if fence is None:
+            if m is not None and _opens_fence(m):
+                inside = True
+                fence = m.group("f")
+            else:
+                inside = False
+        else:
+            inside = True
+            if (
+                m is not None
+                and m.group("f")[0] == fence[0]
+                and len(m.group("f")) >= len(fence)
+                and not m.group("info").strip()
+            ):
+                fence = None
+        yield pos, line, inside, fence
+        pos += len(line) + 1
+
+
+def _closed_fence_offsets(text: str) -> set[int]:
+    """Line-start offsets of lines inside a CLOSED fenced block, delimiters included.
+
+    Closed only, and that asymmetry against `_unfenced_lines` is the point. The splitter reads
+    the WHOLE plan, so an unterminated fence would run past every following heading and merge
+    the rest of the file into one phase — a forgotten ``` costing the plan its remaining
+    phases, their pointers reported as duplicates of the phase that swallowed them. A heading
+    is markup strong enough to bound the damage: an unterminated fence keeps suppressing the
+    marker check to the end of ITS OWN section (`_unfenced_lines`, which never sees more than
+    one section) while the headings after it stay headings."""
+    out: set[int] = set()
+    pending: list[int] = []
+    for pos, _line, inside, still_open in _fence_scan(text):
+        if inside:
+            pending.append(pos)
+        # Nothing open after this line, so any pending fence CLOSED on it.
+        if still_open is None:
+            out.update(pending)
+            pending.clear()
+    # A leftover `pending` is an unterminated fence — deliberately left unfenced.
+    return out
+
+
+def _unfenced_lines(section: str) -> Iterator[str]:
+    """The section's lines with fenced code blocks removed, newlines stripped.
+
+    Scope is one phase section — every caller iterates per section — so a fence someone
+    forgot to close can silently swallow at most the rest of its own phase, never the file.
+    """
+    for _pos, line, inside, _open in _fence_scan(section):
+        if not inside:
+            yield line
+
 
 def _phase_sections(text: str) -> Iterator[tuple[tuple[str, str, list[str]], str]]:
-    """Yield ((title, status, assertion-ids), section-body) per phase heading."""
-    headings = list(sync._H2_ANY.finditer(text))
+    """Yield ((title, status, assertion-ids), section-body) per phase heading.
+
+    An H2 inside a CLOSED fenced block is EXAMPLE TEXT, not a heading, and is skipped. This
+    happens during the split, not after it: filtering the lines of an already-split section
+    (what `_unfenced_lines` does for the marker check) is too late — a fenced
+    `## Phase example (A99)` had already become a section of its own, and every per-phase
+    requirement it could not satisfy became a hard failure against a heading nobody wrote as
+    a phase. A skipped heading does not end the enclosing phase's section either; the fence
+    it sits in is part of that phase's body, where the marker check already ignores it."""
+    fenced = _closed_fence_offsets(text)
+    headings = [m for m in sync._H2_ANY.finditer(text) if m.start() not in fenced]
     for i, m in enumerate(headings):
         parsed = sync._phase_heading(m.group(1))
         if parsed is None:
@@ -106,6 +204,28 @@ def _adr_refs(value: str) -> tuple[list[str], list[str]]:
 # phases forever). issue-sync's parser stays unchecked-only by design (done work must not
 # respawn sub-issues); only the lint uses this broader form.
 _TASK_ANY = re.compile(r"^- \[[ xX]\] .+$", re.MULTILINE)
+# A task-shaped line whose marker is neither ` ` nor `x`/`X` is counted as NOTHING: it is
+# not a task (issue-sync's `_TASK` is `^- \[ \] (.+)$`, so no sub-issue is ever created for
+# it), not done, and not tickable (phase-done's `_UNTICKED` rewrites `- [ ]` only, so the
+# marker survives every phase-done forever). The work vanishes silently. `_TASK_ANY` only
+# catches the case where a phase's tasks are ALL non-standard; one `[~]` beside one `[ ]`
+# left nothing to fire at all, which is why this is a hard finding and not a warning.
+# The fix is at lint time, deliberately: teaching `_TASK` to accept `[~]` would spawn
+# sub-issues for half-done work, which is a different — and unrequested — behaviour.
+# Anchored at column 0 exactly like `_TASK`/`_TASK_ANY`, so an INDENTED checkbox is out of
+# scope here for the same reason it is out of scope there: it was never going to become a
+# task, whatever its marker.
+# Matched per UNFENCED line (`_unfenced_lines`), unlike `_TASK`/`_TASK_ANY`, which scan the
+# raw section. That asymmetry is deliberate. Symmetry was the original argument — a column-0
+# `- [ ] x` inside a fence really does become a sub-issue today, so a `[~]` there is a real
+# inconsistency — but this check HARD-FAILS, and those do not. A plan documenting the
+# rejected shape the obvious way (showing it in a fenced example) failed its own lint, which
+# costs more than the misparse it mirrored: matching an existing SILENT bug does not justify
+# a new BLOCKING one. Teaching `_TASK` about fences is a real fix with a different blast
+# radius (it would stop creating sub-issues that today exist), so it is not made here.
+_TASK_ODD_MARKER = re.compile(r"^- \[[^ xX\]\n]\] .+$")
+
+
 # The per-phase recipe's load-bearing markers: self-review per task, codex review of the PR,
 # the merge gate, and the PR<->phase-issue link. Substring, case-insensitive.
 _RECIPE_NEEDLES = ("/code-review", "codex", "merge-gate", "closes #")
@@ -170,6 +290,10 @@ def lint(text: str, spec_path: str | None = None) -> list[str]:
         title = parsed[0]
         if not _TASK_ANY.search(section):
             reasons.append(f"phase-no-tasks:{title}")
+        # The whole line, so the reason is greppable straight back to the source line.
+        for line in _unfenced_lines(section):
+            if _TASK_ODD_MARKER.match(line):
+                reasons.append(f"phase-task-marker-unknown:{title}:{line.rstrip()}")
         if not _SPEC_POINTER.search(section):
             reasons.append(f"phase-no-spec-pointer:{title}")
         # The decisions leg of the same binding. `**ADRs:** none` passes; a MISSING line

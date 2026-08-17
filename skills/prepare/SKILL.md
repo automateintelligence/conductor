@@ -65,8 +65,37 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
    for a value that is only delimiters or emphasis.
 3. **LEDGER ALIGNMENT — dry-run FIRST, always.** `conductor ledger align <plan.md>` and show
    the owner the report: matches (by **assertion-id set** — titles lie, id sets don't),
-   renames planned for issues + milestone, unmatched phases/issues, ambiguities. Ambiguities →
-   resolve WITH the owner (never guess; align withholds those renames by design). Then
+   renames planned for issues + milestone, unmatched phases/issues, ambiguities,
+   `gateless_phases` (every `gate: none` phase, for information), `gateless_pairs`,
+   `gateless_unpaired`, and `markerless_issues`. Ambiguities →
+   resolve WITH the owner (never guess; align withholds those renames by design).
+   **PAIRING GATE — the precondition is `gateless_unpaired == []`: do not run `convert` while
+   that bucket has an entry the owner has not explicitly dispositioned.** A `gate: none` phase
+   has no assertion-id set to match on, so align resolves it the way `convert` will — by EXACT
+   title — and splits the outcome in two: `gateless_pairs` (an issue already carries the phase
+   heading character for character, so convert reuses it) and `gateless_unpaired` (none does,
+   so convert WILL create one). That second bucket is the whole risk: convert resolves each
+   phase issue by exact title, so a paraphrased issue is missed and a second, duplicate phase
+   issue is created for a phase that already has one. `ledger align` exits nonzero for
+   AMBIGUITY only, so a zero exit does not mean this is handled — read the bucket.
+   `markerless_issues` is the candidate list for making a pairing, **not** part of this gate:
+   it holds every issue with no assertion tokens, which includes every task sub-issue
+   (`convert` creates them with an empty body), so it is **never expected to be empty**.
+   Take exactly one decision per `gateless_unpaired` entry:
+   - some markerless issue IS this phase → **rename the issue to the phase heading exactly**
+     — character for character, em dash and all; this string is the match key, not a label —
+     then re-run the dry run and confirm the phase moved into `gateless_pairs`; or
+   - no existing issue is this phase → the owner says so explicitly, accepting that `convert`
+     will create one. Record the decision: after the fact, a duplicate phase issue created by
+     surprise and an issue created on purpose look identical.
+
+   Both dispositions need the owner, and neither is inferable from the repo — so if no owner is
+   available to decide, **stop and report which phases are waiting on the decision**; never
+   re-run align hoping the bucket empties on its own, and never proceed on the assumption that
+   creating a duplicate is fine. Two issues both carrying a phase heading come back as an
+   ambiguity, not a pair: convert would reuse one of them silently.
+
+   prepare never pairs these itself — same rule as every other match here, never guess. Then
    `conductor ledger align <plan.md> --apply`, then `conductor ledger convert <plan.md>` —
    which now reuses every aligned issue and creates whatever is missing: `conductor-assertions`
    markers and task sub-issues (completed `[x]` tasks never respawn as new sub-issues).

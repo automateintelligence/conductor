@@ -9,6 +9,25 @@ plan headings. After an applied align, ``convert`` reuses everything and fills i
 missing. Fail-closed: an ambiguous match (two issues, one phase) renames NOTHING for that
 phase; a milestone spanning ambiguity skips the milestone rename. Dry-run by default —
 ``apply=True`` is the only mutating path.
+
+Unmatchable is not unmatched, and both halves of an unmatchable pair are reported. A
+``gate: none`` phase has no id set to match on, so it lands in ``gateless_phases``, never in
+``unmatched_phases`` (which stays the phases whose issue is genuinely missing). Its
+counterpart — an issue with neither marker nor heading tokens — lands in
+``markerless_issues`` with its title, so the owner can hand-pair the two; it stays out of
+``unmatched_issues`` (marker-bearing strays) because every task sub-issue shares the
+milestone and is markerless by construction.
+
+A gateless phase is also RESOLVED here, by the only key that decides its outcome: ``convert``
+(``sync.generate``) looks a phase issue up by EXACT title, so whether an issue with that exact
+title exists is the whole difference between reuse and a duplicate phase issue. Reporting the
+two unpairable halves and stopping was not actionable: ``gateless_phases`` and
+``markerless_issues`` both list their members unconditionally, so renaming an issue to the
+heading — the fix ``/conductor:prepare`` asks for — emptied neither, and the "both buckets
+empty" precondition could never be met. ``gateless_pairs`` / ``gateless_unpaired`` answer the
+question instead: paired means convert will reuse that issue, unpaired means it will create
+one, and only the unpaired need an owner decision. Two issues carrying the heading is an
+ambiguity like any other (``ambiguous_phases``) — convert would silently reuse one of them.
 """
 
 from __future__ import annotations
@@ -54,10 +73,25 @@ def align(
     ambiguous_issue_numbers: set[int] = set()
     matched_milestones: dict[int, str] = {}
     unmatched_phases: list[str] = []
+    gateless_phases: list[str] = []
+    gateless_pairs: list[dict[str, Any]] = []
+    gateless_unpaired: list[str] = []
 
     for phase_title, wanted in phase_sets.items():
-        if not wanted:  # gateless phase (gate: none) — nothing to match on
-            unmatched_phases.append(phase_title)
+        if not wanted:  # gateless phase (gate: none) — no id set to match on
+            gateless_phases.append(phase_title)
+            # Resolve it the way `convert` will: by EXACT title. Nothing is guessed — an issue
+            # either already carries the heading character for character or it does not.
+            titled = [i for i in issues if (i.get("title") or "") == phase_title]
+            if len(titled) > 1:
+                ambiguous_phases[phase_title] = sorted(i["number"] for i in titled)
+                ambiguous_issue_numbers.update(i["number"] for i in titled)
+            elif titled:
+                gateless_pairs.append(
+                    {"title": phase_title, "issue": titled[0]["number"]}
+                )
+            else:
+                gateless_unpaired.append(phase_title)
             continue
         found = [i for i in issues if _tokens(i) == wanted]
         if wanted in duplicated_sets:  # plan-side ambiguity: never guess an assignment
@@ -92,6 +126,18 @@ def align(
         and i["number"] not in ambiguous_issue_numbers
         and _tokens(i)
     )
+    # An issue with no tokens at all can never match a phase, so it was dropped from every
+    # bucket — invisible next to the equally invisible gateless phase it may belong to.
+    # Reported WITH its title: the number alone is useless for a pairing the owner has to
+    # make by eye.
+    markerless_issues = sorted(
+        (
+            {"number": i["number"], "title": i.get("title") or ""}
+            for i in issues
+            if not _tokens(i)
+        ),
+        key=lambda i: i["number"],
+    )
 
     milestone_report: Any = None
     if len(matched_milestones) == 1:
@@ -121,4 +167,11 @@ def align(
         "unmatched_phases": unmatched_phases,
         "unmatched_issues": unmatched_issues,
         "ambiguous_phases": ambiguous_phases,
+        "gateless_phases": gateless_phases,
+        # the PAIRING GATE's two buckets: unpaired is what needs an owner decision before
+        # `convert`, paired is what convert will reuse. `gateless_phases` above stays the
+        # full informational list (= these two plus any that turned out ambiguous).
+        "gateless_pairs": gateless_pairs,
+        "gateless_unpaired": gateless_unpaired,
+        "markerless_issues": markerless_issues,
     }

@@ -261,6 +261,16 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             "conductor ledger align <plan.md> --apply",
             "conductor ledger convert <plan.md>",
             "never guess",
+            # align's gateless buckets. Reporting them and then running `convert` anyway
+            # is worse than not reporting them: the outcome is a DUPLICATE phase issue.
+            "gateless_phases",
+            "markerless_issues",
+            # ...and the gate keys on the REACHABLE one (codex round 2, finding 1)
+            "gateless_unpaired",
+            "gateless_pairs",
+            "do not run `convert`",
+            "rename the issue to the phase heading exactly",
+            "duplicate phase issue",
         ],
         "4-status-truth": [
             "--from-gate",
@@ -420,6 +430,51 @@ def test_adr_precondition_lives_in_autodevs_pre_claim_step():
     assert "/conductor:prepare" in precondition
     execute = _regions("skills/autodev/SKILL.md")["6-execute"]
     assert "build within the decisions" in execute
+
+
+def test_prepare_gates_gateless_markerless_pairing_before_convert():
+    """codex production review, finding 3.
+
+    `align` gained `gateless_phases` + `markerless_issues`, `ledger align` exits nonzero
+    only for ambiguity, and step 3 ran `convert` regardless. `generate` resolves a phase
+    issue by EXACT title (`ledger/sync.py:116`), so a gateless `Phase 3 — Glue` whose
+    existing issue is titled `Glue work` is missed and a SECOND phase issue is created
+    (`ledger/sync.py:132`). Presence alone is not the contract — a resolution step printed
+    AFTER the convert command is one a worker reading top to bottom has already passed."""
+    step = _regions("skills/prepare/SKILL.md")["3-ledger-alignment"]
+    for needle in ("gateless_phases", "markerless_issues", "do not run `convert`"):
+        assert needle in step, needle
+    assert step.index("do not run `convert`") < step.index(
+        "conductor ledger convert <plan.md>"
+    ), "the pairing gate must be stated BEFORE the convert command it gates"
+
+
+def test_prepares_pairing_gate_is_a_reachable_precondition():
+    """codex production review round 2, finding 1.
+
+    The gate demanded `gateless_phases` AND `markerless_issues` be empty. Neither bucket can
+    empty: align lists every gateless phase by design, and every task sub-issue is markerless
+    by construction (`ledger/sync.py:171` creates them with `body=""`). Doing exactly what the
+    skill said — renaming an issue to the phase heading — changed neither, so the worker's only
+    options were to stop forever or to violate the gate. The precondition must be REACHABLE,
+    and where a human decision is genuinely required the skill must say to stop and ask rather
+    than loop."""
+    step = _regions("skills/prepare/SKILL.md")["3-ledger-alignment"]
+    for needle in (
+        # the reachable buckets, computed the way `convert` resolves a phase issue
+        "gateless_unpaired",
+        "gateless_pairs",
+        # markerless_issues is information for the pairing, never a precondition
+        "never expected to be empty",
+        # a decision only the owner can take stops the worker; it never spins
+        "stop and report",
+    ):
+        assert needle in step, needle
+    # the unsatisfiable form, spelled out so it cannot come back by paraphrase
+    assert "clear `gateless_phases` and `markerless_issues`" not in step
+    assert step.index("gateless_unpaired") < step.index(
+        "conductor ledger convert <plan.md>"
+    ), "the precondition must be stated BEFORE the convert command it gates"
 
 
 def test_adr_backfill_lives_in_prepares_plan_evaluation_step():

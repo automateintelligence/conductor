@@ -62,16 +62,33 @@ def resolve_posture(mode: str | None) -> str:
 
 def write_resume_env(project_root: str, env: dict[str, str]) -> str:
     """Write ``<project_root>/.conductor/resume-env.sh`` (mode 0600, always) and return its
-    path. Each line is ``KEY={shlex.quote(value)}`` — never wrapped in extra double quotes,
-    which would smuggle literal quote characters into the driver's unquoted
+    path. Each line is ``export KEY={shlex.quote(value)}`` — never wrapped in extra double
+    quotes, which would smuggle literal quote characters into the driver's unquoted
     ``${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}`` expansion. Keys are validated BEFORE anything is
-    written, so a bad env never leaves a partial file behind."""
+    written, so a bad env never leaves a partial file behind.
+
+    ``export`` is load-bearing, not cosmetic. The driver SOURCES this file
+    (``resume_script.render``: ``. "$ENV_FILE"``) and then execs ``conductor assert run`` and
+    ``claude -p /conductor:autodev``. Every variable here except
+    ``CONDUCTOR_RESUME_CLAUDE_FLAGS`` — which the driver itself expands — is read by one of
+    those CHILDREN: ``CONDUCTOR_SPEC_ROOTS`` and ``CONDUCTOR_PLUGIN_DIRS`` by ``conductor``,
+    ``CONDUCTOR_MERGE_VERIFY`` by ``conductor merge`` a level below that, ``DOCKER_HOST`` by
+    the docker CLI below THAT. A bare ``KEY=value`` is a shell variable: it exists in the
+    driver and in nothing it launches, so the whole file worked interactively (where the
+    values are already in the operator's environment) and silently did nothing under cron.
+
+    Exporting at the point of definition is preferred to having the driver pass values on each
+    child's command line because this file is OWNER-OWNED and hand-editable — the generated
+    driver deliberately bakes in none of its contents, so an explicit pass would force the
+    template to enumerate every key an owner might set, and each new variable would then need
+    a ``TEMPLATE_VERSION`` bump plus a regeneration of every installed driver. It also reaches
+    only the direct child, while ``DOCKER_HOST`` is needed two processes deeper."""
     for key in env:
         if not _KEY_RE.match(key):
             raise ValueError(f"invalid env key name: {key!r}")
     path = os.path.join(project_root, ".conductor", "resume-env.sh")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    body = "".join(f"{key}={shlex.quote(value)}\n" for key, value in env.items())
+    body = "".join(f"export {key}={shlex.quote(value)}\n" for key, value in env.items())
     # 0600 at creation (never umask-dependent), then an unconditional chmod so a
     # pre-existing looser file is tightened, not inherited.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

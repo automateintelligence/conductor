@@ -89,6 +89,530 @@ def test_gate_slug_env_overrides_files(tmp_path, monkeypatch):
     assert paths.gate_slug(str(tmp_path)) == "fromenv"
 
 
+# --- spec_from_goal: THE shared goal -> spec resolver ----------------------------------
+#
+# `paths._goal_slug` and `freeze._assertions_source` each used to carry their own copy of the
+# `docs/specs/...md` regex, and each took the LEFTMOST match. Because both took the leftmost
+# they agreed with each other, so a spec merely mentioned in passing above the intended one
+# repointed the gate slug AND the frozen assertions source together with nothing left to
+# disagree and catch it. One resolver now serves both, an explicit `spec:` line beats prose,
+# and two prose candidates fail closed naming both instead of silently picking one.
+
+
+def test_spec_from_goal_text_single_prose_match_is_unchanged(tmp_path):
+    assert (
+        paths.spec_from_goal_text("Implement docs/specs/beta.md until done\n")
+        == "docs/specs/beta.md"
+    )
+
+
+def test_spec_from_goal_text_without_any_spec_is_none():
+    assert paths.spec_from_goal_text("Do the thing\n") is None
+
+
+def test_spec_from_goal_text_repeating_one_spec_is_not_ambiguous():
+    text = "Implement docs/specs/beta.md.\nSee docs/specs/beta.md for detail.\n"
+    assert paths.spec_from_goal_text(text) == "docs/specs/beta.md"
+
+
+def test_explicit_spec_field_beats_a_prose_mention():
+    text = "Context: docs/specs/alpha.md was the old one.\nspec: docs/specs/beta.md\n"
+    assert paths.spec_from_goal_text(text) == "docs/specs/beta.md"
+
+
+def test_two_prose_specs_without_a_spec_field_fail_closed_naming_both():
+    text = "Port docs/specs/alpha.md ideas into docs/specs/beta.md until done\n"
+    with pytest.raises(paths.AmbiguousSpecReference) as excinfo:
+        paths.spec_from_goal_text(text)
+    message = str(excinfo.value)
+    assert "docs/specs/alpha.md" in message and "docs/specs/beta.md" in message
+    assert "spec:" in message  # tells the user how to disambiguate
+
+
+def test_explicit_spec_field_silences_two_prose_candidates():
+    text = (
+        "Port docs/specs/alpha.md ideas into docs/specs/beta.md until done\n"
+        "spec: docs/specs/beta.md\n"
+    )
+    assert paths.spec_from_goal_text(text) == "docs/specs/beta.md"
+
+
+# Two `spec:` FIELDS are the same ambiguity as two prose paths, one layer in: `search` took
+# the leftmost and re-created the very leftmost-wins defect the resolver exists to kill, this
+# time in the explicit field that is supposed to be the way OUT of it.
+
+
+def test_two_distinct_spec_fields_fail_closed_naming_both():
+    text = "spec: docs/specs/alpha.md\nspec: docs/specs/beta.md\n"
+    with pytest.raises(paths.AmbiguousSpecReference) as excinfo:
+        paths.spec_from_goal_text(text)
+    message = str(excinfo.value)
+    assert "docs/specs/alpha.md" in message and "docs/specs/beta.md" in message
+
+
+def test_the_same_spec_field_twice_is_not_ambiguous():
+    # mirrors the prose rule: a repeated declaration still declares ONE spec
+    text = "spec: docs/specs/beta.md\nspec: docs/specs/beta.md\n"
+    assert paths.spec_from_goal_text(text) == "docs/specs/beta.md"
+
+
+def test_spec_fields_differing_only_in_quoting_are_the_same_declaration():
+    text = "spec: docs/specs/beta.md\nspec: `docs/specs/beta.md`\n"
+    assert paths.spec_from_goal_text(text) == "docs/specs/beta.md"
+
+
+def test_two_distinct_spec_fields_fail_closed_even_outside_docs_specs():
+    # the field is root-agnostic, so the ambiguity check cannot lean on the prose regex
+    text = "spec: spec/alpha.md\nspec: spec/beta.md\n"
+    with pytest.raises(paths.AmbiguousSpecReference) as excinfo:
+        paths.spec_from_goal_text(text)
+    assert "spec/alpha.md" in str(excinfo.value)
+
+
+# The `spec:` field is the ONLY way a repo that does not keep specs under `docs/specs/` can
+# name one at all — the prose fallback hardcodes that root. Constraining the field to the
+# `docs/specs/*.md` shape would close the sole escape hatch, so it is deliberately not.
+
+
+def test_explicit_spec_field_outside_docs_specs_resolves(tmp_path):
+    assert paths.spec_from_goal_text("spec: spec/payments.md\n") == "spec/payments.md"
+    assert (
+        paths.spec_from_goal_text("spec: docs/requirements/payments.md\n")
+        == "docs/requirements/payments.md"
+    )
+
+
+# An `.assertions.md` sibling is the spec's DONE-DEFINITION, not a second spec. Once
+# `freeze._source_candidates` made `<stem>.assertions.md` canonical, that sibling started
+# matching the `docs/specs/*.md` prose regex, so the ordinary goal shape "implement X and keep
+# X's assertions green" read as two candidates and failed closed on a run that used to work.
+# The exclusion is on the FALLBACK scan only — an explicit `spec:` field naming one is the
+# user's business, and a louder kind of mistake.
+
+
+def test_assertions_sibling_is_not_a_second_prose_spec_candidate():
+    text = (
+        "Implement docs/specs/payments.md and keep "
+        "docs/specs/payments.assertions.md green\n"
+    )
+    assert paths.spec_from_goal_text(text) == "docs/specs/payments.md"
+
+
+def test_legacy_dotmd_assertions_sibling_is_not_a_second_prose_candidate():
+    text = (
+        "Implement docs/specs/payments.md and keep "
+        "docs/specs/payments.md.assertions.md green\n"
+    )
+    assert paths.spec_from_goal_text(text) == "docs/specs/payments.md"
+
+
+def test_an_assertions_path_alone_is_still_no_spec():
+    # the goal must name the SPEC; a done-definition on its own declares no subject
+    assert (
+        paths.spec_from_goal_text("keep docs/specs/payments.assertions.md green\n")
+        is None
+    )
+
+
+def test_two_real_specs_still_fail_closed_alongside_an_assertions_sibling():
+    text = (
+        "Port docs/specs/alpha.md into docs/specs/beta.md, keeping "
+        "docs/specs/beta.assertions.md green\n"
+    )
+    with pytest.raises(paths.AmbiguousSpecReference) as excinfo:
+        paths.spec_from_goal_text(text)
+    message = str(excinfo.value)
+    assert "docs/specs/alpha.md" in message and "docs/specs/beta.md" in message
+    assert "assertions.md" not in message  # the sibling is not offered as a candidate
+
+
+def test_an_explicit_spec_field_naming_an_assertions_file_is_honoured():
+    assert (
+        paths.spec_from_goal_text("spec: docs/specs/payments.assertions.md\n")
+        == "docs/specs/payments.assertions.md"
+    )
+
+
+# codex round 2, finding 2: the exclusion above tested the LAZY match, not the path. A path
+# whose name merely CONTAINS `.assertions.md` — `docs/specs/foo.assertions.md.md` — matched
+# only as far as its first `.md`, and the suffix check then discarded that prefix as if it
+# were the sibling. The real path vanished, so a goal that also named another spec silently
+# resolved to the other one instead of failing closed. The candidate must be matched to its
+# token boundary BEFORE the suffix decides anything.
+
+
+def test_a_path_merely_prefixed_by_an_assertions_name_resolves_to_itself():
+    text = "Implement docs/specs/foo.assertions.md.md until done\n"
+    assert paths.spec_from_goal_text(text) == "docs/specs/foo.assertions.md.md"
+
+
+def test_a_path_merely_prefixed_by_an_assertions_name_is_not_silently_dropped():
+    text = "Implement docs/specs/foo.assertions.md.md alongside docs/specs/bar.md\n"
+    with pytest.raises(paths.AmbiguousSpecReference) as excinfo:
+        paths.spec_from_goal_text(text)
+    message = str(excinfo.value)
+    assert "docs/specs/foo.assertions.md.md" in message
+    assert "docs/specs/bar.md" in message
+
+
+def test_a_markdown_linked_spec_resolves_to_the_path_not_the_link_run():
+    # The fence around the fix: matching greedily over an unrestricted character class would
+    # swallow `](` and yield `docs/specs/beta.md](docs/specs/beta.md` as the "spec". Markdown
+    # link punctuation ends a path token.
+    text = "Implement [docs/specs/beta.md](docs/specs/beta.md) until done\n"
+    assert paths.spec_from_goal_text(text) == "docs/specs/beta.md"
+
+
+def test_spec_from_goal_reads_the_goal_file_and_is_none_without_one(tmp_path):
+    assert paths.spec_from_goal(str(tmp_path)) is None
+    _write(tmp_path, ".conductor/goal.md", "spec: docs/specs/beta.md\n")
+    assert paths.spec_from_goal(str(tmp_path)) == "docs/specs/beta.md"
+
+
+def test_gate_slug_from_explicit_spec_field(tmp_path, monkeypatch):
+    monkeypatch.delenv("CONDUCTOR_GATE_SLUG", raising=False)
+    _write(
+        tmp_path,
+        ".conductor/goal.md",
+        "Follow the pattern in docs/specs/alpha.md.\nspec: docs/specs/beta.md\n",
+    )
+    assert paths.gate_slug(str(tmp_path)) == paths.spec_slug("docs/specs/beta.md")
+
+
+def test_ambiguous_goal_fails_closed_rather_than_repointing_the_gate(
+    tmp_path, monkeypatch
+):
+    _clear_env(monkeypatch)
+    _write(
+        tmp_path,
+        ".conductor/goal.md",
+        "Port docs/specs/alpha.md ideas into docs/specs/beta.md until done\n",
+    )
+    assert paths.gate_slug(str(tmp_path)) is None  # never guesses the leftmost
+    g = paths.resolve_gate(str(tmp_path))
+    assert g.fail_closed is not None
+    assert "docs/specs/alpha.md" in g.fail_closed
+    assert "docs/specs/beta.md" in g.fail_closed
+
+
+def test_explicit_spec_field_keeps_an_otherwise_ambiguous_goal_running(
+    tmp_path, monkeypatch
+):
+    _clear_env(monkeypatch)
+    _write(
+        tmp_path,
+        ".conductor/goal.md",
+        "Port docs/specs/alpha.md ideas into docs/specs/beta.md until done\n"
+        "spec: docs/specs/beta.md\n",
+    )
+    g = paths.resolve_gate(str(tmp_path))
+    assert g.fail_closed is None
+    assert paths.gate_slug(str(tmp_path)) == paths.spec_slug("docs/specs/beta.md")
+
+
+# --- configurable spec roots (`$CONDUCTOR_SPEC_ROOTS`) ----------------------------------
+#
+# The prose fallback's root was a literal `docs/specs/`, so a repo that keeps specs anywhere
+# else had NO prose resolution at all — conductor's own specs live under
+# `docs/superpowers/specs/`, and a goal naming one resolved to nothing, which
+# `freeze._assertions_source` then reported as `unidentifiable-assertions-source`.
+#
+# A LIST, not a single root: conductor's own repo holds `docs/specs/2026-07-05-*.md` AND
+# `docs/superpowers/specs/2026-08-10-*.md` at the same time, so "move them all" is not an
+# available answer. Setting the variable REPLACES the default rather than extending it, so a
+# repo can also scope a stale tree OUT — an unremovable `docs/specs` would manufacture
+# `AmbiguousSpecReference` against specs the run does not care about, with no way to fix it.
+
+_DUAL_HOST = "docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md"
+
+
+def test_the_default_spec_root_is_docs_specs(monkeypatch):
+    monkeypatch.delenv("CONDUCTOR_SPEC_ROOTS", raising=False)
+    assert paths.spec_roots() == ("docs/specs",)
+
+
+def test_an_unconfigured_project_still_ignores_prose_outside_docs_specs(monkeypatch):
+    # the DEFAULT is exactly today's behaviour: no existing project changes
+    monkeypatch.delenv("CONDUCTOR_SPEC_ROOTS", raising=False)
+    assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST} until done\n") is None
+    assert paths.spec_from_goal_text("Implement docs/specs/alpha.md\n") == (
+        "docs/specs/alpha.md"
+    )
+
+
+def test_conductors_own_spec_resolves_once_its_root_is_configured(monkeypatch):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS",
+        os.pathsep.join(("docs/specs", "docs/superpowers/specs")),
+    )
+    assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST} until done\n") == (
+        _DUAL_HOST
+    )
+
+
+def test_configuring_extra_roots_keeps_docs_specs_working(monkeypatch):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS",
+        os.pathsep.join(("docs/specs", "docs/superpowers/specs")),
+    )
+    assert paths.spec_from_goal_text("Implement docs/specs/alpha.md\n") == (
+        "docs/specs/alpha.md"
+    )
+
+
+def test_a_third_root_of_the_projects_own_choosing_resolves(monkeypatch):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS",
+        os.pathsep.join(("docs/specs", "docs/superpowers/specs", "spec")),
+    )
+    assert paths.spec_from_goal_text("Implement spec/payments.md\n") == (
+        "spec/payments.md"
+    )
+
+
+def test_ambiguity_still_fires_across_two_configured_roots(monkeypatch):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS",
+        os.pathsep.join(("docs/specs", "docs/superpowers/specs")),
+    )
+    text = f"Port docs/specs/alpha.md ideas into {_DUAL_HOST} until done\n"
+    with pytest.raises(paths.AmbiguousSpecReference) as excinfo:
+        paths.spec_from_goal_text(text)
+    message = str(excinfo.value)
+    assert "docs/specs/alpha.md" in message and _DUAL_HOST in message
+
+
+def test_assertions_siblings_stay_excluded_under_a_configured_root(monkeypatch):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS",
+        os.pathsep.join(("docs/specs", "docs/superpowers/specs")),
+    )
+    sibling = _DUAL_HOST[: -len(".md")] + ".assertions.md"
+    text = f"Implement {_DUAL_HOST} and keep {sibling} green\n"
+    assert paths.spec_from_goal_text(text) == _DUAL_HOST
+
+
+def test_the_explicit_spec_field_stays_root_agnostic(monkeypatch):
+    # the escape hatch predates the configurable roots and must not be narrowed to them
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/specs")
+    assert paths.spec_from_goal_text(f"spec: {_DUAL_HOST}\n") == _DUAL_HOST
+    assert paths.spec_from_goal_text("spec: vendor/requirements/x.md\n") == (
+        "vendor/requirements/x.md"
+    )
+
+
+def test_a_trailing_slash_on_a_configured_root_is_accepted(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/superpowers/specs/")
+    assert paths.spec_roots() == ("docs/superpowers/specs",)
+    assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST}\n") == _DUAL_HOST
+
+
+# --- roots are normalised BEFORE dedup, so equivalent spellings are one root ------------
+#
+# Dedup was `if root not in roots`, a comparison of raw strings, so `docs/specs` and
+# `./docs/specs` both survived as separate roots. They name ONE directory, so the no-goal glob
+# then found the same file through two lexical paths and `freeze` raised
+# `AmbiguousAssertionsSource` listing that single relative path twice — an unresolvable
+# refusal, since there is no second file to delete or reconcile.
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "docs/specs:./docs/specs",  # a `.` prefix on one spelling
+        "docs/specs:docs/specs",  # the exact same spelling twice
+        "docs/specs:docs/specs/",  # trailing slash on one
+        "docs/specs:docs/./specs",  # an interior `.` segment
+        "docs/specs:docs//specs",  # a doubled separator
+    ],
+)
+def test_equivalent_root_spellings_collapse_to_one_root(monkeypatch, value):
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", value)
+    assert paths.spec_roots() == ("docs/specs",)
+
+
+def test_a_normalised_root_still_matches_prose_spelled_plainly(monkeypatch):
+    # normalising must make the odd spelling WORK, not merely deduplicate it away
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "./docs/specs")
+    assert paths.spec_roots() == ("docs/specs",)
+    assert paths.spec_from_goal_text("Implement docs/specs/alpha.md\n") == (
+        "docs/specs/alpha.md"
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/etc/specs",  # absolute: roots are repo-relative and get joined onto repo_root
+        "docs/../../specs",  # traversal out of the repo
+        # normpath folds this to `.` — the `..` check MUST run before normalisation, or
+        # normalising would launder the traversal into a silently-accepted root
+        "docs/specs/../..",
+        os.pathsep,  # explicitly configured, names nothing
+    ],
+)
+def test_an_unusable_spec_roots_value_is_refused_not_silently_defaulted(
+    monkeypatch, value
+):
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", value)
+    with pytest.raises(paths.InvalidSpecRoots, match="CONDUCTOR_SPEC_ROOTS"):
+        paths.spec_roots()
+
+
+# --- the `..` refusal is a SPELLING rule, and says so ----------------------------------
+#
+# `spec_roots` rejects an absolute root and a `..` segment, both LEXICALLY. That is not
+# containment and cannot be: an in-repo symlink (`external -> /tmp/outside`) is a plain
+# relative root with no `..` in it, and every scan follows it straight out of the repo. The
+# refusal used to say the entry "escapes the project root", which promises a guarantee the
+# function does not provide — an operator reading it would reasonably conclude that a root
+# which passes is confined, and stop looking.
+#
+# DELIBERATE: symlinks are followed, not resolved away. `freeze._pick_source` already blesses
+# a symlinked assertions source (equal-realpath is its "committed-symlink bridge"), a monorepo
+# that symlinks a shared specs directory is a legitimate layout, and `spec_roots` is a pure
+# string function called on every prose scan — giving it a `realpath` check would make it do
+# filesystem I/O and answer differently depending on cwd. The variable is owner configuration,
+# not attacker input: anyone who can set it can also set `CONDUCTOR_MERGE_VERIFY`, which the
+# driver executes as shell, so this was never a security boundary.
+
+
+def test_the_dotdot_refusal_states_the_rule_without_promising_containment(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/../../specs")
+    with pytest.raises(paths.InvalidSpecRoots) as excinfo:
+        paths.spec_roots()
+    message = str(excinfo.value)
+    assert "'..'" in message  # names the actual, lexical rule
+    # and does NOT claim it keeps roots inside the repo — a symlinked root defeats that
+    assert "escapes" not in message
+
+
+def test_a_symlinked_root_is_followed_out_of_the_repo_by_design(tmp_path, monkeypatch):
+    # pins the decision above: this must keep working, and must fail loudly if anyone
+    # "hardens" spec_roots by resolving symlinks
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "repo").mkdir()
+    os.symlink(outside, tmp_path / "repo" / "external")
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "external")
+    monkeypatch.chdir(tmp_path / "repo")
+    assert paths.spec_roots() == ("external",)
+    assert paths.spec_from_goal_text("Implement external/legacy.md\n") == (
+        "external/legacy.md"
+    )
+
+
+# --- the parsing rules each carry their own weight ------------------------------------
+#
+# A mutation audit removed each of these individually and the suite stayed green. Every one
+# is a real behaviour whose loss is SILENT: a root that matches nothing produces no error,
+# just a prose fallback that quietly resolves to None, which `freeze` then reports as
+# `unidentifiable-assertions-source` — pointing at the goal, not at the variable.
+
+
+def test_an_empty_variable_falls_back_to_the_default_root(monkeypatch):
+    # `CONDUCTOR_SPEC_ROOTS=` is how a shell spells "unset" when a wrapper always assigns it;
+    # it must default, not join the "set but names no directory" refusal
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "")
+    assert paths.spec_roots() == paths.DEFAULT_SPEC_ROOTS
+    assert paths.spec_from_goal_text("Implement docs/specs/alpha.md\n") == (
+        "docs/specs/alpha.md"
+    )
+
+
+@pytest.mark.parametrize("value", ["~/specs", "~", "~user/specs"])
+def test_a_tilde_root_is_refused_rather_than_joined_onto_the_project(
+    monkeypatch, value
+):
+    # nothing expands `~` here, so the root would be joined literally into
+    # `<repo>/~/specs` — a directory that cannot exist, i.e. a root that silently
+    # matches nothing. Same failure mode as an absolute root, same refusal.
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", value)
+    with pytest.raises(paths.InvalidSpecRoots, match="CONDUCTOR_SPEC_ROOTS"):
+        paths.spec_roots()
+
+
+def test_a_regex_metacharacter_in_a_root_is_matched_literally(monkeypatch):
+    # `.` unescaped is "any character", so this root would match the real `docs/specs/`
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/s.ecs")
+    assert paths.spec_from_goal_text("Implement docs/specs/alpha.md\n") is None
+
+
+def test_a_root_whose_directory_name_really_contains_a_dot_still_resolves(monkeypatch):
+    # escaping must make the literal spelling WORK, not merely make the pattern fail
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/s.ecs")
+    assert paths.spec_from_goal_text("Implement docs/s.ecs/alpha.md\n") == (
+        "docs/s.ecs/alpha.md"
+    )
+
+
+def test_whitespace_around_a_separator_is_trimmed(monkeypatch):
+    # `docs/specs: docs/other` is what a human types; without the trim the second root is
+    # ` docs/other`, which matches no prose and globs no directory
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS", f"docs/specs:{os.pathsep.join((' docs/other ',))}"
+    )
+    assert paths.spec_roots() == ("docs/specs", "docs/other")
+    assert paths.spec_from_goal_text("Implement docs/other/alpha.md\n") == (
+        "docs/other/alpha.md"
+    )
+
+
+def test_the_roots_are_read_per_call_not_frozen_at_import(monkeypatch):
+    monkeypatch.delenv("CONDUCTOR_SPEC_ROOTS", raising=False)
+    assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST}\n") is None
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/superpowers/specs")
+    assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST}\n") == _DUAL_HOST
+
+
+# --- the root must match at a PATH BOUNDARY, not mid-token -----------------------------
+#
+# The alternation had a boundary on its RIGHT (`_SPEC_PATH_TAIL` ends the token at whitespace
+# or markdown punctuation) and none on its LEFT, so a short root matched as a mid-path
+# SUBSTRING: with `CONDUCTOR_SPEC_ROOTS=spec`, `vendor/spec/legacy.md` yielded `spec/legacy.md`
+# — a path that is not what the goal names and, in the repo, not even the same file. Because
+# `freeze._source_candidates` derives the frozen done-definition from whatever this resolver
+# returns, the run would freeze an UNRELATED spec's assertions as its definition of done.
+
+
+def test_a_configured_root_does_not_match_mid_path(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "spec")
+    assert (
+        paths.spec_from_goal_text("Implement vendor/spec/legacy.md until done\n")
+        is None
+    )
+
+
+def test_a_configured_root_does_not_match_as_a_directory_name_suffix(monkeypatch):
+    # the other half of the same hole: `myspec/` ends with the root `spec`
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "spec")
+    assert paths.spec_from_goal_text("Implement myspec/legacy.md until done\n") is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "spec/payments.md is the subject\n",  # start of string
+        "Implement spec/payments.md until done\n",  # after whitespace
+        "Implement `spec/payments.md` until done\n",  # backticks
+        "Implement 'spec/payments.md' until done\n",  # single quotes
+        'Implement "spec/payments.md" until done\n',  # double quotes
+        "Implement (spec/payments.md) until done\n",  # after `(`
+        "Implement [spec/payments.md] until done\n",  # after `[`
+        "Implement <spec/payments.md> until done\n",  # after `<`
+        "See [spec/payments.md](spec/payments.md)\n",  # markdown link, both halves
+        "Implement\tspec/payments.md until done\n",  # after a tab
+    ],
+)
+def test_a_configured_root_still_resolves_at_every_legitimate_delimiter(
+    monkeypatch, text
+):
+    # the left boundary must admit exactly the delimiters `_SPEC_PATH_TAIL` already ends a
+    # token at — anything narrower would break goals that are in the wild today
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "spec")
+    assert paths.spec_from_goal_text(text) == "spec/payments.md"
+
+
 # --- gate_dir: explicit slug forces namespaced; ambient slug falls back until built -------
 
 
