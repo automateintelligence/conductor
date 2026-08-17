@@ -732,3 +732,46 @@ def test_an_unusable_spec_roots_value_makes_the_freeze_cli_refuse(
     err = capsys.readouterr().err
     assert "invalid-spec-roots" in err and "Traceback" not in err
     assert not os.path.exists(baseline)
+
+
+# --- the no-goal glob treats a root as a LITERAL directory, never a pattern -------------
+#
+# The roots are `re.escape`d for the prose scan, so a regex metacharacter in one cannot widen
+# what the goal resolves to. The GLOB below got no such treatment: `glob.glob` honours `*`,
+# `?` and `[...]`, so `CONDUCTOR_SPEC_ROOTS='docs/spec?'` searched `docs/specs/` and froze
+# `docs/specs/wrong.assertions.md` as the run's done-definition — a directory the project
+# never configured. A root names ONE directory; escaping it for globbing is what makes the two
+# scans agree, which `_assertions_source` requires of them.
+
+
+def test_a_glob_metacharacter_in_a_root_matches_no_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/spec?")
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)  # creates docs/specs/, which `docs/spec?` matched
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert "sources" not in doc
+
+
+def test_a_bracket_metacharacter_in_a_root_matches_no_directory(tmp_path, monkeypatch):
+    # `docs/spec[s]` globs to the real `docs/specs`; as a literal it names nothing
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/spec[s]")
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert "sources" not in doc
+
+
+def test_a_root_whose_directory_name_really_contains_a_bracket_still_resolves(
+    tmp_path, monkeypatch
+):
+    # escaping must make the literal spelling WORK, not merely make the pattern fail
+    d = tmp_path / "docs" / "spec[1]"
+    d.mkdir(parents=True)
+    (d / "real.assertions.md").write_text("# the configured root's own source\n")
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/spec[1]")
+    manifest, baseline = _setup(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/spec[1]/real.assertions.md"]

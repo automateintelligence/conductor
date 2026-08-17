@@ -277,12 +277,23 @@ def _assertions_source(repo_root: str) -> tuple[dict, str]:
             f"names no {roots} path (and no `spec:` line); set CONDUCTOR_SPEC_ROOTS "
             "if this project keeps specs elsewhere"
         )
+    # The DIRECTORY half is escaped; only the trailing `*.assertions.md` is a pattern. A root
+    # names ONE directory — the prose scan `re.escape`s it for exactly that reason — but the
+    # glob honoured `*`, `?` and `[...]`, so `CONDUCTOR_SPEC_ROOTS='docs/spec?'` searched
+    # `docs/specs/` and froze an unconfigured directory's `.assertions.md` as this run's
+    # done-definition. The two scans MUST agree on which directories a root names (see this
+    # function's docstring), and escaping is what keeps them agreeing. `repo_root` is inside
+    # the escaped span too: a checkout path containing a bracket (pytest's `tmp_path` can) is
+    # a literal directory for the same reason.
     matches = sorted(
         {
             match
             for root in spec_roots()
             for match in glob.glob(
-                os.path.join(repo_root, *root.split("/"), "*.assertions.md")
+                os.path.join(
+                    glob.escape(os.path.join(repo_root, *root.split("/"))),
+                    "*.assertions.md",
+                )
             )
         }
     )
