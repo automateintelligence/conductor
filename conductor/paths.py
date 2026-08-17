@@ -110,6 +110,24 @@ def _run_branch_slug(root: str) -> str | None:
 # variable existed, so an unconfigured project is bit-for-bit unchanged.
 DEFAULT_SPEC_ROOTS = ("docs/specs",)
 
+# the characters that DELIMIT a path token — whitespace plus the markdown/quote punctuation a
+# path may not contain. One literal, used to build both ends of the pattern so the left boundary
+# and the right terminator cannot drift apart.
+_PATH_DELIMS = r"\s`'\"()\[\]<>"
+
+# the path token's LEFT boundary: the root must BEGIN a path token, so the character before it
+# must be a delimiter or nothing at all (start of string). Spelled as a negative lookbehind over
+# the NEGATED delimiter class — "not preceded by a path character" — because that is the one
+# form that also succeeds at position 0; a positive lookbehind would reject a goal whose very
+# first characters are the root. Fixed-width, so `re` accepts it.
+#
+# Without it the alternation had a boundary on its right and NONE on its left, and a root
+# matched as a mid-path substring: with `CONDUCTOR_SPEC_ROOTS=spec`, the goal
+# `Implement vendor/spec/legacy.md` resolved to `spec/legacy.md` — a different file, whose
+# `.assertions.md` sibling `freeze` would then freeze as this run's done-definition. `myspec/`
+# matched the same way, a root being a mere suffix of a real directory name.
+_SPEC_PATH_HEAD = f"(?<![^{_PATH_DELIMS}])"
+
 # the path token's tail, shared by every root: greedy to the token's LAST `.md`, ending at
 # markdown punctuation as well as at whitespace/quotes. Both halves are load-bearing.
 #
@@ -122,7 +140,7 @@ DEFAULT_SPEC_ROOTS = ("docs/specs",)
 # Greedy over an unrestricted class overshoots the other way: `[docs/specs/a.md](docs/specs/a.md)`
 # has no whitespace between the two, so one match would swallow `](` and yield
 # `docs/specs/a.md](docs/specs/a.md` as the spec. Link/bracket punctuation ends a path token.
-_SPEC_PATH_TAIL = r"/[^\s`'\"()\[\]<>]+\.md"
+_SPEC_PATH_TAIL = rf"/[^{_PATH_DELIMS}]+\.md"
 # the done-definition sibling spec-craft writes next to a spec — never a spec itself
 _ASSERTIONS_SUFFIX = ".assertions.md"
 # an explicit declaration line, e.g. `spec: docs/specs/foo.md`
@@ -199,7 +217,7 @@ def _spec_path_re() -> re.Pattern[str]:
     """The prose-scan pattern for the CURRENT ``spec_roots()``. Built per call for the same
     reason ``spec_roots`` is read per call."""
     alternation = "|".join(re.escape(root) for root in spec_roots())
-    return re.compile(f"(?:{alternation}){_SPEC_PATH_TAIL}")
+    return re.compile(f"{_SPEC_PATH_HEAD}(?:{alternation}){_SPEC_PATH_TAIL}")
 
 
 class AmbiguousSpecReference(ValueError):

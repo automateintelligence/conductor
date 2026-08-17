@@ -430,6 +430,54 @@ def test_the_roots_are_read_per_call_not_frozen_at_import(monkeypatch):
     assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST}\n") == _DUAL_HOST
 
 
+# --- the root must match at a PATH BOUNDARY, not mid-token -----------------------------
+#
+# The alternation had a boundary on its RIGHT (`_SPEC_PATH_TAIL` ends the token at whitespace
+# or markdown punctuation) and none on its LEFT, so a short root matched as a mid-path
+# SUBSTRING: with `CONDUCTOR_SPEC_ROOTS=spec`, `vendor/spec/legacy.md` yielded `spec/legacy.md`
+# — a path that is not what the goal names and, in the repo, not even the same file. Because
+# `freeze._source_candidates` derives the frozen done-definition from whatever this resolver
+# returns, the run would freeze an UNRELATED spec's assertions as its definition of done.
+
+
+def test_a_configured_root_does_not_match_mid_path(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "spec")
+    assert (
+        paths.spec_from_goal_text("Implement vendor/spec/legacy.md until done\n")
+        is None
+    )
+
+
+def test_a_configured_root_does_not_match_as_a_directory_name_suffix(monkeypatch):
+    # the other half of the same hole: `myspec/` ends with the root `spec`
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "spec")
+    assert paths.spec_from_goal_text("Implement myspec/legacy.md until done\n") is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "spec/payments.md is the subject\n",  # start of string
+        "Implement spec/payments.md until done\n",  # after whitespace
+        "Implement `spec/payments.md` until done\n",  # backticks
+        "Implement 'spec/payments.md' until done\n",  # single quotes
+        'Implement "spec/payments.md" until done\n',  # double quotes
+        "Implement (spec/payments.md) until done\n",  # after `(`
+        "Implement [spec/payments.md] until done\n",  # after `[`
+        "Implement <spec/payments.md> until done\n",  # after `<`
+        "See [spec/payments.md](spec/payments.md)\n",  # markdown link, both halves
+        "Implement\tspec/payments.md until done\n",  # after a tab
+    ],
+)
+def test_a_configured_root_still_resolves_at_every_legitimate_delimiter(
+    monkeypatch, text
+):
+    # the left boundary must admit exactly the delimiters `_SPEC_PATH_TAIL` already ends a
+    # token at — anything narrower would break goals that are in the wild today
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "spec")
+    assert paths.spec_from_goal_text(text) == "spec/payments.md"
+
+
 # --- gate_dir: explicit slug forces namespaced; ambient slug falls back until built -------
 
 
