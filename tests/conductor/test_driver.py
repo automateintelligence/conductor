@@ -218,6 +218,20 @@ def test_status_recent_nonzero_fire_end_flips_nonzero_and_is_named(
     assert bad in capsys.readouterr().out
 
 
+def test_status_recent_plugin_list_timeout_flips_nonzero_and_is_named(
+    tmp_path, monkeypatch, capsys
+):
+    """The Codex plugin lookup runs BEFORE `fire-start` and before the flock, so when it is cut
+    off this is the only line the fire ever writes. Status matched exactly two shapes —
+    `driver-unresolved` and a non-zero `fire-end` — so a driver stalling here reported CLEAN,
+    which is the silent-stall class the status command exists to end."""
+    proj = _durable(tmp_path, monkeypatch)
+    bad = f"{_now()} plugin-list-timeout bin=/usr/bin/codex limit=20s rc=124"
+    (proj / ".conductor" / "resume-autodev.log").write_text(f"{bad}\n")
+    assert driver.status(str(proj)) == 1
+    assert bad in capsys.readouterr().out
+
+
 def test_status_clean_recent_log_stays_zero(tmp_path, monkeypatch, capsys):
     proj = _durable(tmp_path, monkeypatch)
     (proj / ".conductor" / "resume-autodev.log").write_text(

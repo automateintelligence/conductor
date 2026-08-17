@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import subprocess
+import textwrap
 
 from conductor.hosts import discovery
 
@@ -31,6 +32,13 @@ CONFIG_DIR_ENV = "CODEX_HOME"
 #: the in-process one and the shell the cron driver runs — because a bound that holds in only
 #: one of them is the unbounded case wherever it does not.
 PLUGIN_LIST_TIMEOUT_S = 20
+
+#: Seconds between the TERM that asks the lookup to stop and the KILL that makes it. A bound
+#: expressed only as a TERM is not a bound: a child that traps or ignores the signal keeps
+#: running and its supervisor keeps waiting, which is exactly what `timeout <n>` with no
+#: `--kill-after` does — probed here, `timeout 1` around a TERM-ignoring process returned 124
+#: only after the child's full three seconds. Both bounded paths below therefore escalate.
+PLUGIN_LIST_KILL_GRACE_S = 5
 
 #: Where an installed plugin's copy lives, under the Codex config root. NOT emitted by
 #: ``codex plugin list --json`` — see ``plugin_roots_from_json`` — so it is derived from three
@@ -237,7 +245,8 @@ class CodexAdapter:
         one. ``python3`` is not a new dependency: ``bin/conductor`` execs it for every
         subcommand, so a machine that cannot run it cannot run conductor.
 
-        The lookup is BOUNDED and stays BEFORE the lock. Bounded because it runs before the
+        The lookup is BOUNDED (``plugin_list_lookup``) and stays BEFORE the lock. Bounded
+        because it runs before the
         first log line and before ``flock``, so a hung CLI is a live fire that has written
         nothing at all and every subsequent tick starts another — the silent-block class this
         driver otherwise exists to close. Before the lock because ``$CONDUCTOR`` is what
@@ -269,23 +278,8 @@ class CodexAdapter:
             "# tick starts another. Expiry gets its own log line — a stall nobody can see is\n"
             "# the failure mode, not the stall itself.\n"
             'if [ ! -x "${CONDUCTOR:-}" ] && [ -x "${CODEX_BIN:-}" ]; then\n'
-            '    CODEX_TIMEOUT="$(command -v timeout || command -v gtimeout || true)"\n'
-            '    if [ -n "$CODEX_TIMEOUT" ]; then\n'
-            f'        CODEX_PLUGIN_JSON="$("$CODEX_TIMEOUT" {PLUGIN_LIST_TIMEOUT_S} '
-            '"$CODEX_BIN" plugin list --json </dev/null 2>/dev/null)"\n'
-            "        CODEX_PLUGIN_RC=$?\n"
-            "    else\n"
-            "        # No coreutils timeout (a bare macOS). Refusing the lookup would break\n"
-            "        # every plugin install on such a machine, so it still runs — but the log\n"
-            "        # says so FIRST, so a stall here is attributable to this line instead of\n"
-            "        # being indistinguishable from a quiet healthy run.\n"
-            '        printf \'%s plugin-list-unbounded bin=%s\\n\' "$(ts)" "$CODEX_BIN" >> "$LOG"\n'
-            '        CODEX_PLUGIN_JSON="$("$CODEX_BIN" plugin list --json </dev/null 2>/dev/null)"\n'
-            "        CODEX_PLUGIN_RC=$?\n"
-            "    fi\n"
-            '    [ "$CODEX_PLUGIN_RC" -ne 124 ] || '
-            "printf '%s plugin-list-timeout bin=%s limit=%ss\\n' "
-            f'"$(ts)" "$CODEX_BIN" {PLUGIN_LIST_TIMEOUT_S} >> "$LOG"\n'
+            + textwrap.indent(self.plugin_list_lookup(), "    ")
+            + "\n"
             '    CODEX_CONDUCTOR_DIR="$(printf \'%s\' "$CODEX_PLUGIN_JSON" '
             f"| python3 -c '{PLUGIN_ROOT_SNIPPET}' conductor 2>/dev/null || true)\"\n"
             '    [ -z "$CODEX_CONDUCTOR_DIR" ] || CONDUCTOR="$CODEX_CONDUCTOR_DIR/bin/conductor"\n'
@@ -299,6 +293,69 @@ class CodexAdapter:
             'CONDUCTOR_SOURCE=""\n'
             '[ ! -x "${CONDUCTOR:-}" ] || '
             'CONDUCTOR_SOURCE="$(cd "$(dirname "$(readlink -f "$CONDUCTOR" 2>/dev/null || printf \'%s\' "$CONDUCTOR")")/.." 2>/dev/null && pwd)"'
+        )
+
+    def plugin_list_lookup(self) -> str:
+        """The BOUNDED ``codex plugin list --json`` call, as a standalone shell fragment.
+
+        Reads ``$CODEX_BIN``, ``$PROJECT``, ``$LOG`` and ``ts()``; sets ``CODEX_PLUGIN_JSON``
+        and ``CODEX_PLUGIN_RC``. Its own method because the branch below — the machine with no
+        ``timeout`` binary — is unreachable from a test that fires the whole driver: the driver
+        re-adds ``/usr/bin:/bin`` to ``PATH`` before resolving anything, so no test PATH can
+        hide coreutils from it. That is precisely how the branch came to be the one that ran
+        with no ceiling at all. Extracted, it can be run under a PATH a test fully controls,
+        verbatim, rather than asserted about as text.
+
+        Two bounds, one ceiling. ``timeout`` gets ``-k``: a bound expressed only as a TERM is
+        not a bound, because a child that traps or ignores the signal keeps running and
+        ``timeout`` keeps waiting for it — probed at ``timeout 1`` around a TERM-ignoring
+        process, which returned 124 only after the child's full three seconds. Without
+        coreutils the SAME bound is built out of the shell's own parts (background, poll to the
+        deadline, TERM, then KILL) rather than left to run forever behind a log line no
+        consumer reads. Refusing the lookup outright was the third option and is the wrong one:
+        it would break every plugin-installed conductor on a bare macOS, which is a working
+        configuration.
+        """
+        return (
+            'CODEX_TIMEOUT="$(command -v timeout || command -v gtimeout || true)"\n'
+            'if [ -n "$CODEX_TIMEOUT" ]; then\n'
+            f'    CODEX_PLUGIN_JSON="$("$CODEX_TIMEOUT" -k {PLUGIN_LIST_KILL_GRACE_S} '
+            f"{PLUGIN_LIST_TIMEOUT_S} "
+            '"$CODEX_BIN" plugin list --json </dev/null 2>/dev/null)"\n'
+            "    CODEX_PLUGIN_RC=$?\n"
+            "else\n"
+            "    # No coreutils timeout (a bare macOS). The same ceiling, out of the shell's own\n"
+            "    # parts. The scratch file sits beside this script in the owner's `.conductor`,\n"
+            "    # never at a predictable name under a world-writable /tmp that another user\n"
+            "    # could pre-symlink and have this write through.\n"
+            '    CODEX_PLUGIN_OUT="$PROJECT/.conductor/plugin-list.$$"\n'
+            '    "$CODEX_BIN" plugin list --json </dev/null >"$CODEX_PLUGIN_OUT" 2>/dev/null &\n'
+            "    CODEX_PLUGIN_PID=$!\n"
+            "    CODEX_PLUGIN_WAITED=0\n"
+            f'    while [ "$CODEX_PLUGIN_WAITED" -lt {PLUGIN_LIST_TIMEOUT_S} ] && '
+            'kill -0 "$CODEX_PLUGIN_PID" 2>/dev/null; do\n'
+            "        sleep 1\n"
+            "        CODEX_PLUGIN_WAITED=$((CODEX_PLUGIN_WAITED + 1))\n"
+            "    done\n"
+            '    if kill -0 "$CODEX_PLUGIN_PID" 2>/dev/null; then\n'
+            '        kill -TERM "$CODEX_PLUGIN_PID" 2>/dev/null || true\n'
+            f"        sleep {PLUGIN_LIST_KILL_GRACE_S}\n"
+            '        kill -KILL "$CODEX_PLUGIN_PID" 2>/dev/null || true\n'
+            '        wait "$CODEX_PLUGIN_PID" 2>/dev/null || true\n'
+            "        CODEX_PLUGIN_RC=124\n"
+            "    else\n"
+            '        wait "$CODEX_PLUGIN_PID"\n'
+            "        CODEX_PLUGIN_RC=$?\n"
+            "    fi\n"
+            '    CODEX_PLUGIN_JSON="$(cat "$CODEX_PLUGIN_OUT" 2>/dev/null || true)"\n'
+            '    rm -f "$CODEX_PLUGIN_OUT"\n'
+            "fi\n"
+            "# 124 is an expiry `timeout` reported; 137 is one it had to escalate to KILL. Both\n"
+            "# are the lookup being cut off, and `driver status` reads this line.\n"
+            'case "$CODEX_PLUGIN_RC" in\n'
+            "    124|137) printf '%s plugin-list-timeout bin=%s limit=%ss rc=%s\\n' "
+            f'"$(ts)" "$CODEX_BIN" {PLUGIN_LIST_TIMEOUT_S} "$CODEX_PLUGIN_RC" >> "$LOG" ;;\n'
+            "esac"
         )
 
     def resume_unresolved_guard(self) -> str:

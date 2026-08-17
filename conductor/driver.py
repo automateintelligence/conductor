@@ -34,6 +34,13 @@ from conductor.hosts import base, runhost
 _RECENT_HOURS_ENV = "CONDUCTOR_DRIVER_RECENT_HOURS"
 _RECENT_HOURS_DEFAULT = 24.0
 _FIRE_END_RE = re.compile(r"fire-end rc=(\d+)")
+#: Log markers the generated driver writes when a fire could not do its job. DECLARED, because
+#: the set is what `status` can see and anything outside it is a stall reported as clean:
+#: `plugin-list-timeout` is written BEFORE `fire-start` and before the flock, so when the Codex
+#: plugin lookup is cut off it is the only line that fire ever writes — and status matching just
+#: two shapes greened exactly that driver. A marker the driver emits and this list omits is a
+#: silent stall by construction, so they are added together.
+_FAILURE_MARKERS = ("driver-unresolved", "plugin-list-timeout")
 # Only this many trailing log lines are considered "the recent tail" — the recency
 # window does the real filtering; this just bounds work on a long-lived log.
 _TAIL_LINES = 500
@@ -145,7 +152,7 @@ def _is_recent(line: str, now: datetime.datetime, hours: float) -> bool:
 
 
 def _recent_failures(lines: list[str]) -> list[str]:
-    """The recent `driver-unresolved` / `fire-end rc=<non-zero>` lines, verbatim."""
+    """The recent `_FAILURE_MARKERS` / `fire-end rc=<non-zero>` lines, verbatim."""
     now = datetime.datetime.now().astimezone()
     hours = _recent_hours()
     failures = []
@@ -153,7 +160,7 @@ def _recent_failures(lines: list[str]) -> list[str]:
         if not line.strip():
             continue
         m = _FIRE_END_RE.search(line)
-        failing = "driver-unresolved" in line or (
+        failing = any(marker in line for marker in _FAILURE_MARKERS) or (
             m is not None and int(m.group(1)) != 0
         )
         if failing and _is_recent(line, now, hours):

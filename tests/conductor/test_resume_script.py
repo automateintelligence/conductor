@@ -1005,9 +1005,19 @@ def test_render_for_a_codex_recorded_run_resolves_and_launches_codex(tmp_path):
     s = rs.render(project, worktree)
     assert 'CODEX_BIN="$(command -v codex || true)"' in s
     assert "command -v claude" not in s
-    fire = [ln for ln in s.splitlines() if ln.strip().startswith('"$CODEX_BIN"')]
-    assert len(fire) == 1, fire
-    assert fire[0].strip().startswith('"$CODEX_BIN" exec --cd "$WORKTREE"')
+    spawns = [
+        ln.strip() for ln in s.splitlines() if ln.strip().startswith('"$CODEX_BIN"')
+    ]
+    # ONE fire. The driver spawns the host exactly twice and the other spawn is the bounded
+    # `plugin list` lookup, which is enumerated here rather than filtered out by shape: a third
+    # `codex` invocation appearing in this script is a fact a reader of this test should have to
+    # look at, not something a `startswith("exec")` filter quietly absorbs.
+    fire = [ln for ln in spawns if " exec " in ln]
+    assert len(fire) == 1, spawns
+    assert [ln for ln in spawns if ln not in fire] == [
+        '"$CODEX_BIN" plugin list --json </dev/null >"$CODEX_PLUGIN_OUT" 2>/dev/null &'
+    ], spawns
+    assert fire[0].startswith('"$CODEX_BIN" exec --cd "$WORKTREE"')
     assert "skills/autodev/SKILL.md" in fire[0]
 
 
@@ -1190,6 +1200,7 @@ def _mk_codex_harness(
     install_conductor_plugin=True,
     on_path=False,
     plugin_list_hangs=False,
+    plugin_list_ignores_term=False,
     conductor_plugin_disabled=False,
     second_marketplace=None,
 ):
@@ -1272,10 +1283,15 @@ def _mk_codex_harness(
     )
     # `plugin_list_hangs` is the CLI that never returns. It sleeps far longer than any bound the
     # driver could reasonably impose, so a driver that does not bound the call is measurably
-    # stuck rather than merely slow.
-    plugin_arm = (
-        "sleep 8; exit 0" if plugin_list_hangs else f"printf '%s' '{listed}'; exit 0"
-    )
+    # stuck rather than merely slow. `plugin_list_ignores_term` is the same hang wearing the one
+    # property that makes a plain `timeout` no bound at all: it declines SIGTERM, so `timeout`
+    # without `--kill-after` reports 124 and then waits for the child anyway.
+    if plugin_list_ignores_term:
+        plugin_arm = "trap '' TERM; sleep 8; exit 0"
+    elif plugin_list_hangs:
+        plugin_arm = "sleep 8; exit 0"
+    else:
+        plugin_arm = f"printf '%s' '{listed}'; exit 0"
     codex = bindir / "codex"
     codex.write_text(
         "#!/bin/sh\n"
@@ -1379,6 +1395,177 @@ def test_a_hanging_plugin_lookup_is_bounded_and_names_itself_in_the_log(
     assert "plugin-list-timeout" in log, log
     assert elapsed < 6, (elapsed, log)
     # ...and it still fails CLOSED: an unresolvable conductor is exit 3, never a fire.
+    assert proc.returncode == 3, (proc.returncode, log)
+    assert not argv_file.exists()
+
+
+def _bin_without(tmp, *hidden):
+    """A PATH directory mirroring the real one MINUS `hidden`.
+
+    The no-`timeout` machine (a bare macOS) is the branch the driver's fallback exists for, and
+    it was declared untestable "because /usr/bin/timeout is always there" — so the only thing
+    holding that branch was a text assertion, and a text assertion cannot notice that the
+    command it names never returns. Mirroring the search path by symlink makes the machine
+    reachable: everything the fragment runs still resolves, and exactly the utilities named here
+    do not.
+    """
+    shadow = tmp / "no-timeout-bin"
+    shadow.mkdir()
+    for d in ("/usr/bin", "/bin"):
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            if name in hidden or (shadow / name).exists():
+                continue
+            try:
+                (shadow / name).symlink_to(os.path.join(d, name))
+            except OSError:
+                pass
+    for name in hidden:
+        assert not (shadow / name).exists()
+    return shadow
+
+
+def _run_plugin_lookup(tmp, *, hide_timeout, plugin_arm):
+    """Run the driver's plugin-lookup fragment VERBATIM under a PATH the test controls.
+
+    The whole driver cannot be used for this: it re-adds `/usr/bin:/bin` to PATH before
+    resolving anything, so no test PATH can hide coreutils from a fired driver. The fragment is
+    the same text the driver embeds — `resume_bin_resolution` indents this and nothing else — so
+    running it directly is the branch, not a paraphrase of it.
+    """
+    project = tmp / "proj"
+    (project / ".conductor").mkdir(parents=True)
+    codex_bin = tmp / "codex"
+    codex_bin.write_text(f"#!/bin/sh\n{plugin_arm}\n")
+    os.chmod(codex_bin, 0o755)
+    script = tmp / "lookup.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\nset -u\n"
+        f"PROJECT={shlex.quote(str(project))}\n"
+        'LOG="$PROJECT/.conductor/resume-autodev.log"\n'
+        "ts() { date -Is 2>/dev/null || date; }\n"
+        f"CODEX_BIN={shlex.quote(str(codex_bin))}\n"
+        + codex_host.CodexAdapter().plugin_list_lookup()
+        + "\nprintf 'RC=%s\\n' \"$CODEX_PLUGIN_RC\"\n"
+        + "printf 'JSON=%s\\n' \"$CODEX_PLUGIN_JSON\"\n"
+    )
+    path = (
+        str(_bin_without(tmp, "timeout", "gtimeout"))
+        if hide_timeout
+        else os.environ.get("PATH", "/usr/bin:/bin")
+    )
+    started = time.monotonic()
+    proc = subprocess.run(
+        ["bash", str(script)],
+        env={"PATH": path, "LANG": os.environ.get("LANG", "C.UTF-8")},
+        cwd=str(tmp),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    elapsed = time.monotonic() - started
+    log_file = project / ".conductor" / "resume-autodev.log"
+    out = dict(
+        ln.split("=", 1)
+        for ln in proc.stdout.splitlines()
+        if ln.startswith(("RC=", "JSON="))
+    )
+    return (
+        proc,
+        out,
+        (log_file.read_text() if log_file.is_file() else ""),
+        elapsed,
+        project,
+    )
+
+
+@pytest.mark.parametrize("hide_timeout", [False, True])
+@pytest.mark.parametrize(
+    "plugin_arm",
+    ["sleep 8", "trap '' TERM; sleep 8"],
+    ids=["hangs", "hangs-and-ignores-term"],
+)
+def test_the_plugin_lookup_is_bounded_on_every_machine(
+    tmp_path, monkeypatch, hide_timeout, plugin_arm
+):
+    """One ceiling, four machines. `timeout <n>` with no `--kill-after` is not a bound at all
+    against a CLI that declines TERM (probed: `timeout 1` around such a process returned 124
+    after the child's full three seconds), and a machine with no `timeout` binary ran the lookup
+    with no ceiling whatsoever — before `fire-start`, before the flock, so every twenty-minute
+    tick stacked another live process behind no log line any consumer reads."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    if not hide_timeout and not _which("timeout"):
+        pytest.skip("coreutils timeout not available")
+    monkeypatch.setattr(codex_host, "PLUGIN_LIST_TIMEOUT_S", 1)
+    monkeypatch.setattr(codex_host, "PLUGIN_LIST_KILL_GRACE_S", 1)
+
+    proc, out, log, elapsed, project = _run_plugin_lookup(
+        tmp_path, hide_timeout=hide_timeout, plugin_arm=plugin_arm
+    )
+
+    # 1s limit + 1s kill grace, generously bounded — never the child's own 8.
+    assert elapsed < 6, (elapsed, proc.stderr, log)
+    # 124 is an expiry reported by `timeout`; 137 is one it had to escalate to KILL.
+    assert out["RC"] in ("124", "137"), (out, log)
+    assert "plugin-list-timeout" in log, log
+    assert out["JSON"] == ""
+    # ...and no scratch file is left behind in the owner's `.conductor`.
+    assert [
+        p.name for p in (project / ".conductor").iterdir() if "plugin-list." in p.name
+    ] == []
+
+
+@pytest.mark.parametrize("hide_timeout", [False, True])
+def test_a_healthy_plugin_lookup_answers_the_same_on_every_machine(
+    tmp_path, hide_timeout
+):
+    """Bounding the call must not break the call: refusing the lookup where coreutils is absent
+    would break every plugin-installed conductor on a bare macOS, which is a working
+    configuration. Both bounded paths have to return the CLI's own answer, unchanged."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    if not hide_timeout and not _which("timeout"):
+        pytest.skip("coreutils timeout not available")
+
+    proc, out, log, _elapsed, project = _run_plugin_lookup(
+        tmp_path,
+        hide_timeout=hide_timeout,
+        plugin_arm="printf '%s' '{\"installed\":[]}'",
+    )
+
+    assert out["RC"] == "0", (out, proc.stderr, log)
+    assert out["JSON"] == '{"installed":[]}'
+    assert "plugin-list-timeout" not in log
+    assert [
+        p.name for p in (project / ".conductor").iterdir() if "plugin-list." in p.name
+    ] == []
+
+
+def test_a_term_ignoring_plugin_lookup_is_still_bounded(tmp_path, monkeypatch):
+    """`timeout N` without `--kill-after` is not a bound: it signals at N and then WAITS for a
+    child that declines the signal. Probed on this machine, `timeout 1` around a process that
+    traps TERM returned 124 only after the child's full three seconds — so the driver's ceiling
+    was whatever the hung CLI felt like, and every twenty-minute tick could start another."""
+    if not _which("bash") or not _which("timeout"):
+        pytest.skip("bash + coreutils timeout not available")
+    monkeypatch.setattr(codex_host, "PLUGIN_LIST_TIMEOUT_S", 1)
+    monkeypatch.setattr(codex_host, "PLUGIN_LIST_KILL_GRACE_S", 1)
+    base = tmp_path / "term-ignoring"
+    base.mkdir()
+    project, driver, home, argv_file, _c = _mk_codex_harness(
+        base, plugin_list_ignores_term=True
+    )
+
+    started = time.monotonic()
+    proc = _fire_driver(driver, home)
+    elapsed = time.monotonic() - started
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert "plugin-list-timeout" in log, log
+    # 1s limit + 1s kill grace, generously bounded — never the child's own 8.
+    assert elapsed < 6, (elapsed, log)
     assert proc.returncode == 3, (proc.returncode, log)
     assert not argv_file.exists()
 

@@ -170,21 +170,24 @@ def test_codex_never_derives_its_skill_root_from_the_current_directory():
 
 
 def test_the_plugin_lookup_is_bounded_by_a_real_timeout_command():
-    """The bound has to be the one constant both callers use, and it has to survive a host
-    whose `timeout` is `gtimeout` or absent. The absent case cannot be reached from a test with
-    a real PATH — /usr/bin/timeout is always there — so it is checked in the text, which is
-    where the branch lives."""
+    """The bound has to be the one constant both callers use, it has to escalate past a CLI that
+    declines TERM, and it has to survive a host whose `timeout` is `gtimeout` or absent. What
+    the fragment DOES on each of those machines is exercised by running it —
+    `test_the_plugin_lookup_is_bounded_on_every_machine` — because a text assertion cannot
+    notice that the command it names never returns; this pins the two constants into it."""
     from conductor.hosts import codex
 
     text = codex.CodexAdapter().resume_bin_resolution()
     assert (
-        f'"$CODEX_TIMEOUT" {codex.PLUGIN_LIST_TIMEOUT_S} "$CODEX_BIN" plugin list'
-        in text
+        f'"$CODEX_TIMEOUT" -k {codex.PLUGIN_LIST_KILL_GRACE_S} '
+        f'{codex.PLUGIN_LIST_TIMEOUT_S} "$CODEX_BIN" plugin list' in text
     )
     assert "command -v timeout || command -v gtimeout" in text
-    # ...and with no timeout binary at all it still runs, but says so BEFORE it might hang.
-    unbounded = text.index("plugin-list-unbounded")
-    assert unbounded < text.index('CODEX_PLUGIN_JSON="$("$CODEX_BIN" plugin list')
+    # No branch runs the CLI without a ceiling: the fallback bounds it out of the shell's own
+    # parts instead of announcing that it is about to hang.
+    assert "plugin-list-unbounded" not in text
+    assert 'CODEX_PLUGIN_JSON="$("$CODEX_BIN" plugin list' not in text
+    assert text.index("$CODEX_PLUGIN_PID") < text.index("kill -KILL")
 
 
 def test_the_plugin_lookup_snippet_is_self_contained_and_shell_quotable():
