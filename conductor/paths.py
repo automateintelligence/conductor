@@ -107,6 +107,11 @@ def _run_branch_slug(root: str) -> str | None:
 
 _SPEC_PATH_RE = re.compile(r"docs/specs/[^\s`'\"]+?\.md")
 # an explicit declaration line, e.g. `spec: docs/specs/foo.md`
+#
+# The field's value is deliberately NOT constrained to the `docs/specs/*.md` shape. The prose
+# fallback above hardcodes that root, so this field is the ONLY way a project that keeps specs
+# under `spec/` or `docs/requirements/` can name one at all. Narrowing it to match the fallback
+# would close the sole escape hatch — do not "fix" it back.
 _SPEC_FIELD_RE = re.compile(
     r"^[ \t]*spec:[ \t]*(\S+)[ \t]*$", re.IGNORECASE | re.MULTILINE
 )
@@ -125,11 +130,27 @@ def spec_from_goal_text(text: str) -> str | None:
     An explicit ``spec: <path>`` line wins outright — that is how a goal whose prose mentions
     several specs states which one is the subject. Otherwise fall back to the historical
     ``docs/specs/<name>.md`` prose scan, which stays exact for the one-spec goals already in
-    the wild. Two or more DISTINCT prose paths with no ``spec:`` line raise
-    ``AmbiguousSpecReference``; the same path repeated is not ambiguous."""
-    field = _SPEC_FIELD_RE.search(text)
-    if field:
-        return field.group(1).strip("`'\"<>")
+    the wild. Two or more DISTINCT paths with no single declaration raise
+    ``AmbiguousSpecReference``; the same path repeated is not ambiguous.
+
+    EVERY ``spec:`` field is collected, not just the first. Taking the leftmost here would
+    re-create, inside the explicit field, the exact leftmost-wins defect this resolver exists
+    to eliminate — two ``spec:`` lines are two declarations and the goal states no single
+    subject, so they fail closed on the same rule as two prose paths."""
+    fields: list[str] = []
+    for hit in _SPEC_FIELD_RE.finditer(text):
+        value = hit.group(1).strip("`'\"<>")
+        if value and value not in fields:
+            fields.append(value)
+    if len(fields) > 1:
+        raise AmbiguousSpecReference(
+            "ambiguous-spec-reference: .conductor/goal.md declares "
+            f"{len(fields)} different `spec:` lines ({', '.join(fields)}); "
+            "leave exactly one so the run's gate and frozen done-definition bind to the "
+            "spec you chose"
+        )
+    if fields:
+        return fields[0]
     found: list[str] = []
     for hit in _SPEC_PATH_RE.finditer(text):
         if hit.group(0) not in found:
