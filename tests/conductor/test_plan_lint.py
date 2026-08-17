@@ -231,6 +231,92 @@ def test_conductors_own_superpowers_plans_carry_no_marker_finding():
         assert [r for r in plan_lint.lint(text) if r.startswith(_MARKER)] == [], name
 
 
+# --- fenced code is not plan content (codex production review, finding 5) ---------------
+# The marker check is a HARD failure, and a plan that documents the rejected shape by
+# showing it — the obvious way to write "do not do this" — hard-failed on its own example.
+# `_TASK_ANY`/`_TASK` are fence-blind and stay that way (a column-0 `- [ ]` inside a fence
+# really does become a sub-issue today); matching an existing SILENT misparse does not
+# justify a new BLOCKING false positive, so only the marker check learns fences here.
+
+
+def _fenced(open_fence: str, close_fence: str, body: str = "- [~] documented example"):
+    """GOOD_PLAN with a fenced example appended to its last phase (Phase 2)."""
+    return (
+        f"{GOOD_PLAN}\nReviewers must reject this shape:\n\n"
+        f"{open_fence}\n{body}\n{close_fence}\n"
+    )
+
+
+def test_odd_marker_inside_a_backtick_fence_is_not_flagged():
+    assert plan_lint.lint(_fenced("```", "```")) == []
+
+
+@pytest.mark.parametrize("info", ["text", "markdown", "md title=example"])
+def test_fence_info_string_does_not_defeat_the_fence(info):
+    assert plan_lint.lint(_fenced(f"```{info}", "```")) == [], info
+
+
+def test_odd_marker_inside_a_tilde_fence_is_not_flagged():
+    assert plan_lint.lint(_fenced("~~~text", "~~~")) == []
+
+
+def test_a_backtick_line_does_not_close_a_tilde_fence():
+    # Different fence chars are independent; a plan showing a ``` fence inside a ~~~ one
+    # must not have its example spill back into plan content halfway through.
+    text = _fenced("~~~text", "~~~", body="```\n- [~] documented example\n```")
+    assert plan_lint.lint(text) == []
+
+
+def test_a_shorter_run_does_not_close_a_longer_fence():
+    # The reason the length rule exists: documenting a ``` fence needs a ```` wrapper.
+    text = _fenced("````text", "````", body="```text\n- [~] documented example\n```")
+    assert plan_lint.lint(text) == []
+
+
+def test_odd_marker_outside_the_fence_is_still_flagged_in_the_same_phase():
+    # The check must survive the fix: fencing one example must not blind the phase.
+    text = _fenced("```text", "```").replace(
+        "- [ ] Implement report", "- [ ] Implement report\n- [?] real dropped task"
+    )
+    assert plan_lint.lint(text) == [
+        f"{_MARKER}Phase 2 — Reporting (A8):- [?] real dropped task"
+    ]
+
+
+def test_a_real_task_outside_a_fence_still_parses():
+    text = _fenced("```text", "```")
+    assert plan_lint.lint(text) == []
+    # ...and it is the UNFENCED task doing that work, not the fenced line.
+    stripped = text.replace("- [ ] Implement report\n", "")
+    assert "phase-no-tasks:Phase 2 — Reporting (A8)" in plan_lint.lint(stripped)
+
+
+def test_an_unterminated_fence_runs_to_the_end_of_its_phase():
+    # CommonMark closes an unclosed fence at the end of its container, and this check's
+    # whole premise is that a false hard-fail costs more than a missed finding. Bounded to
+    # the phase because every marker scan is per-section.
+    text = GOOD_PLAN + "\n```text\n- [~] documented example\n"
+    assert plan_lint.lint(text) == []
+
+
+def test_an_unterminated_fence_does_not_leak_into_the_next_phase():
+    text = GOOD_PLAN.replace(
+        "- [ ] Implement scoring",
+        "- [ ] Implement scoring\n\n```text\n- [~] documented example",
+    ).replace(
+        "- [ ] Implement report", "- [ ] Implement report\n- [~] real dropped task"
+    )
+    assert plan_lint.lint(text) == [
+        f"{_MARKER}Phase 2 — Reporting (A8):- [~] real dropped task"
+    ]
+
+
+def test_fenced_marker_does_not_fail_the_cli(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text(_fenced("```text", "```"))
+    assert plan_lint.main([str(plan)]) == 0
+
+
 # --- **ADRs:** pointer line (0.9.0) ----------------------------------------------------
 # Live finding 2026-08-01: two architectural decisions existed ONLY in ADRs, so nothing
 # carried them to a worker resuming a later phase, which could undo either while the
