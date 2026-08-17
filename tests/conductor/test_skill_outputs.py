@@ -348,6 +348,13 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             "conductor ledger align <plan.md> --apply",
             "conductor ledger convert <plan.md>",
             "never guess",
+            # align's two newest buckets. Reporting them and then running `convert` anyway
+            # is worse than not reporting them: the outcome is a DUPLICATE phase issue.
+            "gateless_phases",
+            "markerless_issues",
+            "do not run `convert`",
+            "rename the issue to the phase heading exactly",
+            "duplicate phase issue",
         ],
         "4-status-truth": [
             "--from-gate",
@@ -566,6 +573,23 @@ def test_issue_syncs_cli_path_note_resolves_on_a_host_without_a_plugin_root_vari
     note = raw[raw.index("**conductor cli path:**") :].split("\n\n", 1)[0]
     assert "the directory this `skill.md` lives in" in note
     assert "bin/conductor" in note
+
+
+def test_prepare_gates_gateless_markerless_pairing_before_convert():
+    """codex production review, finding 3.
+
+    `align` gained `gateless_phases` + `markerless_issues`, `ledger align` exits nonzero
+    only for ambiguity, and step 3 ran `convert` regardless. `generate` resolves a phase
+    issue by EXACT title (`ledger/sync.py:116`), so a gateless `Phase 3 — Glue` whose
+    existing issue is titled `Glue work` is missed and a SECOND phase issue is created
+    (`ledger/sync.py:132`). Presence alone is not the contract — a resolution step printed
+    AFTER the convert command is one a worker reading top to bottom has already passed."""
+    step = _regions("skills/prepare/SKILL.md")["3-ledger-alignment"]
+    for needle in ("gateless_phases", "markerless_issues", "do not run `convert`"):
+        assert needle in step, needle
+    assert step.index("do not run `convert`") < step.index(
+        "conductor ledger convert <plan.md>"
+    ), "the pairing gate must be stated BEFORE the convert command it gates"
 
 
 def test_adr_backfill_lives_in_prepares_plan_evaluation_step():
