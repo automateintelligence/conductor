@@ -257,3 +257,92 @@ def test_duplicate_plan_assertion_sets_fail_closed():
     # listing it in unmatched_issues would mislead follow-on automation.
     assert report["unmatched_issues"] == []
     g.update_issue_title.assert_not_called()
+
+
+# --- codex production review round 2, finding 1 -----------------------------------------
+#
+# The prepare PAIRING GATE demanded `gateless_phases` AND `markerless_issues` be empty before
+# `convert`. Neither can be: `gateless_phases` lists every `gate: none` phase by design, and
+# `markerless_issues` lists every issue without assertion tokens — which is every task
+# sub-issue, since `sync.generate` creates them with `body=""`. Renaming an issue to the phase
+# heading exactly, the resolution the skill asks for, left both buckets unchanged, so the
+# precondition could not be reached by doing what it said. A worker either stops forever or
+# violates the gate.
+#
+# What the gate actually needs to assert is the thing that produces the harm: whether
+# `sync.generate`'s EXACT-title lookup will find an existing issue for this phase, or create a
+# duplicate. align now answers that question per gateless phase — the same way convert asks it
+# — and the gate reads the answer.
+
+
+def test_a_gateless_phase_paired_by_exact_title_is_resolved():
+    # THE achievability test. Do what the skill says (rename the issue to the heading, character
+    # for character) and the gate's bucket empties, WITHOUT markerless_issues emptying — which
+    # it never can.
+    g = _gh(
+        [{"number": 1, "title": "W"}],
+        {
+            1: [
+                {"number": 10, "title": "x (A3, A4)", "body": ""},
+                {"number": 11, "title": "y (A8)", "body": ""},
+                {"number": 42, "title": "Phase 3 — Glue — OPTIONAL", "body": ""},
+                {"number": 43, "title": "three", "body": ""},  # a task sub-issue
+            ]
+        },
+    )
+    report = align.align("o/r", _plan(), g)
+    assert report["gateless_unpaired"] == []
+    assert report["gateless_pairs"] == [
+        {"title": "Phase 3 — Glue — OPTIONAL", "issue": 42}
+    ]
+    assert report["ambiguous_phases"] == {}
+    # the gate is satisfiable precisely because it no longer waits on this bucket
+    assert [i["number"] for i in report["markerless_issues"]] == [42, 43]
+    # the informational bucket still lists every gateless phase
+    assert report["gateless_phases"] == ["Phase 3 — Glue — OPTIONAL"]
+
+
+def test_a_gateless_phase_with_no_exact_title_issue_is_unpaired():
+    g = _gh(
+        [{"number": 1, "title": "W"}],
+        {
+            1: [
+                {"number": 10, "title": "x (A3, A4)", "body": ""},
+                {"number": 42, "title": "Phase 3 - glue (optional)", "body": ""},
+            ]
+        },
+    )
+    report = align.align("o/r", _plan(), g)
+    # a paraphrase is not a pairing — convert would create a second phase issue
+    assert report["gateless_unpaired"] == ["Phase 3 — Glue — OPTIONAL"]
+    assert report["gateless_pairs"] == []
+
+
+def test_two_issues_carrying_the_phase_heading_are_ambiguous_not_paired():
+    # convert would reuse one of them and leave the other; which one is not align's to guess,
+    # and `ledger align` exits nonzero on ambiguity, so the owner sees it.
+    g = _gh(
+        [{"number": 1, "title": "W"}],
+        {
+            1: [
+                {"number": 42, "title": "Phase 3 — Glue — OPTIONAL", "body": ""},
+                {"number": 44, "title": "Phase 3 — Glue — OPTIONAL", "body": ""},
+            ]
+        },
+    )
+    report = align.align("o/r", _plan(), g)
+    assert report["ambiguous_phases"]["Phase 3 — Glue — OPTIONAL"] == [42, 44]
+    assert report["gateless_pairs"] == []
+    assert report["gateless_unpaired"] == []  # not a decision the owner can take yet
+
+
+def test_pairing_a_gateless_phase_renames_nothing():
+    # align's rename leg is for token-set matches. A gateless pair is recognised BY the title
+    # already being exact, so there is nothing to rename — and align must not invent one.
+    g = _gh(
+        [{"number": 1, "title": "W"}],
+        {1: [{"number": 42, "title": "Phase 3 — Glue — OPTIONAL", "body": ""}]},
+    )
+    report = align.align("o/r", _plan(), g, apply=True)
+    assert [m["issue"] for m in report["matches"]] == []
+    g.update_issue_title.assert_not_called()
