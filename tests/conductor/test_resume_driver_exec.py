@@ -50,21 +50,38 @@ _needs_real_flock = pytest.mark.skipif(
 _DEADLINE = 20.0
 _POLL = 0.02
 
+# Seconds any wait INSIDE a spawned process (fake bins, decoys) may block for before giving up
+# on its marker. Comfortably above _DEADLINE so it never truncates a test that is still
+# running, and finite so a pytest killed with SIGKILL — which runs no teardown at all — cannot
+# strand a process forever. The SIGKILL test shortens it to make the expiry observable.
+_WAIT_BOUND_VAR = "FAKE_WAIT_SECONDS"
+_WAIT_BOUND_DEFAULT = "30"
+
 # The fake worker writes one line per invocation here; the driver's own stdout goes to $LOG.
 #
 # FAKE_WORKER_LEAK models what an autodev phase legitimately does: leave a DETACHED
 # descendant running (a dev server, a docker helper, anything nohup'd) after the phase
 # itself returns. Every non-close-on-exec descriptor the driver held is inherited straight
 # through `worker -> setsid -> grandchild`, so this is the shape that can strand the lock.
+# Every wait here carries its OWN deadline (FAKE_WAIT_SECONDS). Teardown reaps these normally,
+# but a pytest killed with SIGKILL runs no teardown whatsoever, and an unbounded
+# `while [ ! -f marker ]` in a detached session then has nothing left in the world able to stop
+# it. The deadline is the only guard that outlives the process that would have done the killing.
 _FAKE_CLAUDE = """#!/usr/bin/env bash
 printf 'WORKER-FIRED cwd=%s args=%s\\n' "$PWD" "$*" >> "$FAKE_CALLS"
 if [ -n "${FAKE_WORKER_LEAK:-}" ]; then
     setsid bash -c 'echo $$ > "$FAKE_WORKER_LEAK.pid"
-        while [ ! -f "$FAKE_WORKER_LEAK" ]; do sleep 0.05; done' </dev/null >/dev/null 2>&1 &
+        deadline=$(( $(date +%s) + ${FAKE_WAIT_SECONDS:-30} ))
+        while [ ! -f "$FAKE_WORKER_LEAK" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+            sleep 0.05
+        done' </dev/null >/dev/null 2>&1 &
 fi
 if [ -n "${FAKE_WORKER_HOLD:-}" ]; then
     touch "$FAKE_WORKER_STARTED"
-    while [ ! -f "$FAKE_WORKER_HOLD" ]; do sleep 0.02; done
+    deadline=$(( $(date +%s) + ${FAKE_WAIT_SECONDS:-30} ))
+    while [ ! -f "$FAKE_WORKER_HOLD" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+        sleep 0.02
+    done
 fi
 exit "${FAKE_WORKER_RC:-0}"
 """
@@ -109,6 +126,13 @@ def _wait_for_cwd(pid: int, want: Path) -> None:
     raise AssertionError(f"decoy pid {pid} never held cwd {want}")
 
 
+# Env vars whose value names the release marker for a DETACHED descendant one of the fake bins
+# will spawn in a session of its own. `<value>.pid` is where that descendant writes its own pid
+# as its first action — the only handle anything outside that new session can ever have on it,
+# which is why the rig registers the path at SPAWN time rather than when a test adopts it.
+_LEAK_VARS = ("FAKE_WORKER_LEAK",)
+
+
 @dataclass
 class Rig:
     """One rendered driver installed in a real temp project, with fake bins on PATH."""
@@ -121,12 +145,16 @@ class Rig:
     home: Path
     spawned: list[subprocess.Popen] = field(default_factory=list)
     adopted: list[int] = field(default_factory=list)
+    leaks: list[Path] = field(default_factory=list)
 
     def env(self, **extra: str) -> dict[str, str]:
         return {
             "HOME": str(self.home),
             "PATH": "/usr/bin:/bin",
             "FAKE_CALLS": str(self.calls),
+            # Forwarded, not invented here: the fake bins carry their own default, and the
+            # SIGKILL test shortens it so the self-expiry is observable in seconds.
+            _WAIT_BOUND_VAR: os.environ.get(_WAIT_BOUND_VAR, _WAIT_BOUND_DEFAULT),
             **extra,
         }
 
@@ -148,6 +176,14 @@ class Rig:
     def start(
         self, _stream: int = subprocess.DEVNULL, **extra: str
     ) -> subprocess.Popen:
+        # Register any detached descendant's pidfile BEFORE the fire that spawns it exists, so
+        # teardown can reach that process from the moment it has a pid. `adopt_pidfile()` used
+        # to be the ONLY registration point, which put every assertion between `run()` and the
+        # adoption inside a window where the descendant belonged to no group `cleanup()` could
+        # reach: an ordinary test failure there stranded a live process past the end of pytest.
+        for var in _LEAK_VARS:
+            if extra.get(var):
+                self.leaks.append(Path(f"{extra[var]}.pid"))
         proc = subprocess.Popen(
             [str(self.script)],
             env=self.env(**extra),
@@ -170,10 +206,18 @@ class Rig:
             [
                 "bash",
                 "-c",
+                # Deadline-bounded for the same reason as the fake worker's waits: a decoy in
+                # its own session outlives a SIGKILLed pytest, which runs no teardown.
                 f"# {tag} claude tool shell\ntouch {ready!s}\n"
-                f"while [ ! -f {hold!s} ]; do sleep 0.02; done",
+                f"deadline=$(( $(date +%s) + ${{FAKE_WAIT_SECONDS:-30}} ))\n"
+                f'while [ ! -f {hold!s} ] && [ "$(date +%s)" -lt "$deadline" ]; do\n'
+                f"    sleep 0.02\ndone",
             ],
             cwd=str(cwd),
+            env={
+                **os.environ,
+                _WAIT_BOUND_VAR: os.environ.get(_WAIT_BOUND_VAR, _WAIT_BOUND_DEFAULT),
+            },
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -213,7 +257,17 @@ class Rig:
 
     def cleanup(self) -> None:
         """Tear down by GROUP, and reach everything — including a rig whose test failed before
-        writing its release marker, which is the case that used to leak."""
+        writing its release marker, or before adopting a descendant that detached into its own
+        session. Those are the two cases that used to leak."""
+        for pidfile in self.leaks:
+            # Resolve the pid HERE rather than trusting `adopted`: teardown must not depend on
+            # the test having got as far as `adopt_pidfile()`. The descendant writes its pid as
+            # its first action, so this bounded grace only ever covers a fork+exec.
+            deadline = time.monotonic() + 2.0
+            while not pidfile.exists() and time.monotonic() < deadline:
+                time.sleep(_POLL)
+            with contextlib.suppress(OSError, ValueError):
+                self.adopted.append(int(pidfile.read_text().strip()))
         for pid in self.adopted:
             _killpg(pid)
         for proc in self.spawned:
@@ -491,6 +545,8 @@ def test_a_fire_reaches_the_worker_and_logs_a_distinguishable_outcome(make_rig):
 # the check runs the failure for real, in a child pytest, and looks at /proc afterwards.
 
 _ORPHAN_CASE = """
+from pathlib import Path
+
 import pytest
 from tests.conductor.test_resume_driver_exec import Rig, make_rig, _wait_for  # noqa: F401
 
@@ -503,23 +559,77 @@ def test_fails_while_a_fire_holds_the_lock(make_rig):
     _wait_for(started, "the fire to reach the worker")
     # The failure a real assertion would raise here — the release marker is never written.
     assert False, "deliberate failure with a fire in flight"
+
+
+def test_fails_inside_the_adoption_window(make_rig):
+    # THE ADOPTION WINDOW. The phase's detached descendant is alive in a session of its own,
+    # but the test has not reached `adopt_pidfile()` yet, so nothing the rig tracks is in its
+    # process group and no group `cleanup()` can reach it. An ordinary assertion failing in
+    # that window is the common case, not an exotic one: every assertion between `run()` and
+    # the adoption sits inside it.
+    rig = make_rig("plain-host-adopt")
+    leak = rig.project / "leaked-descendant"
+    rig.run(FAKE_WORKER_LEAK=str(leak))
+    _wait_for(Path(f"{leak}.pid"), "the phase's detached descendant")
+    assert False, "deliberate failure inside the adoption window"
 """
 
 
 def _procs_under(needle: str) -> list[str]:
-    """Live processes whose argv mentions `needle` — the child run's basetemp, so nothing
-    belonging to this pytest or the developer's machine can match."""
+    """Live processes linked to the child run by argv, ENVIRONMENT, or cwd — the needle is
+    that run's basetemp, so nothing belonging to this pytest or the developer's machine can
+    match on any of the three.
+
+    argv alone is not enough, and the process that matters is exactly the one it misses. The
+    fake worker's detached descendant is `setsid bash -c '<script referencing
+    "$FAKE_WORKER_LEAK"'>`: the variable is expanded by THAT shell at run time, so its argv
+    holds the literal `$FAKE_WORKER_LEAK` and no path at all. Its only links to the run are
+    the environment it inherited and the worktree it sits in."""
     found = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
+        via = []
+        for what in ("cmdline", "environ"):
+            try:
+                blob = (
+                    (entry / what)
+                    .read_bytes()
+                    .replace(b"\0", b" ")
+                    .decode("utf-8", "replace")
+                )
+            except OSError:
+                continue
+            if needle in blob:
+                via.append(what)
         try:
-            argv = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode()
-        except (OSError, UnicodeDecodeError):
+            if needle in os.readlink(entry / "cwd"):
+                via.append("cwd")
+        except OSError:
+            pass
+        if not via:
             continue
-        if needle in argv:
-            found.append(f"{entry.name}: {argv.strip()}")
+        try:
+            argv = (
+                (entry / "cmdline")
+                .read_bytes()
+                .replace(b"\0", b" ")
+                .decode("utf-8", "replace")
+            )
+        except OSError:
+            argv = "<gone>"
+        found.append(f"{entry.name} (via {'+'.join(via)}): {argv.strip()}")
     return found
+
+
+def _reap(needle: str) -> None:
+    """Last-resort kill of anything `_procs_under` can still see — by GROUP first, since a
+    survivor is typically a session leader with children of its own."""
+    for line in _procs_under(needle):
+        with contextlib.suppress(OSError, ValueError):
+            pid = int(line.split(" ", 1)[0])
+            _killpg(pid)
+            os.kill(pid, signal.SIGKILL)
 
 
 @_needs_real_flock
@@ -549,7 +659,8 @@ def test_a_failing_test_leaves_no_process_behind(tmp_path):
         timeout=120,
     )
     assert child.returncode != 0, "the child run was supposed to FAIL"
-    assert "deliberate failure" in child.stdout, child.stdout
+    assert "deliberate failure with a fire in flight" in child.stdout, child.stdout
+    assert "deliberate failure inside the adoption window" in child.stdout, child.stdout
 
     try:
         # A short grace period only: teardown already ran before the child exited, so
@@ -561,9 +672,102 @@ def test_a_failing_test_leaves_no_process_behind(tmp_path):
             survivors = _procs_under(str(basetemp))
         assert not survivors, "orphans survived a failing run:\n" + "\n".join(survivors)
     finally:
-        for line in _procs_under(str(basetemp)):
-            with contextlib.suppress(OSError, ValueError):
-                os.kill(int(line.split(":", 1)[0]), signal.SIGKILL)
+        _reap(str(basetemp))
+
+
+# ---- 6b. the case teardown CANNOT cover: pytest itself killed with SIGKILL ----
+#
+# SIGKILL runs nothing on the way out — no fixture finalizer, no atexit, no handler. The rig
+# therefore cannot reap anything, and no amount of teardown engineering changes that. The only
+# guard that survives is one INSIDE each spawned process: every blocking wait in the fake bins
+# and the decoys carries its own deadline, so a run killed outright leaks nothing PERMANENTLY.
+# That is deliberately a weaker guarantee than teardown gives — processes DO outlive the run,
+# for up to the bound — and it is the strongest one available.
+
+_SIGKILL_CASE = """
+import os
+import time
+from pathlib import Path
+
+import pytest
+from tests.conductor.test_resume_driver_exec import Rig, make_rig, _wait_for  # noqa: F401
+
+
+def test_leaves_every_blocking_shape_alive_then_hangs(make_rig):
+    rig = make_rig("plain-host-sigkill")
+    rig.decoy(rig.worktree, "sigkill")
+    leak = rig.project / "leaked-descendant"
+    rig.run(FAKE_WORKER_LEAK=str(leak))
+    _wait_for(Path(f"{leak}.pid"), "the phase's detached descendant")
+    started = rig.project / "worker.started"
+    rig.start(
+        FAKE_WORKER_HOLD=str(rig.project / "worker.hold"),
+        FAKE_WORKER_STARTED=str(started),
+    )
+    _wait_for(started, "a second fire blocked inside its worker")
+    Path(os.environ["SIGKILL_READY"]).write_text("go\\n")
+    time.sleep(600)  # the parent SIGKILLs us here — nothing below this line ever runs
+"""
+
+
+@_needs_real_flock
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
+def test_a_sigkilled_run_leaks_nothing_past_the_wait_bound(tmp_path):
+    """A `kill -9` on pytest — CI job cancelled, OOM killer, an impatient developer — with a
+    decoy, a detached descendant, and a fire blocked in its worker all alive. Teardown is
+    unreachable by construction, so the assertion is not "nothing survives" but "nothing
+    survives the bound": each spawned wait expires on its own."""
+    basetemp = tmp_path / "child-basetemp"
+    case = tmp_path / "test_sigkill_case.py"
+    case.write_text(_SIGKILL_CASE)
+    ready = tmp_path / "child.ready"
+    bound = 4.0
+
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(case),
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            f"--basetemp={basetemp}",
+        ],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PYTHONPATH": ROOT,
+            "SIGKILL_READY": str(ready),
+            _WAIT_BOUND_VAR: str(int(bound)),
+        },
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        _wait_for(ready, "the child run to leave every blocking shape alive")
+        os.kill(child.pid, signal.SIGKILL)
+        assert child.wait(timeout=_DEADLINE) == -signal.SIGKILL
+
+        # The scenario has to actually reproduce: if teardown had somehow run, a green result
+        # below would prove nothing about the bound.
+        assert _procs_under(str(basetemp)), (
+            "nothing survived — SIGKILL did not reproduce"
+        )
+
+        deadline = time.monotonic() + bound + 10.0
+        survivors = _procs_under(str(basetemp))
+        while survivors and time.monotonic() < deadline:
+            time.sleep(_POLL)
+            survivors = _procs_under(str(basetemp))
+        assert not survivors, (
+            f"still alive {bound}s+ after a SIGKILLed run — an unbounded wait cannot be "
+            "reaped by anything:\n" + "\n".join(survivors)
+        )
+    finally:
+        _killpg(child.pid)
+        _reap(str(basetemp))
 
 
 # ---- 5. the other silent `exit 0`: a green done-gate ----
