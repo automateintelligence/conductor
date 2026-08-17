@@ -9,6 +9,14 @@ plan headings. After an applied align, ``convert`` reuses everything and fills i
 missing. Fail-closed: an ambiguous match (two issues, one phase) renames NOTHING for that
 phase; a milestone spanning ambiguity skips the milestone rename. Dry-run by default —
 ``apply=True`` is the only mutating path.
+
+Unmatchable is not unmatched, and both halves of an unmatchable pair are reported. A
+``gate: none`` phase has no id set to match on, so it lands in ``gateless_phases``, never in
+``unmatched_phases`` (which stays the phases whose issue is genuinely missing). Its
+counterpart — an issue with neither marker nor heading tokens — lands in
+``markerless_issues`` with its title, so the owner can hand-pair the two; it stays out of
+``unmatched_issues`` (marker-bearing strays) because every task sub-issue shares the
+milestone and is markerless by construction.
 """
 
 from __future__ import annotations
@@ -54,10 +62,11 @@ def align(
     ambiguous_issue_numbers: set[int] = set()
     matched_milestones: dict[int, str] = {}
     unmatched_phases: list[str] = []
+    gateless_phases: list[str] = []
 
     for phase_title, wanted in phase_sets.items():
         if not wanted:  # gateless phase (gate: none) — nothing to match on
-            unmatched_phases.append(phase_title)
+            gateless_phases.append(phase_title)
             continue
         found = [i for i in issues if _tokens(i) == wanted]
         if wanted in duplicated_sets:  # plan-side ambiguity: never guess an assignment
@@ -92,6 +101,18 @@ def align(
         and i["number"] not in ambiguous_issue_numbers
         and _tokens(i)
     )
+    # An issue with no tokens at all can never match a phase, so it was dropped from every
+    # bucket — invisible next to the equally invisible gateless phase it may belong to.
+    # Reported WITH its title: the number alone is useless for a pairing the owner has to
+    # make by eye.
+    markerless_issues = sorted(
+        (
+            {"number": i["number"], "title": i.get("title") or ""}
+            for i in issues
+            if not _tokens(i)
+        ),
+        key=lambda i: i["number"],
+    )
 
     milestone_report: Any = None
     if len(matched_milestones) == 1:
@@ -121,4 +142,6 @@ def align(
         "unmatched_phases": unmatched_phases,
         "unmatched_issues": unmatched_issues,
         "ambiguous_phases": ambiguous_phases,
+        "gateless_phases": gateless_phases,
+        "markerless_issues": markerless_issues,
     }
