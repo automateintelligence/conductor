@@ -251,8 +251,12 @@ class CodexAdapter:
 
         The skill tree is derived from whichever bin won (``<root>/bin/conductor`` ->
         ``<root>/skills/...``), which cannot go stale because it is computed on every fire. It
-        is derived ONLY from a resolved bin — never from ``.`` — so an unresolved fire reports
-        an empty path instead of inventing one out of the current working directory.
+        is derived ONLY from a resolved bin — never from ``.``, and never from
+        ``$CODEX_PLUGIN_ROOT`` — so an unresolved fire reports an empty path instead of
+        inventing one, and a resolved fire checks the tree belonging to the bin it is about to
+        name. ``$CODEX_PLUGIN_ROOT`` participates one line earlier, as a candidate BIN that must
+        pass ``-x``; letting it also name the tree let a stale value beat a bin that resolved,
+        so every fire exited 3 against a directory the bin had nothing to do with.
         """
         return (
             'CODEX_BIN="$(command -v codex || true)"\n'
@@ -287,10 +291,13 @@ class CodexAdapter:
             '    [ -z "$CODEX_CONDUCTOR_DIR" ] || CONDUCTOR="$CODEX_CONDUCTOR_DIR/bin/conductor"\n'
             "fi\n"
             "# Conductor's skill tree, derived from the RESOLVED bin at RUN time — never a\n"
-            "# baked path, and never from `.` (a cwd-derived tree is a wrong answer that looks\n"
-            "# like a right one whenever the fire happens to start inside some checkout).\n"
-            'CONDUCTOR_SOURCE="${CODEX_PLUGIN_ROOT:-}"\n'
-            '[ -n "$CONDUCTOR_SOURCE" ] || [ ! -x "${CONDUCTOR:-}" ] || '
+            "# baked path, never from `.` (a cwd-derived tree is a wrong answer that looks like\n"
+            "# a right one whenever the fire happens to start inside some checkout), and never\n"
+            "# from $CODEX_PLUGIN_ROOT: nothing keeps that variable current, so an uninstall or\n"
+            "# an upgrade leaves it naming a tree that is gone while a perfectly good bin sits\n"
+            "# on PATH. It gets a say in WHICH BIN wins, above; the tree then follows the bin.\n"
+            'CONDUCTOR_SOURCE=""\n'
+            '[ ! -x "${CONDUCTOR:-}" ] || '
             'CONDUCTOR_SOURCE="$(cd "$(dirname "$(readlink -f "$CONDUCTOR" 2>/dev/null || printf \'%s\' "$CONDUCTOR")")/.." 2>/dev/null && pwd)"'
         )
 

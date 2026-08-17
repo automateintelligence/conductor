@@ -163,6 +163,10 @@ def test_codex_never_derives_its_skill_root_from_the_current_directory():
     text = base.load("codex").resume_bin_resolution()
     assert "CONDUCTOR:-." not in text
     assert '[ ! -x "${CONDUCTOR:-}" ] || CONDUCTOR_SOURCE=' in text
+    # ...nor from $CODEX_PLUGIN_ROOT, which nothing keeps current. It may nominate a BIN (and
+    # that candidate is `-x`-checked); it may never name the tree over one a bin resolved to.
+    assert 'CONDUCTOR_SOURCE="${CODEX_PLUGIN_ROOT' not in text
+    assert text.index("CODEX_PLUGIN_ROOT") < text.index("CONDUCTOR_SOURCE")
 
 
 def test_the_plugin_lookup_is_bounded_by_a_real_timeout_command():

@@ -485,11 +485,12 @@ def _mk_env_harness(tmp):
     return project, driver, home, fired
 
 
-def _fire_driver(driver, home):
+def _fire_driver(driver, home, extra_env=None):
     env = {
         "HOME": str(home),
         "PATH": "/usr/bin:/bin",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
+        **(extra_env or {}),
     }
     # cwd is the temp HOME, never the suite's own checkout. A driver that resolves anything
     # relative to `.` would otherwise find THIS conductor tree and pass on ambient luck — the
@@ -1460,6 +1461,31 @@ def test_a_conductor_on_path_still_wins_over_the_plugin_lookup(tmp_path):
     proc = _fire_driver(driver, home)
     log = (project / ".conductor" / "resume-autodev.log").read_text()
     assert proc.returncode == 0, (proc.stdout, proc.stderr, log)
+    argv = argv_file.read_text().splitlines()
+    assert argv[-1] == f"Read {skill}/SKILL.md and execute it.", argv
+
+
+def test_a_stale_codex_plugin_root_never_overrides_the_resolved_bins_own_tree(tmp_path):
+    """`CODEX_PLUGIN_ROOT` is an owner/environment variable nothing keeps current — a plugin
+    uninstall or an upgrade leaves it naming a directory that is gone or empty. Taking it AHEAD
+    of the resolved bin means a machine with a perfectly good `conductor` on PATH checks the
+    stale tree and exits 3 on every fire, which contradicts this driver's own stated rule that
+    the skill tree derives ONLY from a resolved bin."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "stale-root"
+    base.mkdir()
+    project, driver, home, argv_file, _c = _mk_codex_harness(base, on_path=True)
+    skill = home / ".local" / "skills" / "autodev"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: autodev\n---\n")
+    stale = base / "uninstalled-plugin"  # named, and not there
+    assert not stale.exists()
+
+    proc = _fire_driver(driver, home, extra_env={"CODEX_PLUGIN_ROOT": str(stale)})
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 0, (proc.returncode, log)
     argv = argv_file.read_text().splitlines()
     assert argv[-1] == f"Read {skill}/SKILL.md and execute it.", argv
 
