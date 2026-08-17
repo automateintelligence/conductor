@@ -89,6 +89,101 @@ def test_gate_slug_env_overrides_files(tmp_path, monkeypatch):
     assert paths.gate_slug(str(tmp_path)) == "fromenv"
 
 
+# --- spec_from_goal: THE shared goal -> spec resolver ----------------------------------
+#
+# `paths._goal_slug` and `freeze._assertions_source` each used to carry their own copy of the
+# `docs/specs/...md` regex, and each took the LEFTMOST match. Because both took the leftmost
+# they agreed with each other, so a spec merely mentioned in passing above the intended one
+# repointed the gate slug AND the frozen assertions source together with nothing left to
+# disagree and catch it. One resolver now serves both, an explicit `spec:` line beats prose,
+# and two prose candidates fail closed naming both instead of silently picking one.
+
+
+def test_spec_from_goal_text_single_prose_match_is_unchanged(tmp_path):
+    assert (
+        paths.spec_from_goal_text("Implement docs/specs/beta.md until done\n")
+        == "docs/specs/beta.md"
+    )
+
+
+def test_spec_from_goal_text_without_any_spec_is_none():
+    assert paths.spec_from_goal_text("Do the thing\n") is None
+
+
+def test_spec_from_goal_text_repeating_one_spec_is_not_ambiguous():
+    text = "Implement docs/specs/beta.md.\nSee docs/specs/beta.md for detail.\n"
+    assert paths.spec_from_goal_text(text) == "docs/specs/beta.md"
+
+
+def test_explicit_spec_field_beats_a_prose_mention():
+    text = "Context: docs/specs/alpha.md was the old one.\nspec: docs/specs/beta.md\n"
+    assert paths.spec_from_goal_text(text) == "docs/specs/beta.md"
+
+
+def test_two_prose_specs_without_a_spec_field_fail_closed_naming_both():
+    text = "Port docs/specs/alpha.md ideas into docs/specs/beta.md until done\n"
+    with pytest.raises(paths.AmbiguousSpecReference) as excinfo:
+        paths.spec_from_goal_text(text)
+    message = str(excinfo.value)
+    assert "docs/specs/alpha.md" in message and "docs/specs/beta.md" in message
+    assert "spec:" in message  # tells the user how to disambiguate
+
+
+def test_explicit_spec_field_silences_two_prose_candidates():
+    text = (
+        "Port docs/specs/alpha.md ideas into docs/specs/beta.md until done\n"
+        "spec: docs/specs/beta.md\n"
+    )
+    assert paths.spec_from_goal_text(text) == "docs/specs/beta.md"
+
+
+def test_spec_from_goal_reads_the_goal_file_and_is_none_without_one(tmp_path):
+    assert paths.spec_from_goal(str(tmp_path)) is None
+    _write(tmp_path, ".conductor/goal.md", "spec: docs/specs/beta.md\n")
+    assert paths.spec_from_goal(str(tmp_path)) == "docs/specs/beta.md"
+
+
+def test_gate_slug_from_explicit_spec_field(tmp_path, monkeypatch):
+    monkeypatch.delenv("CONDUCTOR_GATE_SLUG", raising=False)
+    _write(
+        tmp_path,
+        ".conductor/goal.md",
+        "Follow the pattern in docs/specs/alpha.md.\nspec: docs/specs/beta.md\n",
+    )
+    assert paths.gate_slug(str(tmp_path)) == paths.spec_slug("docs/specs/beta.md")
+
+
+def test_ambiguous_goal_fails_closed_rather_than_repointing_the_gate(
+    tmp_path, monkeypatch
+):
+    _clear_env(monkeypatch)
+    _write(
+        tmp_path,
+        ".conductor/goal.md",
+        "Port docs/specs/alpha.md ideas into docs/specs/beta.md until done\n",
+    )
+    assert paths.gate_slug(str(tmp_path)) is None  # never guesses the leftmost
+    g = paths.resolve_gate(str(tmp_path))
+    assert g.fail_closed is not None
+    assert "docs/specs/alpha.md" in g.fail_closed
+    assert "docs/specs/beta.md" in g.fail_closed
+
+
+def test_explicit_spec_field_keeps_an_otherwise_ambiguous_goal_running(
+    tmp_path, monkeypatch
+):
+    _clear_env(monkeypatch)
+    _write(
+        tmp_path,
+        ".conductor/goal.md",
+        "Port docs/specs/alpha.md ideas into docs/specs/beta.md until done\n"
+        "spec: docs/specs/beta.md\n",
+    )
+    g = paths.resolve_gate(str(tmp_path))
+    assert g.fail_closed is None
+    assert paths.gate_slug(str(tmp_path)) == paths.spec_slug("docs/specs/beta.md")
+
+
 # --- gate_dir: explicit slug forces namespaced; ambient slug falls back until built -------
 
 
