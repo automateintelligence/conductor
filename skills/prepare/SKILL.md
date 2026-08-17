@@ -65,8 +65,26 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
    for a value that is only delimiters or emphasis.
 3. **LEDGER ALIGNMENT — dry-run FIRST, always.** `conductor ledger align <plan.md>` and show
    the owner the report: matches (by **assertion-id set** — titles lie, id sets don't),
-   renames planned for issues + milestone, unmatched phases/issues, ambiguities. Ambiguities →
-   resolve WITH the owner (never guess; align withholds those renames by design). Then
+   renames planned for issues + milestone, unmatched phases/issues, ambiguities,
+   `gateless_phases`, and `markerless_issues`. Ambiguities →
+   resolve WITH the owner (never guess; align withholds those renames by design).
+   **PAIRING GATE — clear `gateless_phases` and `markerless_issues` first: do not run
+   `convert` while either bucket is non-empty.** A `gate: none` phase has no assertion-id set
+   to match on, and its issue carries no `conductor-assertions` marker, so align can report
+   the two halves next to each other but can never pair them — and `ledger align` exits
+   nonzero for AMBIGUITY only, so a zero exit here does not mean these are handled. `convert`
+   then resolves each phase issue by EXACT title, so an unpaired pair is not reporting noise:
+   the paraphrased issue is missed and a second, duplicate phase issue is created for a phase
+   that already has one. Read the two buckets against each other WITH the owner and take
+   exactly one decision per gateless phase:
+   - that markerless issue IS this phase → **rename the issue to the phase heading exactly**
+     — character for character, em dash and all; this string is the match key, not a label —
+     then re-run the dry run and confirm both buckets are empty; or
+   - no existing issue is this phase → the owner says so explicitly, accepting that `convert`
+     will create one. Record the decision: after the fact, a duplicate phase issue created by
+     surprise and an issue created on purpose look identical.
+
+   prepare never pairs these itself — same rule as every other match here, never guess. Then
    `conductor ledger align <plan.md> --apply`, then `conductor ledger convert <plan.md>` —
    which now reuses every aligned issue and creates whatever is missing: `conductor-assertions`
    markers and task sub-issues (completed `[x]` tasks never respawn as new sub-issues).
