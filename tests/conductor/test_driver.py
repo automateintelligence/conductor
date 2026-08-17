@@ -738,6 +738,7 @@ def test_an_install_blocked_by_another_says_so_and_changes_nothing(
         text=True,
     )
     try:
+        assert holder.stdout is not None
         assert holder.stdout.readline().strip() == "held"
         rc = driver.install(str(proj), str(wt), host="codex")
     finally:

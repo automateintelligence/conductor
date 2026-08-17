@@ -1236,7 +1236,9 @@ def _mk_codex_harness(
     decoy.write_text("#!/bin/sh\nexit 1\n")
     os.chmod(decoy, 0o755)
     argv_file = tmp / "argv"
-    entries = [("conductor", source_root)] if install_conductor_plugin else []
+    entries: list[tuple] = (
+        [("conductor", source_root)] if install_conductor_plugin else []
+    )
     if second_marketplace:
         # A SECOND plugin, also called `conductor`, from another marketplace — complete, with
         # its own bin and autodev skill, and listed FIRST the way 0.147.0 orders it. Nothing on
