@@ -88,13 +88,17 @@ def _installed_root(home, name):
     return home / "plugins" / "cache" / _MARKET / name / _VERSION
 
 
-def _plugin_list_json(sources):
+def _plugin_list_json(sources, disabled=()):
     """What `codex plugin list --json` prints — the shape verified on codex-cli 0.147.0 by
     recording the CLI's own output; see `tests/conductor/fixtures/`.
 
     `sources` maps plugin name -> `source.path`, which names the MARKETPLACE tree the plugin was
     copied from and is a different directory from the installed copy. Every fixture here used to
     pass the installed root for it, which is why no test could catch discovery reading it.
+
+    `disabled` names plugins the operator turned off. 0.147.0 keeps those in `installed[]` with
+    `"enabled": false`; this argument exists because a fixture that hardcodes `True` cannot state
+    the case, so adding the filter to production code would have left every test green.
     """
     return json.dumps(
         {
@@ -105,7 +109,7 @@ def _plugin_list_json(sources):
                     "marketplaceName": _MARKET,
                     "version": _VERSION,
                     "installed": True,
-                    "enabled": True,
+                    "enabled": name not in disabled,
                     "source": {"source": "local", "path": str(path)},
                 }
                 for name, path in sources.items()
@@ -114,7 +118,7 @@ def _plugin_list_json(sources):
     )
 
 
-def _stub_codex_on_path(tmp_path, monkeypatch, sources):
+def _stub_codex_on_path(tmp_path, monkeypatch, sources, disabled=()):
     """A `codex` on PATH reporting `sources` (name -> `source.path`) as its installed plugins.
 
     `git` is carried across because host resolution shells out to it (`runhost._common_root`);
@@ -124,7 +128,7 @@ def _stub_codex_on_path(tmp_path, monkeypatch, sources):
     bindir.mkdir(exist_ok=True)
     codex = bindir / "codex"
     codex.write_text(
-        f"#!/bin/sh\nprintf '%s' '{_plugin_list_json(sources)}'\nexit 0\n",
+        f"#!/bin/sh\nprintf '%s' '{_plugin_list_json(sources, disabled)}'\nexit 0\n",
     )
     os.chmod(codex, 0o755)
     _link_git(bindir)
@@ -386,6 +390,28 @@ def test_codex_recovers_plugin_identity_from_the_installed_plugin_list(
     avail = preflight.available_commands(host_id="codex")
     assert "spec-craft:expectations" in avail
     assert "expectations" not in avail
+
+
+def test_a_disabled_spec_craft_is_not_a_healthy_conducted_stack(tmp_path, monkeypatch):
+    """`codex plugin list` still reports a disabled plugin as installed, and its tree is still
+    on disk — but the loader stops before its skills, so every `$expectations` call in the run
+    resolves to nothing. Preflight must report that, not green on a directory listing."""
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    skill = _installed_root(home, "spec-craft") / "skills" / "expectations"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\n---\n")
+    _stub_codex_on_path(
+        tmp_path,
+        monkeypatch,
+        {"spec-craft": tmp_path / "marketplace" / "spec-craft"},
+        disabled=("spec-craft",),
+    )
+
+    avail = preflight.available_commands(host_id="codex")
+
+    assert "spec-craft:expectations" not in avail, avail
 
 
 def test_the_marketplace_source_copy_is_not_the_plugin_codex_loads(

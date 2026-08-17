@@ -46,7 +46,7 @@ PLUGIN_ROOT_SNIPPET = (
     "import json,os,sys;"
     'h=os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex");'
     'e=[p for p in json.load(sys.stdin).get("installed") or [] if p.get("name")==sys.argv[1]'
-    ' and p.get("marketplaceName") and p.get("version")];'
+    ' and p.get("enabled") is True and p.get("marketplaceName") and p.get("version")];'
     'd=[os.path.join(h,"plugins","cache",p["marketplaceName"],p["name"],p["version"])'
     " for p in e];"
     'print(next((x for x in d if os.path.isdir(x)),""))'
@@ -78,6 +78,14 @@ def _installed_root(entry: dict, home: str) -> str | None:
     degrades the gate to ``unverified`` — instead of silently naming a wrong directory the way
     ``source.path`` did.
     """
+    # DISABLED is not installed, for every purpose Conductor has. 0.147.0 keeps a disabled
+    # plugin in ``installed[]`` with ``"enabled": false`` and its tree on disk, but its loader
+    # returns before loading any capability — so its skills resolve to nothing at run time, and
+    # the cron driver pointing ``$CONDUCTOR`` at its ``bin/conductor`` execs the very plugin the
+    # operator turned off. ``is True`` rather than truthiness: a version that stops emitting the
+    # field leaves us unable to tell, and "cannot tell" has to read as "do not use it".
+    if entry.get("enabled") is not True:
+        return None
     name = entry.get("name")
     market = entry.get("marketplaceName")
     version = entry.get("version")

@@ -102,10 +102,39 @@ def test_a_root_that_is_not_on_disk_is_reported_as_no_root_at_all(codex_home):
     assert codex.plugin_roots_from_json(payload) == {}
 
 
+# ------------------------------------------------------------ disabled plugins are not usable
+
+
+def test_a_disabled_plugin_contributes_no_root(codex_home):
+    """0.147.0 leaves a disabled plugin in `installed[]` with `"enabled": false`, and its loader
+    stops before loading capabilities when it is. Counting one as installed greens preflight on
+    skills Codex will never load — and lets the cron driver exec a disabled plugin's
+    `bin/conductor`, which is the same fire the operator turned off."""
+    payload = _recorded(codex_home, keep={"spec-craft@trusted-market"})
+
+    assert codex.plugin_roots_from_json(payload) == {}
+
+
+def test_an_enabled_plugin_alongside_a_disabled_one_still_resolves(codex_home):
+    """The filter drops the disabled entry, not the whole answer."""
+    payload = _recorded(
+        codex_home, keep={"spec-craft@trusted-market", "superpowers@trusted-market"}
+    )
+
+    assert set(codex.plugin_roots_from_json(payload)) == {"superpowers"}
+
+
 # ------------------------------------------------- the driver's own parser answers identically
 
 
-@pytest.mark.parametrize("keep", [{"superpowers@trusted-market"}])
+@pytest.mark.parametrize(
+    "keep",
+    [
+        {"superpowers@trusted-market"},
+        {"spec-craft@trusted-market"},
+        {"spec-craft@trusted-market", "superpowers@trusted-market"},
+    ],
+)
 def test_the_cron_snippet_agrees_with_the_python_parser_on_every_recorded_state(
     codex_home, keep
 ):

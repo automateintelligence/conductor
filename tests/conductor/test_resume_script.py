@@ -1145,13 +1145,17 @@ def test_the_allowlist_regex_is_derived_from_the_declared_set_not_hand_written()
 _MARKET, _VERSION = "openai-curated", "d6169bef"
 
 
-def _codex_plugin_list_json(plugins):
+def _codex_plugin_list_json(plugins, disabled=()):
     """What `codex plugin list --json` prints — the shape verified on codex-cli 0.147.0 by
     recording the CLI's own output (`tests/conductor/fixtures/`).
 
     `source.path` is the MARKETPLACE SOURCE tree, which is not where the plugin is installed.
     Callers pass that source path here and put the actual plugin under the derived install root;
     a fixture that passes one path for both cannot fail when the driver reads the wrong one.
+
+    `disabled` names plugins the operator turned off — 0.147.0 keeps those in `installed[]` with
+    `"enabled": false`. Hardcoding `True` is why nothing could tell an operator's disabled
+    conductor from a live one before the driver went ahead and exec'd its `bin/conductor`.
     """
     return json.dumps(
         {
@@ -1162,7 +1166,7 @@ def _codex_plugin_list_json(plugins):
                     "marketplaceName": _MARKET,
                     "version": _VERSION,
                     "installed": True,
-                    "enabled": True,
+                    "enabled": name not in disabled,
                     "source": {"source": "local", "path": str(source_path)},
                     "installPolicy": "AVAILABLE",
                     "authPolicy": "NEVER",
@@ -1174,7 +1178,12 @@ def _codex_plugin_list_json(plugins):
 
 
 def _mk_codex_harness(
-    tmp, *, install_conductor_plugin=True, on_path=False, plugin_list_hangs=False
+    tmp,
+    *,
+    install_conductor_plugin=True,
+    on_path=False,
+    plugin_list_hangs=False,
+    conductor_plugin_disabled=False,
 ):
     """A Codex-recorded run on a machine that installed conductor the way a Codex user does:
     as a PLUGIN, whose bin is therefore NOT on PATH (skills/start/SKILL.md says exactly this).
@@ -1220,7 +1229,8 @@ def _mk_codex_harness(
     os.chmod(decoy, 0o755)
     argv_file = tmp / "argv"
     listed = _codex_plugin_list_json(
-        [("conductor", source_root)] if install_conductor_plugin else []
+        [("conductor", source_root)] if install_conductor_plugin else [],
+        disabled=("conductor",) if conductor_plugin_disabled else (),
     )
     # `plugin_list_hangs` is the CLI that never returns. It sleeps far longer than any bound the
     # driver could reasonably impose, so a driver that does not bound the call is measurably
@@ -1332,6 +1342,28 @@ def test_a_hanging_plugin_lookup_is_bounded_and_names_itself_in_the_log(
     assert elapsed < 6, (elapsed, log)
     # ...and it still fails CLOSED: an unresolvable conductor is exit 3, never a fire.
     assert proc.returncode == 3, (proc.returncode, log)
+    assert not argv_file.exists()
+
+
+def test_a_disabled_conductor_plugin_is_never_exec_d_by_the_driver(tmp_path):
+    """The operator disabled conductor. 0.147.0 still lists it, its tree is still on disk and
+    its `bin/conductor` is still executable — so a driver that reads `installed[]` without the
+    `enabled` bit fires the very plugin the operator turned off, every twenty minutes, from
+    cron. Stop at the guard instead."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "disabled"
+    base.mkdir()
+    project, driver, home, argv_file, conductor = _mk_codex_harness(
+        base, conductor_plugin_disabled=True
+    )
+    assert conductor.exists()  # the fixture's point: present, executable, and OFF
+
+    proc = _fire_driver(driver, home)
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 3, (proc.returncode, log)
+    assert "driver-unresolved codex=" in log
     assert not argv_file.exists()
 
 
