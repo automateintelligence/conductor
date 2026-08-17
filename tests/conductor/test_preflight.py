@@ -6,6 +6,7 @@ import subprocess
 import pytest
 
 from conductor import preflight
+from tests.conductor.conftest import stale_version_siblings
 
 _ALL = {
     "spec-craft:expectations",
@@ -228,6 +229,15 @@ def _codex_install(
         if plugin in roots_missing:
             continue  # listed by `plugin list`, but nothing at the root that identity implies
         root.mkdir(parents=True)
+        # A STALE version directory either side of the listed one, holding a DIFFERENT skill
+        # set. Every fixture used to create exactly one version per plugin, so a discovery that
+        # ignored the version codex reported and globbed any on-disk one resolved the same
+        # names and nothing failed. Different contents, because same contents would keep such a
+        # discovery green — the wrong tree has to answer with the wrong skills.
+        for stale in stale_version_siblings(root.name):
+            d = root.parent / stale / "skills" / "stale-decoy"
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text("---\nname: stale-decoy\n---\n")
         for name in skills:
             if name in without:
                 continue

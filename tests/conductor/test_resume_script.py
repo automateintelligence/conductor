@@ -14,6 +14,7 @@ import pytest
 
 from conductor import resume_script as rs
 from conductor.hosts import codex as codex_host
+from tests.conductor.conftest import stale_version_siblings
 
 PROJECT = "/home/u/programming/proj"
 WORKTREE = "/home/u/programming/proj-run-x"
@@ -1248,6 +1249,21 @@ def _mk_codex_harness(
     decoy = source_root / "bin" / "conductor"
     decoy.write_text("#!/bin/sh\nexit 1\n")
     os.chmod(decoy, 0o755)
+    # A STALE version directory either side of the installed one, each a COMPLETE decoy. The
+    # cache keeps a version segment and an upgrade or a failed cleanup leaves the old tree
+    # beside the new one; with only ever one version directory here, a driver that ignored the
+    # version `plugin list` reported and globbed any on-disk one resolved the same path and
+    # every test stayed green. Complete, so such a driver FIRES against the wrong tree — a
+    # visibly wrong answer — rather than merely failing to resolve.
+    for stale in stale_version_siblings(plugin_root.name):
+        (plugin_root.parent / stale / "skills" / "autodev").mkdir(parents=True)
+        (plugin_root.parent / stale / "skills" / "autodev" / "SKILL.md").write_text(
+            "---\nname: autodev\n---\n"
+        )
+        (plugin_root.parent / stale / "bin").mkdir()
+        stale_bin = plugin_root.parent / stale / "bin" / "conductor"
+        stale_bin.write_text("#!/bin/sh\nexit 1\n")
+        os.chmod(stale_bin, 0o755)
     argv_file = tmp / "argv"
     entries: list[tuple] = (
         [("conductor", source_root)] if install_conductor_plugin else []

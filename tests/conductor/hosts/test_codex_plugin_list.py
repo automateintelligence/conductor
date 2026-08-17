@@ -18,6 +18,7 @@ import sys
 import pytest
 
 from conductor.hosts import codex
+from tests.conductor.conftest import stale_version_siblings
 
 _FIXTURE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -73,6 +74,18 @@ def _recorded(codex_home, *, keep=None, on_disk=None, junk=()):
         root = codex_home / _RECORDED_INSTALLED_ROOTS[entry["pluginId"]]
         (root / "skills" / "start").mkdir(parents=True, exist_ok=True)
         (root / "skills" / "start" / "SKILL.md").write_text("---\nname: start\n---\n")
+        # A STALE version directory either side of the listed one, both populated. An upgrade or
+        # a half-cleaned cache leaves these behind, and with only ever one version directory per
+        # plugin the version segment was unobservable: a parser that ignored the reported
+        # version and globbed any on-disk one answered identically. Populated for the same
+        # reason `source.path` is: an empty decoy lets a wrong answer pass for the right reason.
+        for stale in stale_version_siblings(root.name):
+            (root.parent / stale / "skills" / "start").mkdir(
+                parents=True, exist_ok=True
+            )
+            (root.parent / stale / "skills" / "start" / "SKILL.md").write_text(
+                "---\nname: start\n---\n"
+            )
     # FIRST, so an entry that is not an entry cannot be skipped by luck of ordering: a parser
     # that stops at the first surprise never reaches the valid entries behind it.
     data["installed"] = list(junk) + data["installed"]
@@ -130,6 +143,36 @@ def test_a_root_that_is_not_on_disk_is_still_a_plugin_codex_says_is_installed(
         )
         == frozenset()
     )
+
+
+def test_a_stale_version_beside_the_listed_one_is_never_the_answer(codex_home):
+    """The version segment is EVIDENCE, not a wildcard. `codex plugin list --json` reports which
+    version is installed, and the tree beside it is whatever an upgrade or a failed cleanup left
+    behind — an old skill set, a partial copy, an uninstalled plugin's leftovers. Both parsers
+    were mutated to ignore the reported version and take any on-disk one, and 374 of the 375
+    tests over them still passed, because no fixture had ever put a second version there."""
+    payload = _recorded(codex_home, keep={"superpowers@trusted-market"})
+    listed = codex_home / _RECORDED_INSTALLED_ROOTS["superpowers@trusted-market"]
+    older, newer = stale_version_siblings(listed.name)
+    assert (listed.parent / older).is_dir() and (listed.parent / newer).is_dir()
+
+    assert codex.plugin_roots_from_json(payload) == {"superpowers": str(listed)}
+    assert _snippet_state(payload, "superpowers", codex_home) == ("root", str(listed))
+
+
+def test_only_a_stale_version_on_disk_is_unverifiable_not_installed(codex_home):
+    """The version bump that moves the cache, exactly. Codex reports 2.3.1; what is on disk is
+    the neighbouring stale copy and nothing else. Answering with that tree loads skills Codex
+    will not load, so the honest answer is "the reported root is not there" — `unverified`."""
+    payload = _recorded(codex_home, keep={"superpowers@trusted-market"}, on_disk=set())
+    listed = codex_home / _RECORDED_INSTALLED_ROOTS["superpowers@trusted-market"]
+    older, _newer = stale_version_siblings(listed.name)
+    (listed.parent / older / "skills" / "start").mkdir(parents=True)
+    (listed.parent / older / "skills" / "start" / "SKILL.md").write_text("---\n---\n")
+
+    assert codex.plugin_roots_from_json(payload) == {}
+    assert codex.unverifiable_plugins_from_json(payload) == frozenset({"superpowers"})
+    assert _snippet_state(payload, "superpowers", codex_home) == ("unverifiable", "")
 
 
 def test_a_plugin_with_one_real_root_is_never_also_unverifiable(codex_home):
