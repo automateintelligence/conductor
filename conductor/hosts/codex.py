@@ -25,6 +25,13 @@ from conductor.hosts import discovery
 #: truth §"Session and config isolation"), so this is the Codex config root unconditionally.
 CONFIG_DIR_ENV = "CODEX_HOME"
 
+#: Seconds ``codex plugin list --json`` gets before it is killed. A healthy 0.147.0 answers it
+#: from local config and cache in well under a second, so this is generous by two orders of
+#: magnitude; what it exists to bound is the pathological case. One constant for both callers —
+#: the in-process one and the shell the cron driver runs — because a bound that holds in only
+#: one of them is the unbounded case wherever it does not.
+PLUGIN_LIST_TIMEOUT_S = 20
+
 #: Where an installed plugin's copy lives, under the Codex config root. NOT emitted by
 #: ``codex plugin list --json`` — see ``plugin_roots_from_json`` — so it is derived from three
 #: fields that ARE, and then checked on disk.
@@ -106,11 +113,13 @@ def plugin_roots_from_json(text: str) -> dict[str, str]:
 def installed_plugin_roots() -> dict[str, str]:
     """Where Codex says each installed plugin lives, or nothing if it cannot be asked.
 
-    Asking the host is the only way to attribute a skill to a plugin on Codex that does not
-    encode a cache layout: the sole root ever observed was ``$CODEX_HOME/.tmp/plugins`` and no
-    documentation makes it contractual. ``</dev/null`` because Codex subcommands hang on an
-    unredirected stdin (ground truth §"Codex help hangs"); a timeout because a preflight that
-    hangs is worse than one that reports less.
+    Asking the host is the only way to attribute a skill to a plugin on Codex: skill directories
+    are flat and carry no plugin qualifier, so nothing on disk says whose a skill is. What comes
+    back is an IDENTITY, which ``_installed_root`` turns into a path and then checks — the host
+    is asked the question only it can answer, and the layout that answer implies is verified
+    rather than trusted. ``</dev/null`` because Codex subcommands hang on an unredirected stdin
+    (ground truth §"Codex help hangs"); a timeout because a preflight that hangs is worse than
+    one that reports less.
     """
     exe = shutil.which("codex")
     if not exe:
@@ -121,7 +130,7 @@ def installed_plugin_roots() -> dict[str, str]:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=PLUGIN_LIST_TIMEOUT_S,
         )
     except (OSError, subprocess.SubprocessError):
         return {}
@@ -175,6 +184,18 @@ class CodexAdapter:
         one. ``python3`` is not a new dependency: ``bin/conductor`` execs it for every
         subcommand, so a machine that cannot run it cannot run conductor.
 
+        The lookup is BOUNDED and stays BEFORE the lock. Bounded because it runs before the
+        first log line and before ``flock``, so a hung CLI is a live fire that has written
+        nothing at all and every subsequent tick starts another — the silent-block class this
+        driver otherwise exists to close. Before the lock because ``$CONDUCTOR`` is what
+        ``resume_unresolved_guard`` reads: moving the lookup after ``flock -n`` would put the
+        exit-3 guard inside the critical section, so a machine that cannot resolve conductor
+        would take the project lock to say so, and every following tick would hit ``flock -n``
+        and exit 0 SILENTLY instead of logging ``driver-unresolved`` — trading a loud per-tick
+        failure for no output at all. Position only mattered while the call was unbounded: what
+        made a pre-lock hang accumulate was that it could outlive the twenty-minute tick, and
+        a bound of ``PLUGIN_LIST_TIMEOUT_S`` removes that outright.
+
         The skill tree is derived from whichever bin won (``<root>/bin/conductor`` ->
         ``<root>/skills/...``), which cannot go stale because it is computed on every fire. It
         is derived ONLY from a resolved bin — never from ``.`` — so an unresolved fire reports
@@ -184,10 +205,31 @@ class CodexAdapter:
             'CODEX_BIN="$(command -v codex || true)"\n'
             'CONDUCTOR="$(command -v conductor || true)"\n'
             '[ -x "$CONDUCTOR" ] || [ -z "${CODEX_PLUGIN_ROOT:-}" ] || CONDUCTOR="$CODEX_PLUGIN_ROOT/bin/conductor"\n'
-            "# Installed as a plugin? Ask codex where it put it — a CLI contract, not a\n"
-            "# guessed cache layout, so a cache move or a version bump cannot rot it.\n"
+            "# Installed as a plugin? Ask codex which plugins are installed — a CLI contract,\n"
+            "# not a guessed cache layout, so a cache move or a version bump cannot rot it.\n"
+            "# BOUNDED: this runs before `fire-start` is logged and before the flock is taken,\n"
+            "# so an unbounded call leaves a live fire that has written NOTHING, and the next\n"
+            "# tick starts another. Expiry gets its own log line — a stall nobody can see is\n"
+            "# the failure mode, not the stall itself.\n"
             'if [ ! -x "${CONDUCTOR:-}" ] && [ -x "${CODEX_BIN:-}" ]; then\n'
-            '    CODEX_CONDUCTOR_DIR="$("$CODEX_BIN" plugin list --json </dev/null 2>/dev/null '
+            '    CODEX_TIMEOUT="$(command -v timeout || command -v gtimeout || true)"\n'
+            '    if [ -n "$CODEX_TIMEOUT" ]; then\n'
+            f'        CODEX_PLUGIN_JSON="$("$CODEX_TIMEOUT" {PLUGIN_LIST_TIMEOUT_S} '
+            '"$CODEX_BIN" plugin list --json </dev/null 2>/dev/null)"\n'
+            "        CODEX_PLUGIN_RC=$?\n"
+            "    else\n"
+            "        # No coreutils timeout (a bare macOS). Refusing the lookup would break\n"
+            "        # every plugin install on such a machine, so it still runs — but the log\n"
+            "        # says so FIRST, so a stall here is attributable to this line instead of\n"
+            "        # being indistinguishable from a quiet healthy run.\n"
+            '        printf \'%s plugin-list-unbounded bin=%s\\n\' "$(ts)" "$CODEX_BIN" >> "$LOG"\n'
+            '        CODEX_PLUGIN_JSON="$("$CODEX_BIN" plugin list --json </dev/null 2>/dev/null)"\n'
+            "        CODEX_PLUGIN_RC=$?\n"
+            "    fi\n"
+            '    [ "$CODEX_PLUGIN_RC" -ne 124 ] || '
+            "printf '%s plugin-list-timeout bin=%s limit=%ss\\n' "
+            f'"$(ts)" "$CODEX_BIN" {PLUGIN_LIST_TIMEOUT_S} >> "$LOG"\n'
+            '    CODEX_CONDUCTOR_DIR="$(printf \'%s\' "$CODEX_PLUGIN_JSON" '
             f"| python3 -c '{PLUGIN_ROOT_SNIPPET}' conductor 2>/dev/null || true)\"\n"
             '    [ -z "$CODEX_CONDUCTOR_DIR" ] || CONDUCTOR="$CODEX_CONDUCTOR_DIR/bin/conductor"\n'
             "fi\n"

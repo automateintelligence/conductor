@@ -40,7 +40,7 @@ from conductor.hosts import base, runhost
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and
 # `/conductor:start` reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 5
+TEMPLATE_VERSION = 6
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a

@@ -7,10 +7,12 @@ import re
 import shlex
 import stat
 import subprocess
+import time
 
 import pytest
 
 from conductor import resume_script as rs
+from conductor.hosts import codex as codex_host
 
 PROJECT = "/home/u/programming/proj"
 WORKTREE = "/home/u/programming/proj-run-x"
@@ -1171,7 +1173,9 @@ def _codex_plugin_list_json(plugins):
     )
 
 
-def _mk_codex_harness(tmp, *, install_conductor_plugin=True, on_path=False):
+def _mk_codex_harness(
+    tmp, *, install_conductor_plugin=True, on_path=False, plugin_list_hangs=False
+):
     """A Codex-recorded run on a machine that installed conductor the way a Codex user does:
     as a PLUGIN, whose bin is therefore NOT on PATH (skills/start/SKILL.md says exactly this).
 
@@ -1218,10 +1222,16 @@ def _mk_codex_harness(tmp, *, install_conductor_plugin=True, on_path=False):
     listed = _codex_plugin_list_json(
         [("conductor", source_root)] if install_conductor_plugin else []
     )
+    # `plugin_list_hangs` is the CLI that never returns. It sleeps far longer than any bound the
+    # driver could reasonably impose, so a driver that does not bound the call is measurably
+    # stuck rather than merely slow.
+    plugin_arm = (
+        "sleep 8; exit 0" if plugin_list_hangs else f"printf '%s' '{listed}'; exit 0"
+    )
     codex = bindir / "codex"
     codex.write_text(
         "#!/bin/sh\n"
-        f"if [ \"$1\" = plugin ]; then printf '%s' '{listed}'; exit 0; fi\n"
+        f'if [ "$1" = plugin ]; then {plugin_arm}; fi\n'
         f'for a in "$@"; do printf \'%s\\n\' "$a"; done > "{argv_file}"\nexit 0\n'
     )
     os.chmod(codex, 0o755)
@@ -1292,6 +1302,37 @@ def test_a_plugin_installed_conductor_survives_a_cron_fire_with_nothing_on_path(
     argv = argv_file.read_text().splitlines()
     root = conductor.parent.parent
     assert argv[-1] == f"Read {root}/skills/autodev/SKILL.md and execute it.", argv
+
+
+def test_a_hanging_plugin_lookup_is_bounded_and_names_itself_in_the_log(
+    tmp_path, monkeypatch
+):
+    """The lookup runs BEFORE `fire-start` is logged and BEFORE the flock is taken, so an
+    unbounded one leaves a live process with no log line at all — and the next cron tick, twenty
+    minutes later, starts another. Nothing about that is distinguishable from a healthy quiet
+    run. Bound it, and give expiry its own line so the stall is attributable to this call rather
+    than inferred from silence."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    if not _which("timeout"):
+        pytest.skip("coreutils timeout not available")
+    monkeypatch.setattr(codex_host, "PLUGIN_LIST_TIMEOUT_S", 1)
+    base = tmp_path / "hang"
+    base.mkdir()
+    project, driver, home, argv_file, _c = _mk_codex_harness(
+        base, plugin_list_hangs=True
+    )
+
+    started = time.monotonic()
+    proc = _fire_driver(driver, home)
+    elapsed = time.monotonic() - started
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert "plugin-list-timeout" in log, log
+    assert elapsed < 6, (elapsed, log)
+    # ...and it still fails CLOSED: an unresolvable conductor is exit 3, never a fire.
+    assert proc.returncode == 3, (proc.returncode, log)
+    assert not argv_file.exists()
 
 
 def test_a_codex_fire_stops_loud_when_codex_knows_of_no_conductor_plugin(tmp_path):

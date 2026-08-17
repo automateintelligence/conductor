@@ -144,14 +144,16 @@ def test_codex_resolves_its_skill_root_at_run_time_never_at_generation_time():
 
 def test_codex_finds_a_plugin_installed_conductor_by_asking_codex_not_by_guessing():
     """An installed plugin's bin is not on PATH, so PATH + CODEX_PLUGIN_ROOT resolve nothing on
-    a normal install. The third leg asks the host — a documented CLI surface — and specifically
-    does NOT encode the one cache root ever observed, which no documentation makes contractual
-    and which carries a version segment that would rot on the next upgrade."""
+    a normal install. The third leg asks the host — a documented CLI surface — for the plugin's
+    IDENTITY, and never globs for it: no marketplace, plugin or version segment is written into
+    the shell, so nothing here can rot on an upgrade. (The install root that identity implies is
+    computed inside `PLUGIN_ROOT_SNIPPET`, from the answer, and checked to exist.)"""
     text = base.load("codex").resume_bin_resolution()
     assert "plugin list --json" in text
     assert "</dev/null" in text  # codex subcommands hang on an unredirected stdin
     assert ".tmp/plugins" not in text
     assert "$CODEX_HOME" not in text
+    assert "ls -d" not in text and "*" not in text
 
 
 def test_codex_never_derives_its_skill_root_from_the_current_directory():
@@ -161,6 +163,24 @@ def test_codex_never_derives_its_skill_root_from_the_current_directory():
     text = base.load("codex").resume_bin_resolution()
     assert "CONDUCTOR:-." not in text
     assert '[ ! -x "${CONDUCTOR:-}" ] || CONDUCTOR_SOURCE=' in text
+
+
+def test_the_plugin_lookup_is_bounded_by_a_real_timeout_command():
+    """The bound has to be the one constant both callers use, and it has to survive a host
+    whose `timeout` is `gtimeout` or absent. The absent case cannot be reached from a test with
+    a real PATH — /usr/bin/timeout is always there — so it is checked in the text, which is
+    where the branch lives."""
+    from conductor.hosts import codex
+
+    text = codex.CodexAdapter().resume_bin_resolution()
+    assert (
+        f'"$CODEX_TIMEOUT" {codex.PLUGIN_LIST_TIMEOUT_S} "$CODEX_BIN" plugin list'
+        in text
+    )
+    assert "command -v timeout || command -v gtimeout" in text
+    # ...and with no timeout binary at all it still runs, but says so BEFORE it might hang.
+    unbounded = text.index("plugin-list-unbounded")
+    assert unbounded < text.index('CODEX_PLUGIN_JSON="$("$CODEX_BIN" plugin list')
 
 
 def test_the_plugin_lookup_snippet_is_self_contained_and_shell_quotable():
