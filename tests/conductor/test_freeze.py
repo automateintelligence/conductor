@@ -394,3 +394,39 @@ def test_env_override_with_no_source_present_fails_closed(tmp_path, monkeypatch)
     monkeypatch.setenv("CONDUCTOR_ASSERTIONS_SOURCE", "docs/specs/fixture-spec.md")
     with pytest.raises(Exception, match="missing-assertions-source"):
         freeze.record(manifest, baseline, str(tmp_path))
+
+
+# ------------------------------------------- which spec the goal names (shared resolver)
+#
+# freeze and paths each carried their own leftmost-match copy of the spec regex, so a spec
+# mentioned in passing above the intended one bound the frozen assertions source AND the gate
+# slug in the same wrong direction, with no disagreement to catch it.
+
+
+def test_goal_naming_two_specs_fails_closed_naming_both(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False, specs=("spec-a", "spec-b"))
+    dot = tmp_path / ".conductor"
+    dot.mkdir(exist_ok=True)
+    (dot / "goal.md").write_text(
+        "Port docs/specs/spec-a.md ideas into docs/specs/spec-b.md until done\n"
+    )
+    with pytest.raises(Exception) as excinfo:
+        freeze.record(manifest, baseline, str(tmp_path))
+    message = str(excinfo.value)
+    assert "docs/specs/spec-a.md" in message and "docs/specs/spec-b.md" in message
+
+
+def test_explicit_spec_field_picks_the_source_among_several(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False, specs=("spec-a", "spec-b"))
+    dot = tmp_path / ".conductor"
+    dot.mkdir(exist_ok=True)
+    (dot / "goal.md").write_text(
+        "Port docs/specs/spec-a.md ideas into docs/specs/spec-b.md until done\n"
+        "spec: docs/specs/spec-b.md\n"
+    )
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/spec-b.md.assertions.md"]
+    assert doc["sources_via"] == "goal"

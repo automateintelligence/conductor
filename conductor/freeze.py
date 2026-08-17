@@ -16,11 +16,15 @@ import glob
 import hashlib
 import json
 import os
-import re
 import shlex
 import sys
 
-from conductor.paths import project_root, resolve_gate
+from conductor.paths import (
+    AmbiguousSpecReference,
+    project_root,
+    resolve_gate,
+    spec_from_goal_text,
+)
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_ROOT = os.path.dirname(
@@ -170,16 +174,16 @@ def _assertions_source(repo_root: str) -> tuple[dict, str]:
     if os.path.isfile(goal_path):
         with open(goal_path, encoding="utf-8") as f:
             goal = f.read()
-        m = re.search(r"docs/specs/[^\s`'\"]+?\.md", goal)
-        if m:
-            rels = _source_candidates(m.group(0))
+        spec = spec_from_goal_text(goal)
+        if spec:
+            rels = _source_candidates(spec)
             for rel in rels:
                 path = os.path.join(repo_root, rel)
                 if os.path.isfile(path):
                     return {rel: _sha256_file(path)}, "goal"
             raise MissingAssertionsSource(
                 f"missing-assertions-source: the goal names "
-                f"{m.group(0)} but none of {', '.join(rels)} exist"
+                f"{spec} but none of {', '.join(rels)} exist"
             )
         # a goal that names no spec must not silently glob an unrelated spec's
         # assertions — fail closed
@@ -331,7 +335,11 @@ def main(argv: list | None = None) -> int:
                 "[GATE] froze done-gate baseline -> "
                 + record(gate.manifest, gate.baseline, root)
             )
-        except (AmbiguousAssertionsSource, MissingAssertionsSource) as exc:
+        except (
+            AmbiguousAssertionsSource,
+            MissingAssertionsSource,
+            AmbiguousSpecReference,
+        ) as exc:
             print(f"[GATE] {exc}", file=sys.stderr)
             return 1
         return 0

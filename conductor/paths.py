@@ -97,16 +97,73 @@ def _run_branch_slug(root: str) -> str | None:
     return suffix if _safe_slug(suffix) else None
 
 
-def _goal_slug(root: str) -> str | None:
-    """The slug of the ``docs/specs/<name>.md`` named in ``<root>/.conductor/goal.md``, else
-    None. Fallback source when ``run_branch`` is absent."""
+# --- goal.md -> the spec it declares (THE shared resolver) -----------------------------
+#
+# ``_goal_slug`` (the gate slug) and ``freeze._assertions_source`` (the frozen done-definition)
+# each kept their own copy of this regex, and each took the LEFTMOST match. Because both took
+# the leftmost they AGREED, so a spec merely mentioned in passing above the intended one
+# repointed the gate slug and the frozen assertions source together — two independent
+# declarations that could not disagree, and so could not catch it. One resolver serves both.
+
+_SPEC_PATH_RE = re.compile(r"docs/specs/[^\s`'\"]+?\.md")
+# an explicit declaration line, e.g. `spec: docs/specs/foo.md`
+_SPEC_FIELD_RE = re.compile(
+    r"^[ \t]*spec:[ \t]*(\S+)[ \t]*$", re.IGNORECASE | re.MULTILINE
+)
+
+
+class AmbiguousSpecReference(ValueError):
+    """``goal.md`` prose names more than one spec and no ``spec:`` line picks one. The goal is
+    freeform (``bin/conductor goal set`` writes whatever was typed), so a second path is as
+    likely to be background as the subject — guessing binds the run's gate and its frozen
+    done-definition to a spec nobody chose. Fail closed and name the candidates instead."""
+
+
+def spec_from_goal_text(text: str) -> str | None:
+    """THE spec a goal declares, or None when it names none.
+
+    An explicit ``spec: <path>`` line wins outright — that is how a goal whose prose mentions
+    several specs states which one is the subject. Otherwise fall back to the historical
+    ``docs/specs/<name>.md`` prose scan, which stays exact for the one-spec goals already in
+    the wild. Two or more DISTINCT prose paths with no ``spec:`` line raise
+    ``AmbiguousSpecReference``; the same path repeated is not ambiguous."""
+    field = _SPEC_FIELD_RE.search(text)
+    if field:
+        return field.group(1).strip("`'\"<>")
+    found: list[str] = []
+    for hit in _SPEC_PATH_RE.finditer(text):
+        if hit.group(0) not in found:
+            found.append(hit.group(0))
+    if len(found) > 1:
+        raise AmbiguousSpecReference(
+            "ambiguous-spec-reference: the goal names "
+            f"{len(found)} specs ({', '.join(found)}) and no `spec:` line says which one "
+            "this run is for; add a `spec: <path>` line to .conductor/goal.md"
+        )
+    return found[0] if found else None
+
+
+def spec_from_goal(root: str) -> str | None:
+    """``spec_from_goal_text`` applied to ``<root>/.conductor/goal.md``; None when there is no
+    goal file. Raises ``AmbiguousSpecReference`` exactly as the text form does."""
     try:
         with open(os.path.join(root, ".conductor", "goal.md"), encoding="utf-8") as f:
             text = f.read()
     except OSError:
         return None
-    m = re.search(r"docs/specs/[^\s`'\"]+?\.md", text)
-    return spec_slug(m.group(0)) if m else None
+    return spec_from_goal_text(text)
+
+
+def _goal_slug(root: str) -> str | None:
+    """The slug of the spec named in ``<root>/.conductor/goal.md``, else None. Fallback source
+    when ``run_branch`` is absent. An AMBIGUOUS goal yields None rather than the leftmost
+    candidate — ``resolve_gate`` turns that same ambiguity into a ``fail_closed`` verdict
+    naming the candidates, so nothing silently resolves to a spec nobody chose."""
+    try:
+        spec = spec_from_goal(root)
+    except AmbiguousSpecReference:
+        return None
+    return spec_slug(spec) if spec else None
 
 
 def _ambient_slug(root: str) -> tuple[str | None, str]:
@@ -298,7 +355,11 @@ def resolve_gate(
       (ii) the ``run_branch`` slug and the ``goal.md`` spec DISAGREE — ``run_branch`` was
            repointed onto a DIFFERENT (possibly already-green, frozen) gate than the one this
            run declared. ``/conductor:start`` writes the two together, so at run time they
-           agree; a mismatch is repointed metadata.
+           agree; a mismatch is repointed metadata; or
+      (iii) ``goal.md`` names SEVERAL specs and no ``spec:`` line picks one
+           (``AmbiguousSpecReference``) — the run declares no single spec, so clause (ii) has
+           nothing to check against and the slug would be whichever path the prose mentions
+           first. The verdict names the candidates so a ``spec:`` line resolves it.
     A repo with no frozen gate at all, and a run whose run_branch/goal.md agree, is never
     affected."""
     root = repo_root or project_root()
@@ -339,6 +400,15 @@ def resolve_gate(
 
     fail_closed = None
     if not explicit:
+        try:
+            spec_from_goal(root)
+        except AmbiguousSpecReference as exc:
+            # (iii) the goal declares no single spec, so neither the gate slug nor the
+            # cross-check against run_branch can be derived — refuse rather than run against
+            # whichever candidate happens to come first in the prose.
+            return GateResolution(
+                directory, manifest, baseline, rundir, slug, source, str(exc)
+            )
         if not os.path.exists(baseline):
             # (i) dodge onto an UNFROZEN gate while a frozen gate exists elsewhere.
             flat_frozen = os.path.isfile(os.path.join(flat, ".frozen"))
