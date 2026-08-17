@@ -16,10 +16,12 @@ deterministic regardless of what is installed on the host.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +29,9 @@ from pathlib import Path
 import pytest
 
 from conductor import resume_script as rs
+
+# The repo root — the child pytest run in the orphan check needs it on PYTHONPATH and as cwd.
+ROOT = str(Path(__file__).resolve().parents[2])
 
 pytestmark = pytest.mark.skipif(
     shutil.which("bash") is None, reason="driver execution needs bash"
@@ -69,6 +74,15 @@ exit "${FAKE_WORKER_RC:-0}"
 _FAKE_CONDUCTOR = """#!/usr/bin/env bash
 exit "${FAKE_GATE_RC:-1}"
 """
+
+
+def _killpg(pid: int) -> None:
+    """SIGKILL a whole process GROUP. Everything this rig spawns spawns children of its own —
+    the fire runs the worker, the worker can leave descendants — and signalling the tracked
+    pid alone left those alive past the end of pytest. Every spawn here is therefore its own
+    group leader (`start_new_session`) so the group id is the pid we already hold."""
+    with contextlib.suppress(OSError):
+        os.killpg(pid, signal.SIGKILL)
 
 
 def _wait_for(path: Path, what: str) -> None:
@@ -119,20 +133,29 @@ class Rig:
     def run(
         self, timeout: float = _DEADLINE, **extra: str
     ) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [str(self.script)],
-            env=self.env(**extra),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        """A fire run to completion. NOT `subprocess.run(timeout=...)`: on timeout that kills
+        only the direct child and returns, leaving the worker the fire spawned running."""
+        proc = self.start(_stream=subprocess.PIPE, **extra)
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _killpg(proc.pid)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.communicate(timeout=5)
+            raise
+        return subprocess.CompletedProcess(proc.args, proc.returncode or 0, out, err)
 
-    def start(self, **extra: str) -> subprocess.Popen:
+    def start(
+        self, _stream: int = subprocess.DEVNULL, **extra: str
+    ) -> subprocess.Popen:
         proc = subprocess.Popen(
             [str(self.script)],
             env=self.env(**extra),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=_stream,
+            stderr=_stream,
+            text=True,
+            # Own process group, so teardown can reach the fire AND its worker.
+            start_new_session=True,
         )
         self.spawned.append(proc)
         return proc
@@ -153,6 +176,7 @@ class Rig:
             cwd=str(cwd),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         self.spawned.append(proc)
         _wait_for(ready, f"decoy {tag} start")
@@ -188,21 +212,19 @@ class Rig:
         return [ln for ln in self.calls.read_text().splitlines() if ln.strip()]
 
     def cleanup(self) -> None:
+        """Tear down by GROUP, and reach everything — including a rig whose test failed before
+        writing its release marker, which is the case that used to leak."""
         for pid in self.adopted:
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except (
-                ProcessLookupError,
-                PermissionError,
-            ):  # pragma: no cover - defensive
-                pass
+            _killpg(pid)
         for proc in self.spawned:
-            if proc.poll() is None:
-                proc.send_signal(signal.SIGKILL)
-            try:
+            _killpg(proc.pid)
+            proc.kill()  # the leader itself, in case the group was already gone
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    with contextlib.suppress(OSError):
+                        stream.close()
+            with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:  # pragma: no cover - defensive
-                pass
 
 
 @pytest.fixture
@@ -310,15 +332,18 @@ def test_two_driver_invocations_serialize_on_the_lock(make_rig):
     env = {"FAKE_WORKER_HOLD": str(hold), "FAKE_WORKER_STARTED": str(started)}
 
     first = rig.start(**env)
-    _wait_for(started, "first fire to enter the worker holding the lock")
+    # The release belongs in `finally`: an assertion below fires while the worker is still
+    # blocked on the marker, and a held fire must not depend on the test passing to be let go.
+    try:
+        _wait_for(started, "first fire to enter the worker holding the lock")
 
-    second = rig.run(**env)
+        second = rig.run(**env)
 
-    assert second.returncode == 0, (second.stdout, second.stderr)
-    assert "skip reason=lock-held" in rig.log_text(), rig.log_text()
-    assert len(rig.worker_calls()) == 1, rig.worker_calls()
-
-    rig.release(hold)
+        assert second.returncode == 0, (second.stdout, second.stderr)
+        assert "skip reason=lock-held" in rig.log_text(), rig.log_text()
+        assert len(rig.worker_calls()) == 1, rig.worker_calls()
+    finally:
+        rig.release(hold)
     assert first.wait(timeout=_DEADLINE) == 0
 
 
@@ -455,6 +480,90 @@ def test_a_fire_reaches_the_worker_and_logs_a_distinguishable_outcome(make_rig):
     assert "fire-start posture=supervised" in log, log
     assert "fire-end rc=7" in log, log
     assert "skip reason=" not in log, log
+
+
+# ---- 6. the rig's own teardown: a FAILING run must not leak processes ----
+#
+# Every test above spawns real bash that blocks on a marker file. `cleanup` SIGKILLed the
+# tracked parent pids only, so the fire's own child — the fake worker in its wait loop — was
+# never signalled and outlived pytest. It only shows up when a test fails BEFORE its release
+# marker is written, which is precisely when the suite is least able to tell you about it. So
+# the check runs the failure for real, in a child pytest, and looks at /proc afterwards.
+
+_ORPHAN_CASE = """
+import pytest
+from tests.conductor.test_resume_driver_exec import Rig, make_rig, _wait_for  # noqa: F401
+
+
+def test_fails_while_a_fire_holds_the_lock(make_rig):
+    rig = make_rig("plain-host-orphan")
+    started = rig.project / "worker.started"
+    hold = rig.project / "worker.hold"
+    rig.start(FAKE_WORKER_HOLD=str(hold), FAKE_WORKER_STARTED=str(started))
+    _wait_for(started, "the fire to reach the worker")
+    # The failure a real assertion would raise here — the release marker is never written.
+    assert False, "deliberate failure with a fire in flight"
+"""
+
+
+def _procs_under(needle: str) -> list[str]:
+    """Live processes whose argv mentions `needle` — the child run's basetemp, so nothing
+    belonging to this pytest or the developer's machine can match."""
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if needle in argv:
+            found.append(f"{entry.name}: {argv.strip()}")
+    return found
+
+
+@_needs_real_flock
+def test_a_failing_test_leaves_no_process_behind(tmp_path):
+    """Teardown has to reap the whole process GROUP. Killing the tracked pid leaves the fake
+    worker — a grandchild blocked on a marker that a failed test never writes — running after
+    pytest returns, which is how a stray `claude` was observed surviving the suite."""
+    basetemp = tmp_path / "child-basetemp"
+    case = tmp_path / "test_orphan_case.py"
+    case.write_text(_ORPHAN_CASE)
+
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(case),
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            f"--basetemp={basetemp}",
+        ],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": ROOT},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert child.returncode != 0, "the child run was supposed to FAIL"
+    assert "deliberate failure" in child.stdout, child.stdout
+
+    try:
+        # A short grace period only: teardown already ran before the child exited, so
+        # anything still alive here is genuinely orphaned, not merely slow to die.
+        deadline = time.monotonic() + 5.0
+        survivors = _procs_under(str(basetemp))
+        while survivors and time.monotonic() < deadline:
+            time.sleep(_POLL)
+            survivors = _procs_under(str(basetemp))
+        assert not survivors, "orphans survived a failing run:\n" + "\n".join(survivors)
+    finally:
+        for line in _procs_under(str(basetemp)):
+            with contextlib.suppress(OSError, ValueError):
+                os.kill(int(line.split(":", 1)[0]), signal.SIGKILL)
 
 
 # ---- 5. the other silent `exit 0`: a green done-gate ----
