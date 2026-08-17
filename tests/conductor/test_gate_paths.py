@@ -310,6 +310,126 @@ def test_explicit_spec_field_keeps_an_otherwise_ambiguous_goal_running(
     assert paths.gate_slug(str(tmp_path)) == paths.spec_slug("docs/specs/beta.md")
 
 
+# --- configurable spec roots (`$CONDUCTOR_SPEC_ROOTS`) ----------------------------------
+#
+# The prose fallback's root was a literal `docs/specs/`, so a repo that keeps specs anywhere
+# else had NO prose resolution at all — conductor's own specs live under
+# `docs/superpowers/specs/`, and a goal naming one resolved to nothing, which
+# `freeze._assertions_source` then reported as `unidentifiable-assertions-source`.
+#
+# A LIST, not a single root: conductor's own repo holds `docs/specs/2026-07-05-*.md` AND
+# `docs/superpowers/specs/2026-08-10-*.md` at the same time, so "move them all" is not an
+# available answer. Setting the variable REPLACES the default rather than extending it, so a
+# repo can also scope a stale tree OUT — an unremovable `docs/specs` would manufacture
+# `AmbiguousSpecReference` against specs the run does not care about, with no way to fix it.
+
+_DUAL_HOST = "docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md"
+
+
+def test_the_default_spec_root_is_docs_specs(monkeypatch):
+    monkeypatch.delenv("CONDUCTOR_SPEC_ROOTS", raising=False)
+    assert paths.spec_roots() == ("docs/specs",)
+
+
+def test_an_unconfigured_project_still_ignores_prose_outside_docs_specs(monkeypatch):
+    # the DEFAULT is exactly today's behaviour: no existing project changes
+    monkeypatch.delenv("CONDUCTOR_SPEC_ROOTS", raising=False)
+    assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST} until done\n") is None
+    assert paths.spec_from_goal_text("Implement docs/specs/alpha.md\n") == (
+        "docs/specs/alpha.md"
+    )
+
+
+def test_conductors_own_spec_resolves_once_its_root_is_configured(monkeypatch):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS",
+        os.pathsep.join(("docs/specs", "docs/superpowers/specs")),
+    )
+    assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST} until done\n") == (
+        _DUAL_HOST
+    )
+
+
+def test_configuring_extra_roots_keeps_docs_specs_working(monkeypatch):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS",
+        os.pathsep.join(("docs/specs", "docs/superpowers/specs")),
+    )
+    assert paths.spec_from_goal_text("Implement docs/specs/alpha.md\n") == (
+        "docs/specs/alpha.md"
+    )
+
+
+def test_a_third_root_of_the_projects_own_choosing_resolves(monkeypatch):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS",
+        os.pathsep.join(("docs/specs", "docs/superpowers/specs", "spec")),
+    )
+    assert paths.spec_from_goal_text("Implement spec/payments.md\n") == (
+        "spec/payments.md"
+    )
+
+
+def test_ambiguity_still_fires_across_two_configured_roots(monkeypatch):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS",
+        os.pathsep.join(("docs/specs", "docs/superpowers/specs")),
+    )
+    text = f"Port docs/specs/alpha.md ideas into {_DUAL_HOST} until done\n"
+    with pytest.raises(paths.AmbiguousSpecReference) as excinfo:
+        paths.spec_from_goal_text(text)
+    message = str(excinfo.value)
+    assert "docs/specs/alpha.md" in message and _DUAL_HOST in message
+
+
+def test_assertions_siblings_stay_excluded_under_a_configured_root(monkeypatch):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS",
+        os.pathsep.join(("docs/specs", "docs/superpowers/specs")),
+    )
+    sibling = _DUAL_HOST[: -len(".md")] + ".assertions.md"
+    text = f"Implement {_DUAL_HOST} and keep {sibling} green\n"
+    assert paths.spec_from_goal_text(text) == _DUAL_HOST
+
+
+def test_the_explicit_spec_field_stays_root_agnostic(monkeypatch):
+    # the escape hatch predates the configurable roots and must not be narrowed to them
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/specs")
+    assert paths.spec_from_goal_text(f"spec: {_DUAL_HOST}\n") == _DUAL_HOST
+    assert paths.spec_from_goal_text("spec: vendor/requirements/x.md\n") == (
+        "vendor/requirements/x.md"
+    )
+
+
+def test_a_trailing_slash_on_a_configured_root_is_accepted(monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/superpowers/specs/")
+    assert paths.spec_roots() == ("docs/superpowers/specs",)
+    assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST}\n") == _DUAL_HOST
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/etc/specs",  # absolute: roots are repo-relative and get joined onto repo_root
+        "docs/../../specs",  # traversal out of the repo
+        os.pathsep,  # explicitly configured, names nothing
+    ],
+)
+def test_an_unusable_spec_roots_value_is_refused_not_silently_defaulted(
+    monkeypatch, value
+):
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", value)
+    with pytest.raises(paths.InvalidSpecRoots, match="CONDUCTOR_SPEC_ROOTS"):
+        paths.spec_roots()
+
+
+def test_the_roots_are_read_per_call_not_frozen_at_import(monkeypatch):
+    monkeypatch.delenv("CONDUCTOR_SPEC_ROOTS", raising=False)
+    assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST}\n") is None
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "docs/superpowers/specs")
+    assert paths.spec_from_goal_text(f"Implement {_DUAL_HOST}\n") == _DUAL_HOST
+
+
 # --- gate_dir: explicit slug forces namespaced; ambient slug falls back until built -------
 
 

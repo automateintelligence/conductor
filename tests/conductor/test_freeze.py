@@ -564,3 +564,171 @@ def test_explicit_spec_field_picks_the_source_among_several(tmp_path):
     doc = json.loads(open(baseline).read())
     assert list(doc["sources"]) == ["docs/specs/spec-b.md.assertions.md"]
     assert doc["sources_via"] == "goal"
+
+
+# ------------------------------------------------- configurable spec roots (freeze side)
+#
+# Two sites in this module hardcoded `docs/specs`: the GOAL-derived source path (its regex
+# lived here until it was single-sourced into `paths.spec_from_goal_text`) and the NO-GOAL
+# glob below. A repo keeping specs anywhere else got `unidentifiable-assertions-source` from
+# the first and a silent `{}, "none"` from the second — conductor's own dual-host spec, which
+# lives under `docs/superpowers/specs/`, hit exactly that.
+
+_DUAL_HOST_ROOT = "docs/superpowers/specs"
+_DUAL_HOST_STEM = "2026-08-10-codex-dual-host-conductor-design"
+_DUAL_HOST_SPEC = f"{_DUAL_HOST_ROOT}/{_DUAL_HOST_STEM}.md"
+_DUAL_HOST_SOURCE = f"{_DUAL_HOST_ROOT}/{_DUAL_HOST_STEM}.assertions.md"
+
+
+def _dual_host_spec(tmp_path, goal=True):
+    """Conductor's REAL spec pair as it exists on main (commit a38e90f): the design doc and
+    its spec-craft-named `.assertions.md` sibling, under `docs/superpowers/specs/`."""
+    d = tmp_path / _DUAL_HOST_ROOT
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{_DUAL_HOST_STEM}.md").write_text("# dual-host conductor design\n")
+    source = d / f"{_DUAL_HOST_STEM}.assertions.md"
+    source.write_text("# assertions for the dual-host design\n")
+    if goal:
+        dot = tmp_path / ".conductor"
+        dot.mkdir(exist_ok=True)
+        (dot / "goal.md").write_text(f"Implement {_DUAL_HOST_SPEC} until done\n")
+    return source
+
+
+# --- site 2: the goal-derived assertions-source path ---
+
+
+def test_a_goal_naming_conductors_own_spec_fails_closed_while_unconfigured(
+    tmp_path, monkeypatch
+):
+    # the DEFAULT is exactly today's behaviour, including this refusal
+    monkeypatch.delenv("CONDUCTOR_SPEC_ROOTS", raising=False)
+    manifest, baseline = _setup(tmp_path)
+    _dual_host_spec(tmp_path)
+    with pytest.raises(Exception, match="unidentifiable-assertions-source"):
+        freeze.record(manifest, baseline, str(tmp_path))
+
+
+def test_a_goal_naming_conductors_own_spec_freezes_its_sibling_once_configured(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS", os.pathsep.join(("docs/specs", _DUAL_HOST_ROOT))
+    )
+    manifest, baseline = _setup(tmp_path)
+    source = _dual_host_spec(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == [_DUAL_HOST_SOURCE]
+    assert doc["sources_via"] == "goal"
+    # and it is really frozen, not merely recorded
+    assert freeze.verify(manifest, baseline, str(tmp_path))["ok"] is True
+    source.write_text(source.read_text() + "- weakened after freeze\n")
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("assertions-source-changed" in t for t in res["tampered"])
+
+
+def test_configuring_extra_roots_leaves_a_docs_specs_goal_alone(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS", os.pathsep.join(("docs/specs", _DUAL_HOST_ROOT))
+    )
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/fixture-spec.md.assertions.md"]
+
+
+def test_a_goal_naming_specs_in_two_configured_roots_still_fails_closed(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS", os.pathsep.join(("docs/specs", _DUAL_HOST_ROOT))
+    )
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)
+    _dual_host_spec(tmp_path, goal=False)
+    dot = tmp_path / ".conductor"
+    dot.mkdir(exist_ok=True)
+    (dot / "goal.md").write_text(
+        f"Port docs/specs/fixture-spec.md ideas into {_DUAL_HOST_SPEC} until done\n"
+    )
+    with pytest.raises(Exception, match="ambiguous-spec-reference") as excinfo:
+        freeze.record(manifest, baseline, str(tmp_path))
+    message = str(excinfo.value)
+    assert "docs/specs/fixture-spec.md" in message and _DUAL_HOST_SPEC in message
+
+
+# --- site 3: the no-goal glob fallback ---
+
+
+def test_the_glob_fallback_ignores_an_unconfigured_root(tmp_path, monkeypatch):
+    # today's behaviour preserved: with no configuration the glob sees only docs/specs
+    monkeypatch.delenv("CONDUCTOR_SPEC_ROOTS", raising=False)
+    manifest, baseline = _setup(tmp_path)
+    _dual_host_spec(tmp_path, goal=False)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert "sources" not in doc
+
+
+def test_the_glob_fallback_finds_a_source_under_a_configured_root(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS", os.pathsep.join(("docs/specs", _DUAL_HOST_ROOT))
+    )
+    manifest, baseline = _setup(tmp_path)
+    _dual_host_spec(tmp_path, goal=False)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == [_DUAL_HOST_SOURCE]
+    assert doc["sources_via"] == "glob"
+
+
+def test_the_glob_fallback_is_ambiguous_across_two_configured_roots(
+    tmp_path, monkeypatch
+):
+    # freezing every root's assertions silently would let an edit to an UNRELATED spec break
+    # this run's gate — the same reason two candidates in one root fail closed
+    monkeypatch.setenv(
+        "CONDUCTOR_SPEC_ROOTS", os.pathsep.join(("docs/specs", _DUAL_HOST_ROOT))
+    )
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)
+    _dual_host_spec(tmp_path, goal=False)
+    with pytest.raises(Exception, match="ambiguous-assertions-source") as excinfo:
+        freeze.record(manifest, baseline, str(tmp_path))
+    message = str(excinfo.value)
+    assert "docs/specs/fixture-spec.md.assertions.md" in message
+    assert _DUAL_HOST_SOURCE in message
+
+
+def test_a_spec_file_is_not_mistaken_for_its_own_assertions_source(
+    tmp_path, monkeypatch
+):
+    # the glob stays `*.assertions.md`: the spec `.md` beside it is not a candidate
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", _DUAL_HOST_ROOT)
+    manifest, baseline = _setup(tmp_path)
+    _dual_host_spec(tmp_path, goal=False)
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == [_DUAL_HOST_SOURCE]  # not the spec .md
+
+
+def test_an_unusable_spec_roots_value_makes_the_freeze_cli_refuse(
+    tmp_path, monkeypatch, capsys
+):
+    # a typo'd variable must be a greppable refusal, not a traceback out of `gate freeze`
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+    monkeypatch.setenv("CONDUCTOR_MANIFEST", manifest)
+    monkeypatch.setenv("CONDUCTOR_FREEZE_BASELINE", baseline)
+    monkeypatch.setenv("CONDUCTOR_SPEC_ROOTS", "/etc/specs")
+    assert freeze.main(["freeze"]) == 1
+    err = capsys.readouterr().err
+    assert "invalid-spec-roots" in err and "Traceback" not in err
+    assert not os.path.exists(baseline)

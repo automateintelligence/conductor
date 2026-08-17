@@ -21,9 +21,11 @@ import sys
 
 from conductor.paths import (
     AmbiguousSpecReference,
+    InvalidSpecRoots,
     project_root,
     resolve_gate,
     spec_from_goal_text,
+    spec_roots,
 )
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
@@ -132,7 +134,8 @@ def _source_candidates(spec_path: str) -> list[str]:
 
 
 class AmbiguousAssertionsSource(RuntimeError):
-    """Multiple docs/specs/*.assertions.md and no goal names one — fail closed."""
+    """Multiple ``<spec-root>/*.assertions.md`` across ``paths.spec_roots()`` and no goal names
+    one — fail closed."""
 
 
 class MissingAssertionsSource(RuntimeError):
@@ -222,14 +225,19 @@ def _assertions_source(repo_root: str) -> tuple[dict, str]:
     recorded: in a multi-spec repo the glob below would otherwise fail closed
     (`ambiguous-assertions-source`) or a stale `goal.md` would bind the wrong spec.
     Else, precise path: parse `<project>/.conductor/goal.md` for a
-    `docs/specs/<name>.md` path and take its assertions sibling under either
+    `<spec-root>/<name>.md` path and take its assertions sibling under either
     accepted spelling (`_source_candidates`: spec-craft's `<stem>.assertions.md`
     first, then the legacy `<spec>.md.assertions.md`); a goal whose named spec has
     NEITHER — or that names no spec at all — fails closed. Glob
-    `docs/specs/*.assertions.md` (which matches both spellings) ONLY when no goal file
+    `<spec-root>/*.assertions.md` (which matches both spellings) ONLY when no goal file
     exists: exactly one match -> use it; multiple -> fail closed (freezing every
     spec's assertions silently would let an edit to an UNRELATED spec's
-    assertions break this run's gate); none -> no source entry (old behavior)."""
+    assertions break this run's gate); none -> no source entry (old behavior).
+
+    Both the prose parse and the glob search `paths.spec_roots()`, which is `docs/specs`
+    unless `$CONDUCTOR_SPEC_ROOTS` says otherwise. They MUST stay the same set: a goal that
+    resolves through one root while the glob searches another would freeze one spec's
+    done-definition and verify against a different one's."""
     override = os.environ.get("CONDUCTOR_ASSERTIONS_SOURCE")
     if override:
         base = (
@@ -263,12 +271,20 @@ def _assertions_source(repo_root: str) -> tuple[dict, str]:
             )
         # a goal that names no spec must not silently glob an unrelated spec's
         # assertions — fail closed
+        roots = ", ".join(f"{r}/<name>.md" for r in spec_roots())
         raise MissingAssertionsSource(
             "unidentifiable-assertions-source: .conductor/goal.md exists but "
-            "names no docs/specs/<name>.md path"
+            f"names no {roots} path (and no `spec:` line); set CONDUCTOR_SPEC_ROOTS "
+            "if this project keeps specs elsewhere"
         )
     matches = sorted(
-        glob.glob(os.path.join(repo_root, "docs", "specs", "*.assertions.md"))
+        {
+            match
+            for root in spec_roots()
+            for match in glob.glob(
+                os.path.join(repo_root, *root.split("/"), "*.assertions.md")
+            )
+        }
     )
     if len(matches) > 1:
         rels = ", ".join(os.path.relpath(p, repo_root) for p in matches)
@@ -394,6 +410,14 @@ def main(argv: list | None = None) -> int:
         from conductor import gate_lint
 
         return gate_lint.main()
+    # A typo'd $CONDUCTOR_SPEC_ROOTS must REFUSE, not end in a traceback. Checked before
+    # resolve_gate because that parses .conductor/goal.md through the very same roots, so the
+    # crash would otherwise escape upstream of the domain-error handler around `record` below.
+    try:
+        spec_roots()
+    except InvalidSpecRoots as exc:
+        print(f"[GATE] {exc}", file=sys.stderr)
+        return 1
     # Per-spec gate (multi-spec safety): freeze/verify the manifest+baseline resolve_gate()
     # points at — assertions/<slug>/ for a namespaced run, else flat — with the same §5
     # fail-closed verdict the done-gate runner uses (single-sourced in paths.resolve_gate).
@@ -417,6 +441,7 @@ def main(argv: list | None = None) -> int:
             MissingAssertionsSource,
             UnreadableAssertionsSource,
             AmbiguousSpecReference,
+            InvalidSpecRoots,
         ) as exc:
             print(f"[GATE] {exc}", file=sys.stderr)
             return 1
