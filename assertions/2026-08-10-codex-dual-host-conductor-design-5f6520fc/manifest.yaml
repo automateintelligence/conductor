@@ -30,3 +30,11 @@ assertions:
     timeout: 180
     level: spec
     kind: property
+  - id: a-dh-3-codex-launch-resolves-only-conductor-artifacts
+    claim: "every artifact the Codex worker launch depends on to resolve the autodev skill was shipped or written by Conductor, identified by SKILL.md frontmatter, and follows the package root when it is relocated"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_3_codex_launch_resolves_installed_artifacts.py"
+    setup: ""
+    teardown: ""
+    timeout: 180
+    level: spec
+    kind: contract
