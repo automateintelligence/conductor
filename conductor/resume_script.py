@@ -206,9 +206,10 @@ cd "$WORKTREE" || {{ printf '%s worktree-missing %s\\n' "$(ts)" "$WORKTREE" >> "
 mkdir -p "$PROJECT/.conductor"
 
 # (a) ONE headless fire at a time — the flock in the main checkout, held for the whole fire, is
-#     the SOLE fire-vs-fire mutual exclusion. It is sound because both contenders are this same
-#     generated driver contending on one named file: no process-name matching, no host
-#     assumptions, released by the kernel if a fire dies.
+#     the ONLY exclusion between OS-DRIVER fires. That is the whole of its scope: both contenders
+#     are this same generated driver contending on one named file, which is why it is sound (no
+#     process-name matching, no host assumptions, released by the kernel if a fire dies) and also
+#     why it excludes nothing else. It is NOT fire-vs-anything exclusion — see KNOWN GAP below.
 #
 #     A `pgrep -f 'claude'` + /proc cwd heuristic used to sit here as a second guard. It was
 #     removed because it could not work: the `cd "$WORKTREE"` above means the fire's OWN cwd
@@ -219,8 +220,12 @@ mkdir -p "$PROJECT/.conductor"
 #     Do NOT reintroduce a process-name heuristic: anything that must exclude a driver has to
 #     contend on THIS lock. See docs/reviews/2026-08-12-codex-host-ground-truth.md.
 #
-#     KNOWN GAP (owner-visible, deliberate): an INTERACTIVE `/conductor:autodev` does not take
-#     this lock, so it can now overlap with a cron fire. Nothing detects that.
+#     KNOWN GAP (owner-visible, deliberate — architectural fix is the owner's call): the OTHER
+#     tier takes no lock at all. `/conductor:start` also registers an IN-SESSION scheduled
+#     `/conductor:autodev` (harness CronCreate), and that tick — like a hand-run
+#     `/conductor:autodev` — never opens this file, so a Tier-A tick and a Tier-B fire can work
+#     the same run branch concurrently and nothing detects it. Do not describe this lock as
+#     fire-vs-fire exclusion in general; it is driver-vs-driver only.
 exec 9>"$PROJECT/.conductor/resume.lock"
 if ! flock -n 9; then
     printf '%s skip reason=lock-held lock=%s\\n' "$(ts)" "$PROJECT/.conductor/resume.lock" >> "$LOG"

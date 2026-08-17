@@ -275,12 +275,13 @@ def test_a_decoy_tool_shell_in_the_worktree_cwd_does_not_block_a_fire(make_rig):
     assert len(rig.worker_calls()) == 1, rig.worker_calls()
 
 
-# ---- 3. flock is the SOLE fire-vs-fire exclusion, and contention is EVIDENCE ----
+# ---- 3. the flock: OS-driver vs OS-driver only, and contention is EVIDENCE ----
 
 
 def test_two_driver_invocations_serialize_on_the_lock(make_rig):
     """With the pgrep heuristic gone, `flock -n 9` on `<project>/.conductor/resume.lock` is
-    the only thing keeping two fires off one run branch. A blocked fire must leave a
+    the only thing keeping two OS-DRIVER fires off one run branch (it excludes nothing else —
+    the in-session CronCreate tier never opens that file). A blocked fire must leave a
     greppable reason in the log — a bare `exit 0` makes a permanently blocked run
     indistinguishable from a healthy no-op."""
     rig = make_rig("plain-host-lock")

@@ -240,18 +240,24 @@ def test_write_nudge_fires_on_command_prefix_temp_env(tmp_path, capsys):
     assert "unattended" in err
 
 
-def test_render_preserves_the_two_guards():
-    """Shape-level smoke only. This assertion USED to also require `/proc/$pid/cwd` — the
-    pgrep double-drive heuristic — and that substring check is exactly why a guard that
-    never once worked shipped green: it proved the text was emitted, never that the bash
-    did anything. The heuristic is gone; the behaviour these guards are supposed to have is
-    now proven by executing the driver in tests/conductor/test_resume_driver_exec.py."""
-    s = _render()
-    assert "flock -n 9" in s  # (a) one fire at a time — the SOLE fire-vs-fire exclusion
-    assert "assert run --level spec" in s  # (b) done-gate-green no-op
-    assert (
-        'CONDUCTOR_HOME="$WORKTREE"' in s
-    )  # resumes in the worktree, not owner checkout
+def test_render_keeps_both_guards_as_EXECUTABLE_lines():
+    """Shape-level smoke, deliberately kept as such — and it is NOT the pin against the
+    double-drive regression; `test_render_has_no_process_name_double_drive_heuristic` below is
+    (it fails on a revert, this cannot), and the guards' actual behaviour is proven by running
+    the driver in tests/conductor/test_resume_driver_exec.py. What it still buys, after the
+    `assert "/proc/$pid/cwd" in s` fiasco — a substring check that proved text was emitted and
+    nothing about what the bash did — is one thing that suite cannot: it reads EXECUTABLE lines
+    only, so a guard commented out (or demoted to prose, which is how this file documents the
+    heuristic it deleted) fails here instead of quietly never running."""
+    code = "\n".join(
+        ln for ln in _render().splitlines() if not ln.lstrip().startswith("#")
+    )
+    # (a) one fire at a time. Scope: OS-driver vs OS-driver — the in-session CronCreate tier
+    # takes no lock, so this is not fire-vs-anything exclusion.
+    assert "flock -n 9" in code
+    assert "assert run --level spec" in code  # (b) done-gate-green no-op
+    # resumes in the worktree, never the owner checkout
+    assert 'CONDUCTOR_HOME="$WORKTREE"' in code
 
 
 def test_render_has_no_process_name_double_drive_heuristic():
