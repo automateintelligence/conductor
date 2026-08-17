@@ -1,3 +1,6 @@
+import json
+import os
+
 import pytest
 
 from conductor import preflight
@@ -66,36 +69,108 @@ def test_discovers_conductor_own_root(monkeypatch, tmp_path):
 # the opposite-host review wrapper, which is `/codex` only when the run is hosted on Claude.
 
 
-def _codex_install(tmp_path, monkeypatch, *, review_wrapper="claude"):
-    """A Codex machine with every conducted skill installed the way Codex installs them:
-    flat directories under `$CODEX_HOME/skills/`, no plugin namespace anywhere."""
-    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
-    home = tmp_path / "codex-home"
-    monkeypatch.setenv("CODEX_HOME", str(home))
-    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
-    names = [
-        "expectations",
-        "executable-assertions",
-        "assertions-to-tests",
+def _plugin_list_json(roots):
+    """What `codex plugin list --json` prints — the shape verified on codex-cli 0.147.0."""
+    return json.dumps(
+        {
+            "installed": [
+                {
+                    "pluginId": f"{name}@openai-curated",
+                    "name": name,
+                    "marketplaceName": "openai-curated",
+                    "version": "d6169bef",
+                    "installed": True,
+                    "enabled": True,
+                    "source": {"source": "local", "path": str(path)},
+                }
+                for name, path in roots.items()
+            ]
+        }
+    )
+
+
+def _stub_codex_on_path(tmp_path, monkeypatch, roots):
+    """A `codex` on PATH that reports `roots` as its installed plugins."""
+    bindir = tmp_path / "stub-bin"
+    bindir.mkdir(exist_ok=True)
+    codex = bindir / "codex"
+    codex.write_text(
+        f"#!/bin/sh\nprintf '%s' '{_plugin_list_json(roots)}'\nexit 0\n",
+    )
+    os.chmod(codex, 0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    return bindir
+
+
+#: Which plugin owns each conducted skill. Environment-provided skills (no plugin in the
+#: requirement) are absent on purpose: nothing claims a plugin for them, so nothing has to be
+#: verified for them either.
+_PLUGIN_SKILLS = {
+    "spec-craft": ["expectations", "executable-assertions"],
+    "conductor": ["assertions-to-tests"],
+    "superpowers": [
         "subagent-driven-development",
         "requesting-code-review",
         "receiving-code-review",
         "writing-plans",
-        "code-review",
-        review_wrapper,
-        "document-release",
-    ]
-    for name in names:
+    ],
+}
+
+
+def _codex_install(
+    tmp_path, monkeypatch, *, review_wrapper="claude", flat_only=False, without=()
+):
+    """A Codex machine with the conducted stack installed the way Codex installs it.
+
+    Plugin-owned skills live inside their plugin's root, which `codex plugin list --json`
+    reports — that is what makes `spec-craft:expectations` attributable at all. Environment-
+    provided ones are flat under `$CODEX_HOME/skills/`, which is where a user skill lives.
+
+    `flat_only` is the machine where someone copied the skill directories in by hand: every
+    name resolves, and not one of them can be attributed to the plugin that is supposed to
+    own it.
+    """
+    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    for name in ("code-review", review_wrapper, "document-release"):
         d = home / "skills" / name
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
+    roots = {}
+    for plugin, skills in _PLUGIN_SKILLS.items():
+        root = tmp_path / "codex-cache" / plugin
+        for name in skills:
+            if name in without:
+                continue
+            d = (home / "skills" / name) if flat_only else (root / "skills" / name)
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
+        roots[plugin] = root
+    _stub_codex_on_path(tmp_path, monkeypatch, {} if flat_only else roots)
     return home
 
 
 def test_preflight_succeeds_against_a_codex_install(tmp_path, monkeypatch):
     _codex_install(tmp_path, monkeypatch)
     out = preflight.check(project_root=str(tmp_path / "project"))
-    assert out["ok"], out["missing"]
+    assert out["ok"], out
+
+
+def test_a_hand_copied_codex_stack_is_reported_unverifiable_not_healthy(
+    tmp_path, monkeypatch
+):
+    """Every skill is present and invocable, so nothing is missing — but no plugin claims any
+    of them, so preflight cannot say the conducted stack is the conducted stack."""
+    _codex_install(tmp_path, monkeypatch, flat_only=True)
+    out = preflight.check(project_root=str(tmp_path / "project"))
+    assert not out["ok"], out
+    assert out["missing"] == []
+    assert "$expectations" in out["unverified"]
+    assert "$writing-plans" in out["unverified"]
+    # environment-provided skills claim no plugin, so they are not in question
+    assert "$document-release" not in out["unverified"]
 
 
 def test_preflight_still_succeeds_against_a_claude_install(tmp_path, monkeypatch):
@@ -193,7 +268,9 @@ def test_a_flat_codex_skill_is_reported_unverifiable_never_as_a_pass():
     preflight cannot justify calling it spec-craft's, and a gate that greens on what it cannot
     check is worth nothing."""
     out = preflight.check(
-        required=["spec-craft:expectations"], available={"expectations"}, host_id="codex"
+        required=["spec-craft:expectations"],
+        available={"expectations"},
+        host_id="codex",
     )
     assert not out["ok"], out
     assert out["unverified"] == ["$expectations"]
@@ -247,7 +324,9 @@ def test_the_plugin_lookup_agrees_with_the_program_the_cron_driver_runs(tmp_path
 
     from conductor.hosts import codex
 
-    payload = _plugin_list_json({"spec-craft": tmp_path / "sc", "other": tmp_path / "o"})
+    payload = _plugin_list_json(
+        {"spec-craft": tmp_path / "sc", "other": tmp_path / "o"}
+    )
     from_python = codex.plugin_roots_from_json(payload)
     for name in ("spec-craft", "other", "absent"):
         proc = subprocess.run(
@@ -292,10 +371,9 @@ def test_available_commands_uses_the_requested_hosts_root(tmp_path, monkeypatch)
 
 
 def test_a_codex_install_without_spec_craft_fails_closed(tmp_path, monkeypatch):
-    home = _codex_install(tmp_path, monkeypatch)
-    for name in ("expectations", "executable-assertions"):
-        (home / "skills" / name / "SKILL.md").unlink()
-        (home / "skills" / name).rmdir()
+    _codex_install(
+        tmp_path, monkeypatch, without=("expectations", "executable-assertions")
+    )
     out = preflight.check(project_root=str(tmp_path / "project"))
     assert not out["ok"]
     assert "$expectations" in out["missing"]
@@ -303,9 +381,7 @@ def test_a_codex_install_without_spec_craft_fails_closed(tmp_path, monkeypatch):
 
 
 def test_the_advice_for_a_missing_plugin_skill_names_the_plugin(tmp_path, monkeypatch):
-    home = _codex_install(tmp_path, monkeypatch)
-    (home / "skills" / "expectations" / "SKILL.md").unlink()
-    (home / "skills" / "expectations").rmdir()
+    _codex_install(tmp_path, monkeypatch, without=("expectations",))
     advice = preflight.check(project_root=str(tmp_path / "project"))["advice"]
     # The SKILL'S OWN line must name it, not merely the trailing NOTE. Asserting against the
     # joined text passes with the per-skill half deleted, because the NOTE repeats the plugin

@@ -89,20 +89,28 @@ def manifest_name(root: str, manifest_dirs: tuple[str, ...]) -> str | None:
     return None
 
 
+def plugin_contents(root: str) -> set[str]:
+    """The bare skill and command names one plugin root provides."""
+    return skill_names(f"{root}/skills/*/SKILL.md") | command_names(
+        f"{root}/commands/*.md"
+    )
+
+
+def qualified(name: str, root: str) -> set[str]:
+    """``<plugin>:<skill>`` for everything in ``root``, attributed to ``name``."""
+    return {f"{name}:{n}" for n in plugin_contents(root)}
+
+
 def scan_plugin_dir(root: str, manifest_dirs: tuple[str, ...]) -> set[str]:
     """``<plugin>:<name>`` for every skill and command in one plugin root.
 
-    An unnamed root yields nothing rather than a bare name: an unnamespaced entry would
-    match a required ``plugin:skill`` by the suffix rule in ``preflight._present`` and
-    green-light a plugin the host cannot actually load.
+    An unnamed root yields nothing rather than a bare name: an unattributed entry cannot be
+    told apart from a user skill, so on a host that drops the qualifier it would at best
+    downgrade a required ``plugin:skill`` to ``unverified`` (``preflight._resolve``) and at
+    worst suggest a plugin the host cannot actually load.
     """
     name = manifest_name(root, manifest_dirs)
-    if not name:
-        return set()
-    found = skill_names(f"{root}/skills/*/SKILL.md") | command_names(
-        f"{root}/commands/*.md"
-    )
-    return {f"{name}:{n}" for n in found}
+    return qualified(name, root) if name else set()
 
 
 def dev_plugin_roots(*env_vars: str) -> list[str]:

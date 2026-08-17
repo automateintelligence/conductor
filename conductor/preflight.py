@@ -32,15 +32,22 @@ from conductor.hosts.base import opposite
 class CheckResult(TypedDict):
     ok: bool
     missing: list[str]
-    #: One actionable line per missing skill, plus a trailing note when this host does not
-    #: resolve plugin dependencies. "Missing" alone is not actionable: `$expectations` does
-    #: not tell a Codex user that the thing to install is called `spec-craft`.
+    #: Required, present under the required NAME, and impossible to attribute to the plugin the
+    #: requirement names. A third outcome exists because the two-valued one forced a lie: on a
+    #: host that drops the plugin qualifier, "present under this name" and "this is the required
+    #: plugin's skill" are different facts, and reporting the second when only the first was
+    #: checked is how preflight greens a machine whose spec-craft is absent — or hostile.
+    unverified: list[str]
+    #: One actionable line per missing or unverifiable skill, plus a trailing note when this
+    #: host does not resolve plugin dependencies. "Missing" alone is not actionable:
+    #: `$expectations` does not tell a Codex user that the thing to install is called
+    #: `spec-craft`.
     advice: list[str]
 
 
 # Exact skills the recipe (T5) + setup (T6) invoke, written host-neutrally. `plugin:skill`
 # where the skill ships inside a plugin; a bare name where it is environment-provided (which
-# may be a user skill OR a plugin skill — the suffix rule in `_present` matches both).
+# may be a user skill OR a plugin skill — the unqualified rule in `_resolve` matches both).
 REQUIRED_SKILLS: tuple[str, ...] = (
     "spec-craft:expectations",
     "spec-craft:executable-assertions",
@@ -77,15 +84,48 @@ def available_commands(
     return discovery.adapter_for(host).discovered_commands(project_root=project_root)
 
 
-def _present(cmd: str, avail: set[str]) -> bool:
-    c = cmd.lstrip("/$")
-    if ":" in c:
-        return c in avail
-    return c in avail or any(a.endswith(f":{c}") for a in avail)
+def _resolve(name: str, adapter: discovery.CommandDiscovery, avail: set[str]) -> str:
+    """One required skill -> ``ok`` | ``unverified`` | ``missing``.
+
+    The name is matched AS THIS HOST RESOLVES IT, and the plugin qualifier is evidence that is
+    checked wherever it survives:
+
+    * Claude keeps the qualifier, so ``spec-craft:expectations`` is an exact match or nothing.
+    * Codex drops it, so ``$expectations`` may be satisfied by ``spec-craft:expectations`` —
+      a plugin skill Codex itself attributed. That is a clean pass.
+    * A skill of the required name attributed to some OTHER plugin is not the required skill.
+      It is missing, on either host: "spec-craft is not installed" is not a host-specific fact,
+      and accepting a same-named skill is an invitation to ship one.
+    * A skill of the required name with NO attribution — a flat ``$CODEX_HOME/skills/`` dir —
+      is invocable, so it is not missing, but its identity is not recoverable from a directory
+      name. That is ``unverified``: reported, never counted as a pass.
+
+    A requirement that names no plugin claims no identity, so a plugin's copy satisfies it.
+    """
+    rendered = adapter.native_invocation(name).lstrip("/$")
+    if ":" in rendered:  # this host keeps the qualifier: exact match or nothing
+        return "ok" if rendered in avail else "missing"
+    if ":" in name:
+        plugin = name.split(":", 1)[0]
+        if f"{plugin}:{rendered}" in avail:
+            return "ok"
+        return "unverified" if rendered in avail else "missing"
+    if rendered in avail or any(a.endswith(f":{rendered}") for a in avail):
+        return "ok"
+    return "missing"
 
 
-def _advice(adapter: discovery.CommandDiscovery, unresolved: list[str]) -> list[str]:
-    """One actionable line per missing skill, then the dependency note when it applies.
+def _advice(
+    adapter: discovery.CommandDiscovery,
+    unresolved: list[str],
+    unverified: list[str],
+) -> list[str]:
+    """One actionable line per missing skill, one per unverifiable one, then the dependency
+    note when it applies.
+
+    An unverifiable skill gets its own wording because the remedy is different: the skill IS
+    there, so "install it" is wrong advice and an owner who follows it learns to ignore the
+    gate. What is missing is the plugin's claim on it.
 
     The note is the Track A answer to a packaging fact A3 verified against codex-cli 0.147.0:
     ``.codex-plugin/plugin.json`` has no ``dependencies`` field — the 180 manifests in the
@@ -109,6 +149,13 @@ def _advice(adapter: discovery.CommandDiscovery, unresolved: list[str]) -> list[
             lines.append(
                 f"{rendered} — environment-provided; install a `{name}` skill on this host"
             )
+    for name in unverified:
+        plugin = name.split(":", 1)[0]
+        lines.append(
+            f"{adapter.native_invocation(name)} — present, but {adapter.id} cannot verify it is "
+            f"the `{plugin}` plugin's: it resolves as an unattributed skill. Install `{plugin}` "
+            f"as a {adapter.id} plugin so its identity is recoverable."
+        )
     if plugins and not adapter.resolves_plugin_dependencies:
         lines.append(
             f"NOTE: {adapter.id} does not resolve plugin dependencies, so installing conductor "
@@ -135,13 +182,16 @@ def check(
     # Match on the name AS THIS HOST RESOLVES IT: `native_invocation` is the single place that
     # knows Claude keeps the plugin qualifier and Codex drops it, so matching and reporting
     # cannot drift apart into a preflight that greens on a name it then prints differently.
-    unresolved = [
-        name for name in names if not _present(adapter.native_invocation(name), avail)
-    ]
+    outcomes = [(name, _resolve(name, adapter, avail)) for name in names]
+    unresolved = [name for name, out in outcomes if out == "missing"]
+    unverified = [name for name, out in outcomes if out == "unverified"]
+    # `ok` is a PASS, not an absence of hard failures: a skill whose plugin identity could not
+    # be established has not been checked, and counting it as checked is the false pass.
     return {
-        "ok": not unresolved,
+        "ok": not unresolved and not unverified,
         "missing": [adapter.native_invocation(name) for name in unresolved],
-        "advice": _advice(adapter, unresolved),
+        "unverified": [adapter.native_invocation(name) for name in unverified],
+        "advice": _advice(adapter, unresolved, unverified),
     }
 
 
@@ -150,11 +200,15 @@ if __name__ == "__main__":
     required = required_commands(host)
     result = check(host_id=host)
     ok: bool = result["ok"]
+    unverifiable = set(result["unverified"])
     for line in result["advice"]:
-        print(
-            f"MISSING: {line}" if not line.startswith("NOTE:") else line,
-            file=sys.stderr,
-        )
+        if line.startswith("NOTE:"):
+            prefix = ""
+        elif line.split(" ", 1)[0] in unverifiable:
+            prefix = "UNVERIFIED: "
+        else:
+            prefix = "MISSING: "
+        print(f"{prefix}{line}", file=sys.stderr)
     if ok:  # the documented "verify" step must confirm success, not print a blank line
         print(
             f"preflight OK: {len(required)}/{len(required)} conducted skills resolved "

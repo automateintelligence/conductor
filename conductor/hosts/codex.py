@@ -14,7 +14,10 @@ The token ``-p`` therefore does not appear in this file at all, and a test enfor
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import subprocess
 
 from conductor.hosts import discovery
 
@@ -32,6 +35,55 @@ PLUGIN_ROOT_SNIPPET = (
     'print(next((p["source"]["path"] for p in json.load(sys.stdin).get("installed") or []'
     ' if p.get("name")==sys.argv[1] and (p.get("source") or {}).get("path")),""))'
 )
+
+
+def plugin_roots_from_json(text: str) -> dict[str, str]:
+    """``codex plugin list --json`` output -> ``{plugin name: install root}``.
+
+    Shape verified against codex-cli 0.147.0: ``installed`` is a list of entries carrying
+    ``name`` and ``source.path``. Nothing here raises — malformed or unexpected output means
+    "this machine reports no plugin identities", which is a legitimate answer that
+    ``preflight`` degrades on, not an error.
+    """
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return {}
+    roots: dict[str, str] = {}
+    for entry in (data.get("installed") if isinstance(data, dict) else None) or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        source = entry.get("source")
+        path = source.get("path") if isinstance(source, dict) else None
+        if isinstance(name, str) and isinstance(path, str) and name and path:
+            roots.setdefault(name, path)
+    return roots
+
+
+def installed_plugin_roots() -> dict[str, str]:
+    """Where Codex says each installed plugin lives, or nothing if it cannot be asked.
+
+    Asking the host is the only way to attribute a skill to a plugin on Codex that does not
+    encode a cache layout: the sole root ever observed was ``$CODEX_HOME/.tmp/plugins`` and no
+    documentation makes it contractual. ``</dev/null`` because Codex subcommands hang on an
+    unredirected stdin (ground truth §"Codex help hangs"); a timeout because a preflight that
+    hangs is worse than one that reports less.
+    """
+    exe = shutil.which("codex")
+    if not exe:
+        return {}
+    try:
+        proc = subprocess.run(
+            [exe, "plugin", "list", "--json"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return plugin_roots_from_json(proc.stdout) if proc.returncode == 0 else {}
 
 
 class CodexAdapter:
@@ -247,17 +299,20 @@ class CodexAdapter:
         of Claude's slash commands), and the project-local ``./.codex/skills/`` the
         ``AGENTS.md`` dispatch table resolves.
 
-        The installed Codex *marketplace* cache is deliberately not searched, for the same
-        reason ``resume_bin_resolution`` does not glob it: the only observed root was
-        ``$CODEX_HOME/.tmp/plugins``. A preflight that greens on a guessed layout is worse
-        than one that reports the command missing. A3 is where Conductor gets a Codex catalog
-        entry at all, and it can add the leg once the layout is contractual.
+        Installed PLUGIN skills come back qualified, because Codex itself supplies the
+        attribution: ``codex plugin list --json`` reports each installed plugin's name and root,
+        and its skills live under that root. The cache LAYOUT is still not searched — the only
+        root ever observed was ``$CODEX_HOME/.tmp/plugins`` and nothing makes it contractual —
+        but asking the host is not guessing a layout, and without it no Codex machine can
+        distinguish spec-craft's ``expectations`` from any other plugin's.
         """
         home = self.source_root()
         project = project_root or os.getcwd()
         cmds = discovery.skill_names(f"{home}/skills/*/SKILL.md")
         cmds |= discovery.command_names(f"{home}/prompts/*.md")
         cmds |= discovery.skill_names(f"{project}/.{self.id}/skills/*/SKILL.md")
+        for name, root in installed_plugin_roots().items():
+            cmds |= discovery.qualified(name, root)
         cmds |= discovery.scan_plugin_dir(
             discovery.CONDUCTOR_ROOT, discovery.ALL_MANIFEST_DIRS
         )
