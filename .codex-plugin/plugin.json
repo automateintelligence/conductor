@@ -1,0 +1,9 @@
+{
+  "name": "conductor",
+  "version": "0.9.3",
+  "description": "Autonomous spec-completion loop: spec -> plans -> phases -> machine-checked done. Runs on Claude Code; OpenAI Codex host support in development.",
+  "author": {
+    "name": "Jeffrey A. Daniels"
+  },
+  "skills": "./skills/"
+}
