@@ -17,7 +17,7 @@ import os
 
 import pytest
 
-from conductor.hosts import base
+from conductor.hosts import base, discovery
 
 
 @pytest.fixture
@@ -95,7 +95,7 @@ def test_discovered_commands_finds_a_bare_user_skill_under_the_host_source_root(
     skill = root / "skills" / "document-release"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: document-release\n---\n")
-    assert "document-release" in base.load(host_id).discovered_commands()
+    assert "document-release" in discovery.adapter_for(host_id).discovered_commands()
 
 
 def test_claude_discovers_the_marketplace_plugin_cache(monkeypatch, tmp_path):
@@ -106,7 +106,7 @@ def test_claude_discovers_the_marketplace_plugin_cache(monkeypatch, tmp_path):
     (cached / "skills" / "code-review" / "SKILL.md").write_text("---\n---\n")
     (cached / "commands").mkdir()
     (cached / "commands" / "browse.md").write_text("x")
-    found = base.load("claude").discovered_commands()
+    found = discovery.adapter_for("claude").discovered_commands()
     assert "gstack:code-review" in found
     assert "gstack:browse" in found
 
@@ -120,7 +120,7 @@ def test_codex_discovers_a_project_local_skill(monkeypatch, tmp_path):
     skill = project / ".codex" / "skills" / "code-review"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: code-review\n---\n")
-    assert "code-review" in base.load("codex").discovered_commands(
+    assert "code-review" in discovery.adapter_for("codex").discovered_commands(
         project_root=str(project)
     )
 
@@ -132,7 +132,7 @@ def test_codex_discovers_a_prompt_as_a_command(monkeypatch, tmp_path):
     prompts = tmp_path / "codex-home" / "prompts"
     prompts.mkdir(parents=True)
     (prompts / "document-release.md").write_text("---\ndescription: x\n---\n")
-    assert "document-release" in base.load("codex").discovered_commands()
+    assert "document-release" in discovery.adapter_for("codex").discovered_commands()
 
 
 @pytest.mark.parametrize(
@@ -153,7 +153,7 @@ def test_each_host_reads_its_own_plugin_manifest(
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
     monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
-    found = base.load(host_id).discovered_commands()
+    found = discovery.adapter_for(host_id).discovered_commands()
     assert "spec-craft:expectations" in found
 
 
@@ -167,14 +167,17 @@ def test_a_host_ignores_the_other_hosts_plugin_manifest(monkeypatch, tmp_path):
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\n---\n")
     monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
-    assert "spec-craft:expectations" not in base.load("codex").discovered_commands()
+    assert (
+        "spec-craft:expectations"
+        not in discovery.adapter_for("codex").discovered_commands()
+    )
 
 
 @pytest.mark.parametrize("host_id", base.HOST_IDS)
 def test_every_host_discovers_conductors_own_skills_from_its_checkout(host_id):
     # Dogfood invariant, preserved from the Claude-only preflight: whatever else is or is not
     # installed, the copy of conductor that is RUNNING can always resolve its own skills.
-    found = base.load(host_id).discovered_commands()
+    found = discovery.adapter_for(host_id).discovered_commands()
     assert "conductor:assertions-to-tests" in found
 
 
@@ -183,5 +186,5 @@ def test_discovery_survives_a_missing_source_root(monkeypatch, tmp_path, host_id
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "absent"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "absent"))
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
-    assert isinstance(base.load(host_id).discovered_commands(), set)
+    assert isinstance(discovery.adapter_for(host_id).discovered_commands(), set)
     assert not os.path.exists(str(tmp_path / "absent"))
