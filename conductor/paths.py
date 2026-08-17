@@ -182,9 +182,19 @@ def spec_roots() -> tuple[str, ...]:
 
     Refuses (``InvalidSpecRoots``) an ABSOLUTE root — roots are joined onto the project root and
     matched against repo-relative prose, so an absolute one silently matches nothing — a root
-    containing a ``..`` segment, which would glob outside the repo, and a value that is set but
-    names no root at all (e.g. just separators), which is a typo rather than a request to
-    disable the prose fallback."""
+    containing a ``..`` segment, and a value that is set but names no root at all (e.g. just
+    separators), which is a typo rather than a request to disable the prose fallback.
+
+    Those refusals are a SPELLING rule, NOT containment, and the messages say so. The checks are
+    purely lexical and cannot be anything else: an in-repo symlink (``external -> /tmp/outside``)
+    is a plain relative root with no ``..`` in it, and both scans follow it straight out of the
+    repo. Symlinks are followed BY DESIGN rather than resolved away — ``freeze._pick_source``
+    already blesses a symlinked assertions source as its "committed-symlink bridge", a monorepo
+    that symlinks a shared specs directory is a legitimate layout, and this is a pure string
+    function run on every prose scan, so a ``realpath`` check would give it filesystem I/O and a
+    cwd-dependent answer. The variable is owner configuration, not attacker input: whoever can
+    set it can also set ``CONDUCTOR_MERGE_VERIFY``, which the resume driver executes as shell.
+    Claiming containment here would only tell an operator to stop looking."""
     raw = os.environ.get("CONDUCTOR_SPEC_ROOTS")
     if not raw:
         return DEFAULT_SPEC_ROOTS
@@ -200,8 +210,10 @@ def spec_roots() -> tuple[str, ...]:
             )
         if ".." in root.split("/"):
             raise InvalidSpecRoots(
-                f"invalid-spec-roots: CONDUCTOR_SPEC_ROOTS entry {part!r} escapes the "
-                "project root; roots may not contain a '..' segment"
+                f"invalid-spec-roots: CONDUCTOR_SPEC_ROOTS entry {part!r} contains a "
+                "'..' segment; spell roots as plain paths under the project root (e.g. "
+                "'docs/specs'). This is a spelling rule, not containment — a root that "
+                "is a symlink out of the repo is still followed."
             )
         if root not in roots:
             roots.append(root)
