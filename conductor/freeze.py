@@ -118,6 +118,8 @@ def _source_candidates(spec_path: str) -> list[str]:
     `.assertions.md` to a path that already ended in `.md` — stays accepted so repos that
     bridged the mismatch with a committed file or symlink keep resolving and keep verifying.
 
+    Preference alone does NOT decide when both are present — see `_pick_source`.
+
     A path that already names an `.assertions.md` file is taken verbatim."""
     if spec_path.endswith(".assertions.md"):
         return [spec_path]
@@ -136,6 +138,49 @@ class AmbiguousAssertionsSource(RuntimeError):
 class MissingAssertionsSource(RuntimeError):
     """The goal names a spec but its `.assertions.md` sibling is absent — fail
     closed: freezing without the done-definition reopens the integrity hole."""
+
+
+class DivergentAssertionsSource(RuntimeError):
+    """Both accepted spellings of one spec's assertions source exist and say DIFFERENT
+    things, so the repo holds two disagreeing done-definitions and preference order would
+    pick one of them blind — fail closed."""
+
+
+def _pick_source(candidates: list[str], repo_root: str) -> str | None:
+    """THE assertions-source choice among `_source_candidates`' spellings, or None when none
+    exists.
+
+    Preference order alone is only safe while the spellings AGREE. The sequence that breaks it
+    is the one repos actually took: spec-craft wrote `<stem>.assertions.md`, conductor could
+    not consume it, the repo copied or symlinked it to `<spec>.md.assertions.md` and
+    MAINTAINED that copy, and both are committed. Preferring the stem form there freezes the
+    ABANDONED file, and every later edit to the maintained one is invisible to the baseline —
+    the done-definition stops being tamper-evident exactly where it matters.
+
+    So: same file (equal realpath — the committed-symlink bridge) or same bytes (the committed
+    copy) means the disagreement is not real, and the preferred spelling is taken silently.
+    Genuinely different bytes are two done-definitions with no way to tell which one the human
+    confirmed; refuse and name both rather than freeze either."""
+    present = [p for p in candidates if os.path.isfile(p)]
+    if not present:
+        return None
+    chosen = present[0]
+    chosen_real = os.path.realpath(chosen)
+    chosen_digest = None
+    for other in present[1:]:
+        if os.path.realpath(other) == chosen_real:
+            continue
+        if chosen_digest is None:
+            chosen_digest = _sha256_file(chosen)
+        if _sha256_file(other) == chosen_digest:
+            continue
+        a, b = (os.path.relpath(p, repo_root) for p in (chosen, other))
+        raise DivergentAssertionsSource(
+            f"divergent-assertions-source: {a} and {b} are both present and their "
+            "contents differ, so this spec has two disagreeing done-definitions; delete "
+            "or reconcile one before freezing the gate"
+        )
+    return chosen
 
 
 def _assertions_source(repo_root: str) -> tuple[dict, str]:
@@ -163,9 +208,9 @@ def _assertions_source(repo_root: str) -> tuple[dict, str]:
             override if os.path.isabs(override) else os.path.join(repo_root, override)
         )
         candidates = _source_candidates(base)
-        for path in candidates:
-            if os.path.isfile(path):
-                return {os.path.relpath(path, repo_root): _sha256_file(path)}, "env"
+        path = _pick_source(candidates, repo_root)
+        if path:
+            return {os.path.relpath(path, repo_root): _sha256_file(path)}, "env"
         raise MissingAssertionsSource(
             f"missing-assertions-source: CONDUCTOR_ASSERTIONS_SOURCE names "
             f"{override} but none of {', '.join(candidates)} exist"
@@ -177,10 +222,9 @@ def _assertions_source(repo_root: str) -> tuple[dict, str]:
         spec = spec_from_goal_text(goal)
         if spec:
             rels = _source_candidates(spec)
-            for rel in rels:
-                path = os.path.join(repo_root, rel)
-                if os.path.isfile(path):
-                    return {rel: _sha256_file(path)}, "goal"
+            path = _pick_source([os.path.join(repo_root, r) for r in rels], repo_root)
+            if path:
+                return {os.path.relpath(path, repo_root): _sha256_file(path)}, "goal"
             raise MissingAssertionsSource(
                 f"missing-assertions-source: the goal names "
                 f"{spec} but none of {', '.join(rels)} exist"
@@ -337,6 +381,7 @@ def main(argv: list | None = None) -> int:
             )
         except (
             AmbiguousAssertionsSource,
+            DivergentAssertionsSource,
             MissingAssertionsSource,
             AmbiguousSpecReference,
         ) as exc:

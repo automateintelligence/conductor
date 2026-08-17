@@ -341,12 +341,71 @@ def test_goal_resolves_legacy_dotmd_form_assertions_source(tmp_path):
     assert list(doc["sources"]) == ["docs/specs/fixture-spec.md.assertions.md"]
 
 
-def test_stem_form_is_preferred_when_both_spellings_exist(tmp_path):
+# BEHAVIOUR CORRECTION. This block replaces `test_stem_form_is_preferred_when_both_
+# spellings_exist`, which codified an UNCONDITIONAL stem-first preference. That preference is
+# only safe when the two spellings say the same thing. The realistic sequence is the reverse:
+# spec-craft wrote `<stem>.assertions.md`, old conductor could not consume it, the repo copied
+# it to `<spec>.md.assertions.md` and MAINTAINED that one, and both got committed. Preferring
+# the stem form there freezes the abandoned file, and every later edit to the maintained one
+# goes unchecked by the baseline. Same file or same bytes -> still resolve silently; genuinely
+# divergent -> fail closed.
+
+
+def test_both_spellings_with_identical_content_resolve_silently(tmp_path):
     manifest, baseline = _setup(tmp_path)
-    _spec_with_sources(tmp_path, stem=True, legacy=True)
+    stem_path, legacy_path = _spec_with_sources(tmp_path, stem=True, legacy=True)
+    legacy_path.write_text(stem_path.read_text())  # same bytes, two files
     freeze.record(manifest, baseline, str(tmp_path))
     doc = json.loads(open(baseline).read())
     assert list(doc["sources"]) == ["docs/specs/fixture-spec.assertions.md"]
+    assert freeze.verify(manifest, baseline, str(tmp_path))["ok"] is True
+
+
+def test_both_spellings_via_symlink_resolve_silently(tmp_path):
+    # the committed-symlink bridge: one file, two names
+    manifest, baseline = _setup(tmp_path)
+    stem_path, legacy_path = _spec_with_sources(tmp_path, stem=True)
+    legacy_path.symlink_to(stem_path.name)
+    assert legacy_path.is_file()
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/fixture-spec.assertions.md"]
+    assert freeze.verify(manifest, baseline, str(tmp_path))["ok"] is True
+
+
+def test_both_spellings_that_diverge_fail_closed_naming_both(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _spec_with_sources(tmp_path, stem=True, legacy=True)  # deliberately different text
+    with pytest.raises(freeze.DivergentAssertionsSource) as excinfo:
+        freeze.record(manifest, baseline, str(tmp_path))
+    message = str(excinfo.value)
+    assert "divergent-assertions-source" in message  # greppable
+    assert "docs/specs/fixture-spec.assertions.md" in message
+    assert "docs/specs/fixture-spec.md.assertions.md" in message
+
+
+def test_divergent_spellings_fail_closed_under_the_env_override_too(
+    tmp_path, monkeypatch
+):
+    manifest, baseline = _setup(tmp_path)
+    _spec_with_sources(tmp_path, stem=True, legacy=True)
+    monkeypatch.setenv("CONDUCTOR_ASSERTIONS_SOURCE", "docs/specs/fixture-spec.md")
+    with pytest.raises(
+        freeze.DivergentAssertionsSource, match="divergent-assertions-source"
+    ):
+        freeze.record(manifest, baseline, str(tmp_path))
+
+
+def test_divergent_spellings_make_the_freeze_cli_refuse(tmp_path, monkeypatch, capsys):
+    manifest, baseline = _setup(tmp_path)
+    _spec_with_sources(tmp_path, stem=True, legacy=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+    monkeypatch.setenv("CONDUCTOR_MANIFEST", manifest)
+    monkeypatch.setenv("CONDUCTOR_FREEZE_BASELINE", baseline)
+    assert freeze.main(["freeze"]) == 1  # refused, not a traceback
+    assert "divergent-assertions-source" in capsys.readouterr().err
+    assert not os.path.exists(baseline)  # nothing was laundered into a baseline
 
 
 def test_goal_with_neither_spelling_still_fails_closed(tmp_path):
