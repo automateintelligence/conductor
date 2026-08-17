@@ -1136,24 +1136,36 @@ def test_the_allowlist_regex_is_derived_from_the_declared_set_not_hand_written()
 # ---- A1: the codex driver actually fires codex (end to end, real bash) --------------------
 
 
+#: The one marketplace and version every harness entry below is installed from. The install
+#: root is NOT emitted by `plugin list --json`; it is
+#: `$CODEX_HOME/plugins/cache/<marketplaceName>/<name>/<version>`, so these three strings are
+#: what decides where the fixture must put the plugin tree.
+_MARKET, _VERSION = "openai-curated", "d6169bef"
+
+
 def _codex_plugin_list_json(plugins):
-    """What `codex plugin list --json` prints — the shape verified on codex-cli 0.147.0:
-    `{"installed": [{"name": ..., "source": {"source": "local", "path": ...}}]}`."""
+    """What `codex plugin list --json` prints — the shape verified on codex-cli 0.147.0 by
+    recording the CLI's own output (`tests/conductor/fixtures/`).
+
+    `source.path` is the MARKETPLACE SOURCE tree, which is not where the plugin is installed.
+    Callers pass that source path here and put the actual plugin under the derived install root;
+    a fixture that passes one path for both cannot fail when the driver reads the wrong one.
+    """
     return json.dumps(
         {
             "installed": [
                 {
-                    "pluginId": f"{name}@openai-curated",
+                    "pluginId": f"{name}@{_MARKET}",
                     "name": name,
-                    "marketplaceName": "openai-curated",
-                    "version": "d6169bef",
+                    "marketplaceName": _MARKET,
+                    "version": _VERSION,
                     "installed": True,
                     "enabled": True,
-                    "source": {"source": "local", "path": str(path)},
+                    "source": {"source": "local", "path": str(source_path)},
                     "installPolicy": "AVAILABLE",
                     "authPolicy": "NEVER",
                 }
-                for name, path in plugins
+                for name, source_path in plugins
             ]
         }
     )
@@ -1166,6 +1178,13 @@ def _mk_codex_harness(tmp, *, install_conductor_plugin=True, on_path=False):
     `conductor` is deliberately absent from the temp HOME's .local/bin unless `on_path` — a
     fixture that plants it there proves only that `command -v` works. The stub `codex` answers
     `plugin list --json`, which is how the driver is expected to find the plugin root.
+
+    The two roots are DIFFERENT, because on a real Codex they are: the installed copy sits at
+    `$CODEX_HOME/plugins/cache/<marketplace>/<name>/<version>`, while `source.path` names the
+    marketplace tree it was copied from. Both are populated, and the source one is a complete
+    decoy — its own `bin/conductor` and `skills/autodev/SKILL.md` — so a driver that resolves
+    off `source.path` fires successfully against the wrong tree instead of failing to resolve.
+    That is the state the previous fixture could not express, because it passed one path twice.
     """
     from conductor.hosts import runhost
 
@@ -1173,14 +1192,31 @@ def _mk_codex_harness(tmp, *, install_conductor_plugin=True, on_path=False):
     worktree = tmp / "wt"
     home = tmp / "home"
     bindir = home / ".local" / "bin"
-    plugin_root = tmp / "codex-cache" / "plugins" / "conductor"
+    plugin_root = (
+        home / ".codex" / "plugins" / "cache" / _MARKET / "conductor" / _VERSION
+    )
+    source_root = tmp / "codex-marketplace" / "plugins" / "conductor"
     skill = plugin_root / "skills" / "autodev"
-    for d in (project / ".conductor", worktree, bindir, skill, plugin_root / "bin"):
+    for d in (
+        project / ".conductor",
+        worktree,
+        bindir,
+        skill,
+        plugin_root / "bin",
+        source_root / "skills" / "autodev",
+        source_root / "bin",
+    ):
         d.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: autodev\n---\n")
+    (source_root / "skills" / "autodev" / "SKILL.md").write_text(
+        "---\nname: autodev\n---\n"
+    )
+    decoy = source_root / "bin" / "conductor"
+    decoy.write_text("#!/bin/sh\nexit 1\n")
+    os.chmod(decoy, 0o755)
     argv_file = tmp / "argv"
     listed = _codex_plugin_list_json(
-        [("conductor", plugin_root)] if install_conductor_plugin else []
+        [("conductor", source_root)] if install_conductor_plugin else []
     )
     codex = bindir / "codex"
     codex.write_text(

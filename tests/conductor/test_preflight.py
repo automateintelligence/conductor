@@ -76,28 +76,46 @@ def test_discovers_conductor_own_root(monkeypatch, tmp_path):
 # the opposite-host review wrapper, which is `/codex` only when the run is hosted on Claude.
 
 
-def _plugin_list_json(roots):
-    """What `codex plugin list --json` prints — the shape verified on codex-cli 0.147.0."""
+#: The one marketplace and version these fixtures install from. `plugin list --json` does NOT
+#: emit the install root, so it is derived from these plus the plugin name — which is why the
+#: fixture has to place the tree at `installed_root()` and not wherever it likes.
+_MARKET, _VERSION = "openai-curated", "d6169bef"
+
+
+def _installed_root(home, name):
+    """Where codex-cli 0.147.0 actually puts an installed plugin, as `codex plugin add` reports
+    it (`Installed plugin root: …`). NOT `source.path`."""
+    return home / "plugins" / "cache" / _MARKET / name / _VERSION
+
+
+def _plugin_list_json(sources):
+    """What `codex plugin list --json` prints — the shape verified on codex-cli 0.147.0 by
+    recording the CLI's own output; see `tests/conductor/fixtures/`.
+
+    `sources` maps plugin name -> `source.path`, which names the MARKETPLACE tree the plugin was
+    copied from and is a different directory from the installed copy. Every fixture here used to
+    pass the installed root for it, which is why no test could catch discovery reading it.
+    """
     return json.dumps(
         {
             "installed": [
                 {
-                    "pluginId": f"{name}@openai-curated",
+                    "pluginId": f"{name}@{_MARKET}",
                     "name": name,
-                    "marketplaceName": "openai-curated",
-                    "version": "d6169bef",
+                    "marketplaceName": _MARKET,
+                    "version": _VERSION,
                     "installed": True,
                     "enabled": True,
                     "source": {"source": "local", "path": str(path)},
                 }
-                for name, path in roots.items()
+                for name, path in sources.items()
             ]
         }
     )
 
 
-def _stub_codex_on_path(tmp_path, monkeypatch, roots):
-    """A `codex` on PATH that reports `roots` as its installed plugins.
+def _stub_codex_on_path(tmp_path, monkeypatch, sources):
+    """A `codex` on PATH reporting `sources` (name -> `source.path`) as its installed plugins.
 
     `git` is carried across because host resolution shells out to it (`runhost._common_root`);
     a PATH without it would silently degrade every derivation test to the literal-path branch.
@@ -106,7 +124,7 @@ def _stub_codex_on_path(tmp_path, monkeypatch, roots):
     bindir.mkdir(exist_ok=True)
     codex = bindir / "codex"
     codex.write_text(
-        f"#!/bin/sh\nprintf '%s' '{_plugin_list_json(roots)}'\nexit 0\n",
+        f"#!/bin/sh\nprintf '%s' '{_plugin_list_json(sources)}'\nexit 0\n",
     )
     os.chmod(codex, 0o755)
     _link_git(bindir)
@@ -154,6 +172,11 @@ def _codex_install(
     name resolves, and not one of them can be attributed to the plugin that is supposed to
     own it.
 
+    Each plugin gets TWO trees, as it does on a real Codex: the installed copy Codex loads, and
+    the marketplace source `source.path` names. The source tree is left EMPTY here, so a
+    discovery that reads it finds nothing and the difference is visible; the reverse case — a
+    populated source and a gutted install — is `test_the_marketplace_source_copy_...` below.
+
     `pin_host=False` withholds `$CONDUCTOR_HOST` so the caller can make preflight DERIVE the
     host instead of being handed it; the Claude root is then pointed somewhere empty so a
     wrong derivation cannot quietly pass off this machine's real `~/.claude`.
@@ -170,17 +193,20 @@ def _codex_install(
         d = home / "skills" / name
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
-    roots = {}
+    sources = {}
     for plugin, skills in _PLUGIN_SKILLS.items():
-        root = tmp_path / "codex-cache" / plugin
+        root = _installed_root(home, plugin)
+        source = tmp_path / "codex-marketplace" / "plugins" / plugin
+        source.mkdir(parents=True)
+        root.mkdir(parents=True)
         for name in skills:
             if name in without:
                 continue
             d = (home / "skills" / name) if flat_only else (root / "skills" / name)
             d.mkdir(parents=True)
             (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
-        roots[plugin] = root
-    _stub_codex_on_path(tmp_path, monkeypatch, {} if flat_only else roots)
+        sources[plugin] = source
+    _stub_codex_on_path(tmp_path, monkeypatch, {} if flat_only else sources)
     return home
 
 
@@ -345,32 +371,65 @@ def test_codex_recovers_plugin_identity_from_the_installed_plugin_list(
     tmp_path, monkeypatch
 ):
     """Identity IS recoverable for a plugin-installed skill: `codex plugin list --json` reports
-    each installed plugin's name and root, and its skills live under that root. Discovery must
-    use it rather than flattening every skill into an unattributable bare name."""
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    each installed plugin's identity, the install root derives from it, and its skills live
+    under that root. Discovery must use it rather than flattening every skill into an
+    unattributable bare name."""
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
-    root = tmp_path / "cache" / "spec-craft"
-    skill = root / "skills" / "expectations"
+    skill = _installed_root(home, "spec-craft") / "skills" / "expectations"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
-    _stub_codex_on_path(tmp_path, monkeypatch, {"spec-craft": root})
+    _stub_codex_on_path(
+        tmp_path, monkeypatch, {"spec-craft": tmp_path / "marketplace" / "spec-craft"}
+    )
     avail = preflight.available_commands(host_id="codex")
     assert "spec-craft:expectations" in avail
     assert "expectations" not in avail
 
 
-def test_the_plugin_lookup_agrees_with_the_program_the_cron_driver_runs(tmp_path):
+def test_the_marketplace_source_copy_is_not_the_plugin_codex_loads(
+    tmp_path, monkeypatch
+):
+    """`source.path` names the tree the plugin was fetched FROM; installing copies it elsewhere
+    and the loader reads the copy. This machine is what an interrupted upgrade leaves behind: a
+    complete marketplace source and an installed root with nothing in it. `plugin list` still
+    reports the plugin, so preflight must NOT report the stack healthy off the source copy."""
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    _installed_root(home, "spec-craft").mkdir(parents=True)  # installed, and gutted
+    source = tmp_path / "marketplace" / "plugins" / "spec-craft"
+    (source / "skills" / "expectations").mkdir(parents=True)
+    (source / "skills" / "expectations" / "SKILL.md").write_text("---\n---\n")
+    _stub_codex_on_path(tmp_path, monkeypatch, {"spec-craft": source})
+
+    avail = preflight.available_commands(host_id="codex")
+
+    assert "spec-craft:expectations" not in avail, avail
+    assert "expectations" not in avail, avail
+
+
+def test_the_plugin_lookup_agrees_with_the_program_the_cron_driver_runs(
+    tmp_path, monkeypatch
+):
     """Two parsers of one JSON shape drift. The driver cannot import conductor — that is the
-    problem it solves — so the only defence is checking them against each other."""
+    problem it solves — so the only defence is checking them against each other. The wider
+    version of this, run over a payload RECORDED from the real binary in every non-happy state,
+    lives in `tests/conductor/hosts/test_codex_plugin_list.py`."""
     import subprocess
     import sys
 
     from conductor.hosts import codex
 
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    _installed_root(home, "spec-craft").mkdir(parents=True)  # `other` stays uninstalled
     payload = _plugin_list_json(
-        {"spec-craft": tmp_path / "sc", "other": tmp_path / "o"}
+        {"spec-craft": tmp_path / "market" / "sc", "other": tmp_path / "market" / "o"}
     )
     from_python = codex.plugin_roots_from_json(payload)
+    assert from_python == {"spec-craft": str(_installed_root(home, "spec-craft"))}
     for name in ("spec-craft", "other", "absent"):
         proc = subprocess.run(
             [sys.executable, "-c", codex.PLUGIN_ROOT_SNIPPET, name],

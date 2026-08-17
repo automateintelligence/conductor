@@ -25,39 +25,81 @@ from conductor.hosts import discovery
 #: truth §"Session and config isolation"), so this is the Codex config root unconditionally.
 CONFIG_DIR_ENV = "CODEX_HOME"
 
+#: Where an installed plugin's copy lives, under the Codex config root. NOT emitted by
+#: ``codex plugin list --json`` — see ``plugin_roots_from_json`` — so it is derived from three
+#: fields that ARE, and then checked on disk.
+_INSTALL_CACHE = ("plugins", "cache")
+
 #: The plugin-root lookup as a self-contained program the generated cron
 #: driver can run before any conductor code is importable — that is the whole problem it solves,
 #: so it cannot import from here. Reads ``codex plugin list --json`` on stdin, takes a plugin
-#: name in argv, prints that plugin's install root (or nothing). Single quotes are forbidden
+#: name in argv, prints that plugin's INSTALLED root (or nothing). Single quotes are forbidden
 #: inside it: the driver wraps it in shell single quotes.
 PLUGIN_ROOT_SNIPPET = (
-    "import json,sys;"
-    'print(next((p["source"]["path"] for p in json.load(sys.stdin).get("installed") or []'
-    ' if p.get("name")==sys.argv[1] and (p.get("source") or {}).get("path")),""))'
+    "import json,os,sys;"
+    'h=os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex");'
+    'e=[p for p in json.load(sys.stdin).get("installed") or [] if p.get("name")==sys.argv[1]'
+    ' and p.get("marketplaceName") and p.get("version")];'
+    'd=[os.path.join(h,"plugins","cache",p["marketplaceName"],p["name"],p["version"])'
+    " for p in e];"
+    'print(next((x for x in d if os.path.isdir(x)),""))'
 )
 
 
-def plugin_roots_from_json(text: str) -> dict[str, str]:
-    """``codex plugin list --json`` output -> ``{plugin name: install root}``.
+def config_root() -> str:
+    """The Codex config root: ``$CODEX_HOME``, else ``~/.codex``."""
+    return os.environ.get(CONFIG_DIR_ENV) or os.path.expanduser("~/.codex")
 
-    Shape verified against codex-cli 0.147.0: ``installed`` is a list of entries carrying
-    ``name`` and ``source.path``. Nothing here raises — malformed or unexpected output means
-    "this machine reports no plugin identities", which is a legitimate answer that
+
+def _installed_root(entry: dict, home: str) -> str | None:
+    """One ``installed[]`` entry -> the directory Codex actually LOADS, or None.
+
+    ``source.path`` is not it. Verified on codex-cli 0.147.0: ``source`` is copied straight out
+    of the marketplace manifest, so it names the tree the plugin was fetched FROM
+    (``<marketplace root>/plugins/<name>``), while installing copies that tree somewhere else
+    and the loader reads the copy. Nothing in the ``--json`` output names the copy — the fields
+    are ``pluginId``, ``name``, ``marketplaceName``, ``version``, ``installed``, ``enabled``,
+    ``source``, ``marketplaceSource``, ``installPolicy``, ``authPolicy``, and the closest of
+    them, ``marketplaceSource.source``, is the marketplace root rather than the install root.
+
+    So the root is DERIVED from three emitted fields and then required to exist. The layout
+    ``$CODEX_HOME/plugins/cache/<marketplaceName>/<name>/<version>`` is what ``codex plugin add``
+    itself reports as ``Installed plugin root:`` for every entry of the recorded artefact in
+    ``tests/conductor/fixtures/``. Deriving a layout is exactly what this module otherwise
+    refuses to do, and the ``isdir`` check is the reason it is admissible here: a Codex that
+    moves the cache makes the derived path stop existing, so this answers "no root" — which
+    degrades the gate to ``unverified`` — instead of silently naming a wrong directory the way
+    ``source.path`` did.
+    """
+    name = entry.get("name")
+    market = entry.get("marketplaceName")
+    version = entry.get("version")
+    if not all(isinstance(v, str) and v for v in (name, market, version)):
+        return None
+    root = os.path.join(home, *_INSTALL_CACHE, str(market), str(name), str(version))
+    return root if os.path.isdir(root) else None
+
+
+def plugin_roots_from_json(text: str) -> dict[str, str]:
+    """``codex plugin list --json`` output -> ``{plugin name: INSTALLED root}``.
+
+    Shape verified against codex-cli 0.147.0 by recording the CLI's own output; see
+    ``tests/conductor/fixtures/README.md``. Nothing here raises — malformed or unexpected output
+    means "this machine reports no plugin identities", which is a legitimate answer that
     ``preflight`` degrades on, not an error.
     """
     try:
         data = json.loads(text)
     except (ValueError, TypeError):
         return {}
+    home = config_root()
     roots: dict[str, str] = {}
     for entry in (data.get("installed") if isinstance(data, dict) else None) or []:
         if not isinstance(entry, dict):
             continue
-        name = entry.get("name")
-        source = entry.get("source")
-        path = source.get("path") if isinstance(source, dict) else None
-        if isinstance(name, str) and isinstance(path, str) and name and path:
-            roots.setdefault(name, path)
+        root = _installed_root(entry, home)
+        if root:
+            roots.setdefault(str(entry["name"]), root)
     return roots
 
 
@@ -121,17 +163,17 @@ class CodexAdapter:
         ``CODEX_PLUGIN_ROOT``, so PATH plus that variable resolve nothing on a normal install
         and the first cron fire dies at the guard before Codex is ever spawned.
 
-        The third leg therefore ASKS CODEX where it put the plugin, via
-        ``codex plugin list --json`` (``installed[].name`` + ``installed[].source.path``,
-        verified against codex-cli 0.147.0 — ``--json`` is a documented flag of that
-        subcommand). That is a CLI contract, not a filesystem layout: the only cache root ever
-        observed was ``$CODEX_HOME/.tmp/plugins``, which no documentation makes contractual, so
-        globbing it would bake exactly the kind of guess ``resume_script._ROT_PATTERNS`` exists
-        to detect. Asking the host survives a cache move AND a version bump, because nothing
-        version-shaped is written down. ``</dev/null`` because Codex subcommands hang on an
-        unredirected stdin (ground truth §"Codex help hangs"), and under cron a hang is a stuck
-        worker rather than a failed one. ``python3`` is not a new dependency: ``bin/conductor``
-        execs it for every subcommand, so a machine that cannot run it cannot run conductor.
+        The third leg therefore ASKS CODEX which plugins are installed, via
+        ``codex plugin list --json`` (verified against codex-cli 0.147.0 — ``--json`` is a
+        documented flag of that subcommand), and derives the install root from the identity
+        fields that answer carries. It is NOT read off ``source.path``: that field is
+        marketplace metadata naming the tree the plugin was fetched from, and pointing
+        ``$CONDUCTOR`` at it execs a copy Codex does not load — see ``_installed_root``, which
+        is the single place that rule lives and the single place the derived root is checked to
+        exist. ``</dev/null`` because Codex subcommands hang on an unredirected stdin (ground
+        truth §"Codex help hangs"), and under cron a hang is a stuck worker rather than a failed
+        one. ``python3`` is not a new dependency: ``bin/conductor`` execs it for every
+        subcommand, so a machine that cannot run it cannot run conductor.
 
         The skill tree is derived from whichever bin won (``<root>/bin/conductor`` ->
         ``<root>/skills/...``), which cannot go stale because it is computed on every fire. It
@@ -276,7 +318,7 @@ class CodexAdapter:
     resolves_plugin_dependencies: bool = False
 
     def source_root(self) -> str:
-        return os.environ.get(CONFIG_DIR_ENV) or os.path.expanduser("~/.codex")
+        return config_root()
 
     def native_invocation(self, skill: str) -> str:
         """``conductor:autodev`` -> ``$autodev``.
