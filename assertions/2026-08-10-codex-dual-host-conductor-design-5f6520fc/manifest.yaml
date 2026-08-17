@@ -22,3 +22,11 @@ assertions:
     timeout: 60
     level: spec
     kind: property
+  - id: a-dh-2-worker-launch-targets-the-recorded-host
+    claim: "for a run whose recorded worker host is H the fire spawns H's executable exactly once with a real argument vector, byte-identical prompt and no session-continuation token, and spawns the opposite host's executable zero times"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_2_worker_launch_targets_recorded_host.py"
+    setup: ""
+    teardown: ""
+    timeout: 180
+    level: spec
+    kind: property
