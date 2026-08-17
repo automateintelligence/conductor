@@ -84,11 +84,12 @@ def _scheduled_task_matches(root: str, path: str | None) -> bool:
             return False
     else:
         return False
-    # HERMETICITY INVARIANT (frozen A13): the frozen no-durable fixture does NOT
-    # isolate this file, so only the exact-project match below keeps the frozen gate
-    # independent of real machine state. NEVER loosen this to a prompt-only or
-    # basename match — a real scheduled task on the dev machine would then
-    # false-green the frozen "no durable driver" test.
+    # EXACT-PROJECT INVARIANT (frozen A13): NEVER loosen this to a prompt-only or
+    # basename match. A13 pins BOTH directions off one seeded harness file — the
+    # entry naming the claude project must green it, the entry naming the codex
+    # project must not green that one — so a looser match would false-green a run
+    # whose host cannot be driven by that task at all, and any unrelated task left
+    # on an operator's machine would report a stalled run as healthy.
     want = os.path.normpath(root)
     want_real = os.path.realpath(root)
     for entry in entries:
