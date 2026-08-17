@@ -18,6 +18,12 @@ working, testable software on their own. A single plan would exceed what one imp
 reviewer can hold. Each plan below has its own worktree, branch, commits, tests, and pull request
 — which is also what design §"Repository and release sequence" requires.
 
+**Two tracks, owner decision 2026-08-17.** The work that is *genuinely required* to make Conductor
+run on OpenAI Codex is separated from everything else and ships first, as **Track A**. Plans 00–10
+are retained in full as **Track B** — improvement work that follows the Codex-capable release.
+Nothing is deleted and nothing is renumbered. The measurement that justifies the split is recorded
+under "Why two tracks — the measurement" below; read it before proposing to re-merge the tracks.
+
 ---
 
 ## Global constraints (apply to every plan)
@@ -66,23 +72,38 @@ Copy this block verbatim into each plan's `## Global Constraints` section.
 
 ## Plan index
 
+**Track A — Codex-capable. Ships first.** The minimum that makes Conductor run on Codex.
+
 | # | Plan | Repo | Depends on | Plan doc | Code |
 | --- | --- | --- | --- | --- | --- |
-| 00 | Source decommission (was: relocation) | conductor (+ workstation) | — | superseded by the 2026-08-12 decommission design | execution deferred; all four loss-risk predicates blocked |
+| A1 | Host adapter for launcher, scheduler discovery, preflight | conductor | — | not written | — |
+| A2 | Host-neutral scheduling (retire `scheduled_tasks.json`) | conductor | — | not written | — |
+| A3 | Codex packaging (`.codex-plugin` + Codex catalog entry) | conductor, marketplace | **A1** | not written | — |
+
+**Track B — improvement. After Codex-capable ships.** Every row below is **deferred**: retained in
+full, not a prerequisite for Track A unless Track A names it.
+
+| # | Plan | Repo | Depends on | Plan doc | Code |
+| --- | --- | --- | --- | --- | --- |
+| 00 | Source decommission (was: relocation) — *deferred* | conductor (+ workstation) | — | superseded by the 2026-08-12 decommission design | execution deferred; all four loss-risk predicates blocked |
 | 01 | Run identity, project registry, per-run state | conductor | — | **written** | **merged** (PR #84) |
-| 02 | Ownership, leases, takeover, prune, rebind | conductor | 01 | not written | — |
-| 03 | Legacy run migration | conductor | 01, 02 | not written | — |
-| 04 | Host adapter layer and preflight floors | conductor | 01 | **written** | in progress — `conductor/hosts/` does not exist on `main` |
-| 05 | Heartbeat, checkpoint, no-compaction policy | conductor | 01, 02, 03, 04 | not written | — |
-| 06 | Branch/worktree/PR model, merge gates, sync phases | conductor | 01, 04 | not written | — |
-| 07 | Reviewer routing, structured review, review debt | conductor | 04, 06 | not written | — |
-| 08 | spec-craft dual-host | spec-craft | — | not written | — |
-| 09 | Packaging and marketplace dual catalogs | conductor, marketplace | 04, 08 | not written | — |
-| 10 | Public messaging and installation smokes | all three | 09 | not written | — |
+| 02 | Ownership, leases, takeover, prune, rebind — *deferred* | conductor | 01 | not written | — |
+| 03 | Legacy run migration — *deferred* | conductor | 01, 02 | not written | — |
+| 04 | Host adapter layer and preflight floors — *deferred* | conductor | 01 | **written** | not started — `conductor/hosts/` does not exist on `main`; A1 ships a subset first |
+| 05 | Heartbeat, checkpoint, no-compaction policy — *deferred* | conductor | 01, 02, 03, 04 | not written | scheduler slice carved out to A2 |
+| 06 | Branch/worktree/PR model, merge gates, sync phases — *deferred* | conductor | 01, 04 | not written | — |
+| 07 | Reviewer routing, structured review, review debt — *deferred* | conductor | 04, 06 | not written | — |
+| 08 | spec-craft dual-host — *deferred* | spec-craft | — | not written | — |
+| 09 | Packaging and marketplace dual catalogs — *deferred* | conductor, marketplace | 04, 08 | not written | conductor-side packaging slice carved out to A3 |
+| 10 | Public messaging and installation smokes — *deferred* | all three | 09 | not written | — |
 
 Dependency edges are **interface** dependencies: plan N may be written and reviewed before its
 dependency merges, but it cannot go green until the interfaces it consumes exist. **One
-exception:** Plan 09 must not *start* before Plan 04 merges — see that entry.
+exception:** A3 must not *start* before A1 merges — see that entry. (This replaces the former
+"Plan 09 not before Plan 04" exception, which had the same purpose.)
+
+Track A carves three slices out of Track B plans. A slice is a **subset, not a competitor**: the
+Track B plan remains the comprehensive version and keeps its full scope minus what shipped.
 
 ### Verified Codex facts
 
@@ -101,6 +122,235 @@ design was written before the probe. Two corrections it carries that change plan
   resume`, top-level `codex resume`, and `codex fork` all exist. Ignoring them in favour of
   cold-start reconciliation from durable state is a defensible choice, but it is now an
   **explicit non-goal to be written down with its reason** (Plan 04 does this), not an absence.
+
+---
+
+## Why two tracks — the measurement
+
+Recorded here so the tracks do not get re-bundled later. Every number below was re-measured
+against `main` on 2026-08-17; where it disagrees with an earlier figure in this document, the
+figure here wins.
+
+**Delivery cadence.** First commit `8c17cc3` "Scaffold Stage 0 framework-validation build",
+2026-06-27. Conductor `0.2.0` shipped 2026-07-01 (`632cbd9`). **Four days** from empty repository
+to a released, installed plugin. That is the cadence the Codex-capable release is being held to,
+and it is the reason the ten-plan program is not allowed to gate it.
+
+**Total Python.** `find conductor ledger assertions -name '*.py' | xargs cat | wc -l` →
+**8,986 lines** across 61 files (conductor 6,173 / assertions 1,629 / ledger 1,184).
+
+**Host-specific Python, by file.** Executable coupling only — a comment or docstring that names
+`claude` is not coupling, because nothing branches on it.
+
+| File | Executable | Sites |
+| --- | --- | --- |
+| `conductor/resume_script.py` | 18 | `CLAUDE_BIN` resolution (`175–176`), plugin-cache glob (`178`), unresolved-bin guard (`181–182`), `pgrep -f 'claude'` double-drive guard (`214`), flag re-parse (`240`), launch line (`261`), the flags-var allowlist (`53`, `341`), and the Claude permission-flag posture derivation in both the generated shell (`253–256`) and its Python mirror (`356–358`, `361`) |
+| `conductor/driver.py` | 8 | `~/.claude/scheduled_tasks.json` discovery (`55–59`), the durability leg that reads it (`67`, `79`, `98`), its failure message (`169`) |
+| `conductor/preflight.py` | 7 | Claude-form slash-command list (`23–24`), `.claude-plugin/plugin.json` (`33`), `~/.claude` discovery root (`51`), Claude plugin-cache glob shape (`55`, `59`), `CLAUDE_PLUGIN_ROOT` (`70–71`) |
+| `conductor/authority.py` | 1 | `_BYPASS_MODES = frozenset({"bypassPermissions"})` (`46`) |
+| `conductor/plan_lint.py` | 1 | `_RECIPE_NEEDLES` (`111`) requires the substrings `codex` and `/code-review` in a plan's per-phase recipe |
+| `conductor/merge_gate.py` | 1 | review marker default `"Codex review"` (`220`) |
+| **Total** | **36** | |
+
+`gate_lint.py`, `freeze.py`, `paths.py` and `run_cmd.py` are **prose only** — every match is a
+comment or docstring naming `/conductor:*` or a past review. That part of the claim verified.
+Three files did **not**: `authority.py`, `plan_lint.py` and `merge_gate.py` each carry one line of
+real executable coupling, and they are folded into A1 below.
+
+Two corrections to the earlier figures, both upward:
+
+- **The Python count was 23, not 36**, because a grep for the strings `claude`/`codex` cannot see
+  `--dangerously-skip-permissions`, `--permission-mode=bypassPermissions` or `--settings`. Those
+  are Claude's permission vocabulary; the Codex analogues are `-s/--sandbox`, `--approve-for-me`
+  and `--dangerously-bypass-approvals-and-sandbox` (see "Verified Codex facts"). Twelve of the
+  thirty-six lines are permission-flag parsing.
+- **Plan 04 below says "thirty-one production lines"** across the same three files. The measured
+  figure for those three files is **33**; **36** across all six. Plan 04's sentence is corrected
+  in place.
+
+**Host-specific skill text.** 35 lines across four `SKILL.md` files —
+`skills/start/SKILL.md` 18, `skills/autodev/SKILL.md` 14, `skills/prepare/SKILL.md` 2,
+`skills/issue-sync/SKILL.md` 1. A fifth, `skills/assertions-to-tests/SKILL.md`, carries two
+`/conductor:*` slash-command mentions and nothing else.
+
+**The conclusion.** The executable Codex surface is **36 lines of Python and 35 lines of skill
+text — 0.4% of the Python in the repository.** Everything else in Plans 00–10 is worth building
+and none of it is what stops Conductor running on Codex. Track A ships the 0.4%. Track B follows.
+
+---
+
+## Track A — Codex-capable
+
+Three items. Ships before anything in Track B. The goal is one sentence: **a Codex user installs
+Conductor, starts a run, and the cron fire spawns `codex`, not `claude`.**
+
+### A1 — Host adapter for the launcher, scheduler discovery, and preflight
+
+**Repo:** conductor
+**Depends on:** nothing unshipped. Plan 01 is merged (PR #84); Plan 04 is a document.
+
+**Goal:** put a host adapter behind the three call sites that actually spawn or discover a host,
+so the executable surface named in the measurement table stops naming Claude.
+
+**Files and current line references:**
+
+- `conductor/resume_script.py` — the generated driver script. `CLAUDE_BIN="$(command -v claude)"`
+  with the `$HOME/.local/bin/claude` fallback (`175–176`); the plugin-cache glob
+  `$HOME/.claude/plugins/cache/*/conductor/*/bin/conductor` (`178`); the unresolved-bin guard and
+  its log line (`181–182`); the `pgrep -f 'claude'` double-drive guard (`214`); and the launch
+  line `"$CLAUDE_BIN" -p "/conductor:autodev" "$@"` (`261`), which must become the adapter's argv
+  for the resolved host. Plus the permission-posture vocabulary in the generated shell
+  (`253–256`) and its Python mirror `_posture_of` (`356–358`, `361`), and the
+  `CONDUCTOR_RESUME_CLAUDE_FLAGS` allowlist entries (`53`, `341`).
+- `conductor/driver.py` — `_scheduled_tasks_file()` (`55–59`) and the durability leg that reads it
+  (`62–100`, `169`). A1 makes the discovery host-dispatched; **A2 retires it outright.** If A2
+  ships first this shrinks to nothing, which is fine — do not block on the order.
+- `conductor/preflight.py` — `REQUIRED_COMMANDS` (`15–26`), which hardcodes Claude-form
+  `/plugin:skill` names including `/code-review` and `/codex`; `_scan_plugin_dir` reading
+  `.claude-plugin/plugin.json` (`33`); `available_commands`'s `~/.claude` discovery root (`51`)
+  and Claude plugin-cache glob (`55`, `59`); `CLAUDE_PLUGIN_ROOT` (`70–71`). Preflight must also
+  discover under a **Codex skills root** (`~/.codex/skills/`, plus the Codex plugin cache) and
+  render command names in the invoked host's form.
+- `conductor/authority.py:46` — `_BYPASS_MODES`, Claude's permission-mode vocabulary.
+- `conductor/plan_lint.py:111` — `_RECIPE_NEEDLES` requires a plan's recipe to contain `codex` and
+  `/code-review`. On a Codex-hosted run the opposite-host reviewer is Claude, so a correct plan
+  fails this lint today.
+- `conductor/merge_gate.py:220` — review-marker default `"Codex review"`. Env-overridable, so the
+  fix is a host-derived default, not a new mechanism.
+- The five `SKILL.md` files — `start` (18 lines), `autodev` (14), `prepare` (2), `issue-sync` (1),
+  `assertions-to-tests` (slash-command form only). `$CLAUDE_PLUGIN_ROOT`, `claude -p`,
+  `scheduled_tasks.json`, and the `/plugin:skill` invocation form all appear in prose the worker
+  reads and acts on.
+
+**Done means:** on a machine with Codex and without Claude, `conductor preflight` resolves every
+required command in Codex form; `conductor driver install` writes a driver that resolves the
+`codex` binary and launches Conductor's autodev skill through it; and no module in `conductor/`
+outside the adapter contains a Claude binary name, a Claude permission flag, a `~/.claude` path,
+or a `/plugin:skill` literal. Existing Claude runs are byte-for-byte unaffected in behaviour —
+the Claude adapter reproduces today's argv exactly, and the live-run guards (`flock`, the
+double-drive `pgrep`, the fail-loud unresolved-bin exit) keep their current semantics.
+
+**Explicitly NOT in A1:**
+
+- **Plan 04's nineteen-member protocol.** Plan 04 is the comprehensive version and **stays in
+  Track B**. A1 needs only the members these lines actually use — roughly: `executable`,
+  `native_invocation`, `launch_prompt`, `worker_argv`, `worker_env`, `permission_profile`,
+  `source_root`, and a process-liveness probe for the double-drive guard. `install_hooks`,
+  `hook_installed`, `dispatch_implementation`, `DispatchResult`, `reviewer_argv`,
+  `minimum_version`, `upgrade_hint`, `processes_under`, `validate_permissions` are Plan 04's.
+  **A1 is a subset, not a competitor**; Plan 04 extends A1's module rather than replacing it.
+- Version floors and preflight minimum-version enforcement (Plan 04).
+- Reviewer routing and structured verdicts (Plan 07). A1 changes the merge-gate marker *default*
+  and the plan-lint *needles*; it does not decide who reviews.
+- Any change to run identity, ownership, migration, branches, or heartbeat.
+
+### A2 — Host-neutral scheduling
+
+**Repo:** conductor
+**Depends on:** nothing. See the finding below.
+
+**Goal:** retire `~/.claude/scheduled_tasks.json` in favour of an OS scheduler on both hosts.
+
+**The design already calls for this.** Design
+`2026-08-10-codex-dual-host-conductor-design.md:255`: *"Codex has no direct equivalent of Claude's
+managed /loop surface, so Conductor uses an operating-system scheduler for both hosts."* The
+execution chain at `:257` is rooted in an **OS cron heartbeat**, and `:270` requires the scheduler
+entry to invoke the run's absolute `heartbeat.sh` path with generated, safely quoted values.
+
+**Finding that makes this smaller than it looks.** Cron is *already* the only thing Conductor
+installs. `conductor/driver.py:192–195` — `install()` — writes the resume script and the
+marker-tagged crontab lines unconditionally, with no durability judgment. `scheduled_tasks.json`
+appears **only** in `driver status`'s read-only durability-*detection* leg (`55–59`, `62–100`,
+`169`). A2 is the removal of a detection leg, not the migration of a scheduling mechanism.
+
+**Files:** `conductor/driver.py:55–59, 62–100, 169`; `tests/conductor/test_driver.py` (the
+`_isolate_scheduled_tasks` fixture and its six tests); `skills/start/SKILL.md:154`.
+
+**Done means:** `conductor driver status` reports durability from the crontab leg alone; no
+production module reads `scheduled_tasks.json`; and the status signal stays fail-closed —
+an unparseable or absent crontab is not durability evidence, and another project's marker never
+false-greens this project.
+
+**Carry this constraint.** Frozen assertion **A13 — `driver-status-nonzero-without-durable-driver`**
+(`docs/specs/2026-07-05-self-enforcement.md.assertions.md:113–117`) names `scheduled_tasks.json`
+in its Setup. Retiring the leg changes a frozen done-gate assertion, so A13 must be
+**re-derived, not deleted** — the same handling Plan 06 requires for `a10-default-branch`.
+
+**Explicitly NOT in A2:** this is the **scheduler slice of Plan 05 only**. Per-run `heartbeat.sh`
+/ `heartbeat.json`, the eight-step checkpoint sequence, `compaction.marker` fencing, the
+no-compaction policy, the orchestrator context contract and its two verbatim reminders, and
+`conductor heartbeat|resume|finish` all stay in Track B.
+
+**On Plan 05's open question.** Plan 05 hands off *"whether Codex has a native scheduler was not
+observed, not confirmed absent — settle that before this plan's per-run `heartbeat.sh` assumes OS
+cron on both hosts"*, echoed at
+`docs/reviews/2026-08-12-codex-host-ground-truth.md:320–323`. It does not gate A2. A2 is not
+adopting a Codex scheduler; it is removing a *Claude* one, leaving the OS scheduler the design
+already specifies for both hosts. The question only becomes live if someone later wants to
+*prefer* a native Codex scheduler over cron, which is a Plan 05 decision.
+
+### A3 — Codex packaging
+
+**Repos:** automateintelligence/conductor, automateintelligence/marketplace
+**Depends on:** **A1 — hard ordering, see the warning.**
+
+**Goal:** make Conductor installable from a Codex catalog.
+
+**Files:** `.codex-plugin/plugin.json` in the conductor repo;
+`.agents/plugins/marketplace.json` in the marketplace repo.
+
+**Verified layout** — `docs/reviews/2026-08-12-codex-host-ground-truth.md`, measured against Codex
+CLI `0.147.0`:
+
+- Catalog manifest `.agents/plugins/marketplace.json`, top-level keys `name`, `interface`,
+  `plugins` (`:158–160`).
+- Catalog entry shape `{name, source: {source, path}, policy: {installation, authentication},
+  category}` (`:162–171`, `:180`).
+- Per-plugin manifest `.codex-plugin/plugin.json` (`:171`, `:179`).
+- `codex plugin marketplace add <SOURCE>`, where `<SOURCE>` is a local path, `owner/repo[@ref]`,
+  an HTTPS Git URL, or an SSH Git URL; options `--ref <REF>`, `--sparse <PATH>` (repeatable),
+  `--json` (`:147–151`).
+- The required additions are stated outright at `:198–203`.
+- `--sparse` matters for this repo specifically (`:191–196`): Conductor carries tests, docs, plans
+  and reviews beside its skills, and Claude's plugin format has no file-scoping mechanism at all.
+- The `policy` block has no Claude counterpart (`:186–190`) — publishing means *deciding*
+  `installation` and `authentication`, not transliterating the Claude manifest.
+
+**Done means:** `codex plugin marketplace add` against the marketplace repo lists `conductor`, and
+a fresh Codex session installs it and discovers its skills.
+
+> **WARNING — A3 must not ship before A1.** Packaging Conductor for Codex while the launcher still
+> hardcodes `claude` produces a plugin that resolves cleanly, installs cleanly, and then spawns
+> `claude` at first fire on a machine that may not have Claude installed. This is the one place
+> the "write ahead of your dependency" allowance does not apply. It is the same warning Plan 09
+> carries about Plan 04, restated against the item that actually removes the hazard.
+
+**Explicitly NOT in A3:** **the conductor-side packaging slice of Plan 09 only.** Dual catalogs at
+large stay in Track B: the Claude `.claude-plugin/marketplace.json`, generated `plugins/conductor`
+and `plugins/spec-craft` bundles from immutable tags, recorded source commit and version, and CI
+verification of bundles against source. Also **not** in A3: any `policy.installation=
+INSTALLED_BY_DEFAULT` entry for spec-craft — that would require spec-craft to have a Codex
+manifest, which is Plan 08, and is exactly the dependency A3 avoids by scoping to Conductor's own
+entry. Plan 10's public messaging and the eight installation smokes stay in Track B.
+
+---
+
+## Track B — improvement
+
+Everything below this line — Plans 00 through 10 — is **retained unchanged and deferred until the
+Codex-capable release ships**. Nothing is deleted, nothing is renumbered, and no section below is
+rewritten; the only edits are inline corrections where a Track A slice changed a fact the section
+asserted.
+
+Several of these are valuable independently of Codex and would be worth building on a Claude-only
+Conductor: Plan 02's ownership and takeover, Plan 03's migration, Plan 05's checkpoint and
+no-compaction policy, Plan 06's fail-closed default-branch resolution, Plan 07's review debt.
+**Plan 01 has already shipped** (PR #84).
+
+**Track B plans are NOT prerequisites for Track A** unless a Track A item names the dependency.
+As of this restructure, exactly one such dependency exists and it is internal to Track A: A3 after
+A1. The three slices Track A carves out — Plan 04's adapter, Plan 05's scheduler, Plan 09's
+conductor-side packaging — leave their parent plans standing with the remainder of their scope.
 
 ---
 
@@ -161,8 +411,9 @@ recorded outcome, not merely enumerate them. Merge status decides nothing anywhe
 >   re-tighten P1 or P5 back into absolute activity invariants — a gate that goes red whenever
 >   anyone is working in the tree gates nothing.
 >
-> Plans 01–07 remain unaffected: they are ordinary feature branches developed in `.worktrees/`,
-> and they never move, rename, or write to the checkout root.
+> Plans 01–07 **and all of Track A** remain unaffected: they are ordinary feature branches
+> developed in `.worktrees/`, and they never move, rename, or write to the checkout root. The
+> Codex-capable release does not wait on any decommission precondition.
 
 ---
 
@@ -356,8 +607,18 @@ installation"; adapter/permission/dispatch bullets in §"Unit and contract tests
 **Goal:** introduce `conductor/hosts/{base,proc,claude,codex,cli}.py` implementing the adapter
 surface, so no core module contains a Claude slash command, a Codex dollar invocation,
 `CLAUDE_PLUGIN_ROOT`, a host-specific permission flag, or an assumption about one installation
-directory. Thirty-one production lines across `resume_script.py`, `driver.py`, and `preflight.py`
-carry a host assumption today; Plan 04 builds the destination without moving them.
+directory. ~~Thirty-one production lines~~ **Thirty-three production lines** across
+`resume_script.py`, `driver.py`, and `preflight.py` carry a host assumption today (36 across all
+six coupled files — see "Why two tracks — the measurement"); Plan 04 builds the destination
+without moving them.
+
+> **Track A note.** **A1 ships a subset of this plan first**, and A1 *does* move those lines.
+> Plan 04 remains the comprehensive version: it extends A1's adapter module up to the nineteen
+> members below, adds the version floors and preflight minimum-version enforcement, and supplies
+> `install_hooks` / `hook_installed` / `dispatch_implementation` / `reviewer_argv` for Plans 05
+> and 07. Read the "ships unwired" hard requirement below as scoped to **Plan 04's own branch**:
+> it forbids Plan 04 from doing the wiring, and after A1 those three files are already wired to
+> A1's adapter and are no longer byte-identical to today's `main`.
 
 **Produces** — the written plan establishes a **nineteen-member** surface. The design's eleven
 capabilities and the twelve methods this roadmap previously listed were both insufficient; this
@@ -431,9 +692,11 @@ changing a dispatch path many live fires have proven.
 **Hard requirements:** adapters launch **argument vectors**, never interpolated shell strings; the
 literal `$conductor:*` token must not be shell-expanded *and* must not be relied on as a launch
 mechanism; an adapter that cannot dispatch isolated implementation work **fails preflight** — the
-orchestrator never absorbs implementation as fallback. Plan 04 ships **unwired**: nothing in
-`driver.py`, `resume_script.py`, or `preflight.py` imports it, and those three files stay
-byte-identical. Plan 05 is where the adapter first carries load.
+orchestrator never absorbs implementation as fallback. Plan 04 ships **unwired**: it adds no new
+import of its own members to `driver.py`, `resume_script.py`, or `preflight.py`, and leaves those
+three files as **A1** left them. ~~Plan 05 is where the adapter first carries load.~~ **A1 is
+where the adapter first carries load**; Plan 05 is where Plan 04's *additional* members
+(`install_hooks`, `hook_installed`, context telemetry) first carry load.
 
 ---
 
@@ -457,6 +720,13 @@ requests a checkpoint and blocks continuation. Claude's hook payload shape is un
 tests assert a round trip through its own reader, not conformance to Claude's schema. And
 **whether Codex has a native scheduler was not observed, not confirmed absent** — settle that
 before this plan's per-run `heartbeat.sh` assumes OS cron on both hosts.
+
+> **Track A note.** **A2 takes this plan's scheduler slice only** — retiring
+> `~/.claude/scheduled_tasks.json`, which is already nothing more than a read-only durability
+> probe in `driver status` while `driver install` writes cron unconditionally. Everything else
+> below stays here. The native-Codex-scheduler question above does **not** gate A2, because A2
+> adopts no scheduler: it removes a Claude one and leaves the OS cron the design already
+> specifies at design line 255. The question stays open for this plan, where it belongs.
 
 **Produces:** `conductor/heartbeat/{cli,schedule,checkpoint,marker}.py`, the two verbatim
 orchestrator reminders and their anchor contract tests, and the reconciliation evidence
@@ -488,7 +758,8 @@ follow-up below.
 **Standalone follow-up (do before Plan 05):** apply the three rules above to the existing
 `skills/autodev/SKILL.md` dispatch prose. That is a live behaviour change to a shipped skill, so
 it takes a feature branch, a PR, a codex review, and a plugin version bump — not a docs-direct
-commit.
+commit. **Sequence it after A1**, which rewrites 14 host-specific lines in that same file; running
+both branches concurrently collides on `skills/autodev/SKILL.md`.
 
 ---
 
@@ -548,8 +819,11 @@ tests" and §"Installation smoke tests".
 host-neutral input resolution from the invocation text, show both `/spec-craft:*` and
 `$spec-craft:*` examples, and keep spec-craft standalone and Conductor-agnostic.
 
-**Independent of every other plan.** Ships first per design §"Repository and release sequence"
-step 5.
+**Independent of every other plan.** ~~Ships first per design §"Repository and release sequence"
+step 5.~~ **Ships first *within Track B*.** The design's "spec-craft first" ordering was written
+when Plans 00–10 were the whole program; Track A now precedes all of it. Plan 08 remains
+dependency-free and is the natural head of Track B — and it is what unblocks Plan 09's
+`INSTALLED_BY_DEFAULT` probe, which A3 deliberately scoped around.
 
 ---
 
@@ -564,10 +838,19 @@ step 5.
 generate `plugins/conductor` and `plugins/spec-craft` bundles from immutable tags with recorded
 source commit and version, verified against source in CI.
 
-**Ordering exception — this plan does not start before Plan 04 merges.** Packaging Conductor for
-Codex while the adapter is absent produces a plugin that installs cleanly and then tries to spawn
-`claude` at first fire, on a machine that may not have Claude installed. This is the one place the
-"write ahead of your dependency" allowance above does not apply. The written Plan 04 also records
+> **Track A note.** **A3 takes the conductor-side packaging slice** — `.codex-plugin/plugin.json`
+> plus a Conductor entry in `.agents/plugins/marketplace.json`, nothing more. What remains here:
+> the Claude `.claude-plugin/marketplace.json`, the generated tag-pinned bundles and their CI
+> source verification, and the spec-craft catalog entry with the
+> `policy.installation=INSTALLED_BY_DEFAULT` probe below — which still depends on Plan 08.
+
+**Ordering exception — superseded, not removed.** This entry used to read "this plan does not
+start before Plan 04 merges". The hazard it names is real and unchanged: packaging Conductor for
+Codex while the launcher still spawns `claude` produces a plugin that installs cleanly and then
+fails at first fire on a machine that may not have Claude installed. **A3 now carries that
+ordering constraint against A1**, which is the item that actually removes the hazard. Plan 04 is
+no longer the gate, because A1 ships the launcher first. This is still the one place the "write
+ahead of your dependency" allowance does not apply. The written Plan 04 also records
 that the Codex plugin system is missing from the design entirely — `codex plugin {add, list,
 marketplace, remove}`, `.codex-plugin/plugin.json`, `.agents/plugins/marketplace.json`, a `policy`
 block Claude has no counterpart for, and `--sparse` file scoping Claude has no mechanism for —
@@ -599,20 +882,38 @@ Claude-only description.
 
 ---
 
-## Release sequencing (design §"Repository and release sequence")
+## Release sequencing
 
-Engineering order and release order differ. Engineering may proceed 01 → 02 → 03 → 04 → 05 →
-06 → 07 in the canonical clone as soon as decommission precondition 1 (fresh clone established at
-`~/programming/conductor`) is done — and, because nothing is being moved, it may equally proceed
-from `.worktrees/` under the old path until then. Release order is fixed:
+This section replaces the single-track order it previously carried. Design §"Repository and
+release sequence" still governs **within Track B**; it predates the split and its "spec-craft
+ships first" step is now first-within-Track-B, not first overall.
 
-1. Decommission precondition 1 — fresh clone established. Preconditions 2–5 (archive untracked and
-   ignored state, give every linked worktree a recorded outcome, clear the stale Codex
-   project-trust entry, install and smoke-test the intended plugin version) run in that order
-   alongside engineering; the quarantine itself does **not** happen here.
+### Track A release order
+
+Track A does **not** wait on any decommission precondition. A1, A2 and A3 are ordinary feature
+branches developed in `.worktrees/`; they never move, rename, or write to the checkout root — the
+same exemption Plans 01–07 already hold under Plan 00.
+
+1. **A1** — host adapter for launcher, scheduler discovery, preflight, and the five skills.
+2. **A2** — retire `scheduled_tasks.json`; re-derive frozen assertion A13. Independent of A1 and
+   may run concurrently; if A2 lands first, A1's `driver.py` scope disappears.
+3. **A3** — `.codex-plugin/plugin.json` and the Codex catalog entry. **Not before A1 merges.**
+4. **Codex-capable release** — plugin version bump, then a branch-based installation smoke on a
+   Codex-only machine before merge and a public one after.
+
+### Track B release order (deferred until the above ships)
+
+1. Decommission precondition 1 — fresh clone established at `~/programming/conductor`.
+   Preconditions 2–5 (archive untracked and ignored state, give every linked worktree a recorded
+   outcome, clear the stale Codex project-trust entry, install and smoke-test the intended plugin
+   version) run in that order alongside engineering; the quarantine itself does **not** happen
+   here. Engineering may equally proceed from `.worktrees/` under the old path until then.
 2. Plan 08 — spec-craft dual-host, versioned artifact.
-3. Plans 01–07 — Conductor dual-host against that supported spec-craft version.
-4. Plan 09 — marketplace catalogs and bundles. Not before Plan 04 has merged.
+3. Plans 02 → 03 → 04 → 05 → 06 → 07 against that supported spec-craft version. Plan 01 is
+   already merged. Plans 04, 05 and 09 each start from what its Track A slice shipped rather than
+   from today's `main`.
+4. Plan 09 — the remaining catalogs and bundles, including the spec-craft
+   `INSTALLED_BY_DEFAULT` probe, which needs Plan 08.
 5. Plan 10 — descriptions and public documentation, after each repository team accepts.
 6. Branch-based installation smokes before merge; public installation smokes after merge.
 7. Decommission precondition 6 — declare the quiesce window, `mv` to a dated quarantine directory,
