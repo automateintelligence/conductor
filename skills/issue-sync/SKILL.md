@@ -8,8 +8,13 @@ description: Automate GitHub issue hierarchy management — generate a milestone
 Fully automated. The skill **never prompts** the user or pauses for confirmation; all three
 operations run headlessly via `conductor ledger` sub-commands backed by `python3 -m ledger`.
 
-> **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
-> below); installed plugins are not on `PATH`.
+> **Conductor CLI path:** installed plugins are not on `PATH`, so invoke the CLI by ABSOLUTE path
+> as `<conductor-plugin-root>/bin/conductor` (written `conductor` below). Resolve
+> `<conductor-plugin-root>` in this order: `$CLAUDE_PLUGIN_ROOT` when your host exports it (Claude
+> Code does; Codex has no verified equivalent); otherwise **the directory this `SKILL.md` lives in,
+> two levels up** — `<root>/skills/issue-sync/SKILL.md` means `<root>/bin/conductor`. That second
+> form works on every host and never goes stale, because you already know the path you read this
+> from.
 
 ## Operations
 

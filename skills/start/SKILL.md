@@ -7,10 +7,13 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 
 **Idempotent (amendment B): each step probes durable state first and SKIPS if already done.**
 
-> **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
-> below). Installed plugins are not on `PATH`; if `$CLAUDE_PLUGIN_ROOT` is unset (dev/`--plugin-dir`),
-> run the plugin's `bin/conductor` by absolute path and export `CONDUCTOR_PLUGIN_DIRS` with the
-> spec-craft dir so preflight can see it.
+> **Conductor CLI path:** installed plugins are not on `PATH`, so invoke the CLI by ABSOLUTE path
+> as `<conductor-plugin-root>/bin/conductor` (written `conductor` below). Resolve
+> `<conductor-plugin-root>` in this order: `$CLAUDE_PLUGIN_ROOT` when your host exports it (Claude
+> Code does; Codex has no verified equivalent); otherwise **the directory this `SKILL.md` lives in,
+> two levels up** — `<root>/skills/start/SKILL.md` means `<root>/bin/conductor`. That second form
+> works on every host and never goes stale, because you already know the path you read this from.
+> Then export `CONDUCTOR_PLUGIN_DIRS` with the spec-craft dir so preflight can see it.
 >
 > **Plugin dir vs project (where things live):** the plugin dir is read-only tool code; the **run
 > state and the done-gate live in the PROJECT** — the git repo you invoke conductor from. **Run
@@ -23,10 +26,14 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 > exports `CONDUCTOR_GATE_SLUG` so `conductor gate freeze|lint` and `assert run` resolve that dir
 > during setup, before the goal/run-branch that carry the slug at run time are written.
 
-0. **PREFLIGHT (`conductor preflight`).** Confirm every conducted command resolves (Codex #1):
-   `/spec-craft:*`, `/superpowers:*`, and environment-provided `/code-review`, `/codex`,
-   `/document-release`. Any **missing → STOP** and tell the user to install it (fail-closed,
-   amendment E). Do not launch a loop that dies at the first conducted call.
+0. **PREFLIGHT (`conductor preflight`).** Confirm every conducted command resolves (Codex #1).
+   **Do not re-list the required commands here or in your report — run the command and read what
+   it prints.** It resolves the set for THIS run's host and names every one of them in your
+   host's own invocation form, including the **opposite-host review wrapper**, which is the one
+   requirement that differs: a Claude-hosted run needs the Codex wrapper, a Codex-hosted run
+   needs the Claude one. A list copied into prose is a list that drifts from the checker.
+   Any **missing → STOP** and tell the user to install exactly what preflight named
+   (fail-closed, amendment E). Do not launch a loop that dies at the first conducted call.
 1. **Detect spec source**; load spec + Expectations. The **executable-assertion specs** live in
    `<spec>.assertions.md` — the sibling file `/spec-craft:executable-assertions` writes — **not**
    inline in the spec; load them from there if it exists.
@@ -64,7 +71,7 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    that gates objective expectations; the spec's spirit and intent — architecture, behaviors,
    qualities — is the actual work, and there is far more of it than the assertions capture.
    The plan MUST carry every item below. `conductor plan-lint` mechanically enforces their
-   **presence** (the floor); the step-4b codex review judges their **substance** — coverage
+   **presence** (the floor); the step-4b opposite-host review judges their **substance** — coverage
    and intent (the same division of labor as the done-gate itself):
    - a `**Normative spec:** <path>` header line (plus the assertions path) directly after the H1,
      stating the spec is normative over the plan on any conflict and that workers read the phase's
@@ -93,16 +100,23 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      BRANCH → `/code-review` per task (against the phase's Spec sections and ADRs, not just the
      diff) →
      commit per task → one PR per phase with **base = the run branch** (`Closes #<phase-issue>`)
-     → codex review ×2 — each run as `/codex $superpowers:requesting-code-review Please provide a
-     read-only, pre-merge review for PR#<pr> against the phase's Spec sections and ADRs` — posted as "Codex
-     review" PR comments → `conductor merge-gate` → merge
+     → **opposite-host review ×2** — each run through the wrapper for the host you are NOT
+     (`conductor preflight` names it), asking for a read-only, pre-merge review of PR#<pr>
+     against the phase's Spec sections and ADRs — posted as PR comments carrying the gate's
+     review marker → `conductor merge-gate` → merge
      into the run branch → `/document-release` → `conductor ledger phase-done`.
+     **Write the reviewer's host NAME into the recipe** (`codex` on a Claude-hosted run,
+     `claude` on a Codex-hosted one). `conductor plan-lint` checks for it and reports
+     `recipe-missing:<host>` when it is absent — naming your OWN host there describes a
+     same-host review, which is the thing the gate exists to prevent.
    SKIP if a plan/milestone exists.
-4b. **LINT + CODEX-REVIEW THE PLAN** — it dictates every phase and must not stay the
+4b. **LINT + OPPOSITE-HOST REVIEW OF THE PLAN** — it dictates every phase and must not stay the
    least-reviewed setup artifact. `conductor plan-lint <plan.md> --spec <spec.md>` must exit 0:
-   fix the plan, never bypass the lint. Then codex-review the plan **against the spec** (does
-   every spec section land in a phase? is intent preserved, not just assertion coverage?) and
-   apply the fixes. SKIP only if both were already done for this plan.
+   fix the plan, never bypass the lint. Then send the plan for an **opposite-host review**
+   **against the spec** (does every spec section land in a phase? is intent preserved, not just
+   assertion coverage?) and apply the fixes. Review it on the host you are NOT — the same
+   independence rule the per-phase recipe follows, for the artifact that dictates every phase.
+   SKIP only if both were already done for this plan.
    **Upgraded conductor while a run was in flight? Rerun `/conductor:prepare` before resuming.**
    A plan written before 0.9.0 has no `**ADRs:**` lines, and an in-flight run never comes back
    through this step — `autodev` step 4b will refuse to claim its phases until the dialect is

@@ -16,8 +16,13 @@ verified end-to-end before it became a skill.)
 repo's artifacts (plan text, issue titles, milestone), so the owner sees every dry-run report
 before `--apply`. Contrast issue-sync/autodev, which never prompt.
 
-> **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
-> below); installed plugins are not on `PATH`. Run from the project root.
+> **Conductor CLI path:** installed plugins are not on `PATH`, so invoke the CLI by ABSOLUTE path
+> as `<conductor-plugin-root>/bin/conductor` (written `conductor` below). Resolve
+> `<conductor-plugin-root>` in this order: `$CLAUDE_PLUGIN_ROOT` when your host exports it (Claude
+> Code does; Codex has no verified equivalent); otherwise **the directory this `SKILL.md` lives in,
+> two levels up** — `<root>/skills/prepare/SKILL.md` means `<root>/bin/conductor`. That second form
+> works on every host and never goes stale, because you already know the path you read this from.
+> Run from the project root.
 
 0. **INVENTORY.** Locate: the spec (with `## Expectations`), `<spec>.assertions.md`, the run's
    done-gate — the per-spec `assertions/<slug>/manifest.yaml` + `.frozen` (`<slug>` =
@@ -39,9 +44,9 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
    plan to compliance — normative-spec header, per-phase `Spec:` pointers, per-phase `**ADRs:**`
    pointers, assertion ids in
    headings (or explicit `gate: none`), `- [ ]` tasks, the per-phase recipe — the spec is
-   normative for content; show the owner the diff before committing it. Then codex-review the
-   plan **against the spec** (does every spec section land in a phase? intent preserved?) and
-   apply fixes. Lint must exit 0 before step 3.
+   normative for content; show the owner the diff before committing it. Then send the plan for an
+   **opposite-host review** — on the host you are NOT — **against the spec** (does every spec
+   section land in a phase? intent preserved?) and apply fixes. Lint must exit 0 before step 3.
    **`**ADRs:**` BACKFILL — this is the migration path for the 0.9.0 plan dialect; dry-run
    FIRST, like everything else here.** Any plan written before 0.9.0 has no `**ADRs:**` lines, so
    EVERY phase now fails lint with `phase-no-adr-pointer:<title>`. Mechanical fix: insert

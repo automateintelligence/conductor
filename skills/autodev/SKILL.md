@@ -22,8 +22,12 @@ worker rewrote its own watchdog unreviewed). Found a real defect in them? Escala
 `escalate.file_followup(debt)` with the proposed patch — and keep working. The only exception is
 step 3b's terminal crontab removal.
 
-> **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
-> below); installed plugins are not on `PATH`.
+> **Conductor CLI path:** installed plugins are not on `PATH`, so invoke the CLI by ABSOLUTE path
+> as `<conductor-plugin-root>/bin/conductor` (written `conductor` below). Resolve
+> `<conductor-plugin-root>` in this order: `$CLAUDE_PLUGIN_ROOT` when your host exports it (Claude
+> Code does; Codex has no verified equivalent); otherwise **the directory this `SKILL.md` lives in,
+> two levels up** — `<root>/skills/autodev/SKILL.md` means `<root>/bin/conductor`. That second form
+> works on every host and never goes stale, because you already know the path you read this from.
 
 1. **RE-LOAD GOAL (fresh context).** Done only when `conductor assert run --level spec` exits 0.
    Re-read goal + paths from the durable handoff/ledger; trust git/issues, not memory. Read the
@@ -122,9 +126,10 @@ step 3b's terminal crontab removal.
    defect, never permission — step 4b already refused to claim the phase over it, so you never
    reach here blind. Believe an ADR is wrong? Escalate it (§9, patch-later or needs-human) and
    keep building to it meanwhile — never quietly build against a closed decision.
-   Conducted skills: `/superpowers:*` are plugin skills;
-   `/code-review`, `/codex`, `/document-release` are **environment-provided** commands (verified
-   by `/conductor:start` preflight):
+   Conducted skills: the `superpowers` ones are plugin skills; `code-review`, the opposite-host
+   review wrapper, and `document-release` are **environment-provided** commands (verified by
+   conductor's preflight, which names each of them in your host's own invocation form — run
+   `conductor preflight` rather than assuming a form):
    0. **Reconcile-within-phase (restart safety):** diff the phase's `- [ ]` tasks against
       `git log` on the phase branch (per-task commits are the breadcrumbs) and the gate's
       per-assertion state; skip tasks already done. A dirty tree left by a dead worker: commit it
@@ -155,41 +160,47 @@ step 3b's terminal crontab removal.
    4. **one PR per phase, base = the RUN branch** (`Closes #<phase-issue>` for traceability —
       merge-gate blocks without it, and its base leg blocks any other base with
       `base-mismatch`; run-branch merges don't auto-close issues — `phase-done` does that).
-   5. `/codex $superpowers:requesting-code-review Please provide a read-only, pre-merge review for
-      PR#<n> against the phase's Spec sections and ADRs` — post the result as a PR comment starting with the
-      gate's review marker (**`CONDUCTOR_REVIEW_MARKER`, default "Codex review"**).
-      **Codex usage-limit fallback — continue uninterrupted, never stall.** If `/codex` reports its
-      5-hour OR weekly usage limit is exhausted (its stderr/stdout names a usage/rate/quota limit,
-      or `/status` shows the window spent — distinct from a transient timeout, which you retry ONCE
-      first), do NOT halt and do NOT park the phase until the window resets: a spent WEEKLY quota
-      would freeze the whole run for days, breaking the "walk away and it keeps making progress"
-      contract. Fall back to `/code-review` for the independent pre-merge review. The gate is
-      OWNER-CONFIGURED and you must NOT change its env, so honor two constraints as they are set:
-        - **Marker (`CONDUCTOR_REVIEW_MARKER`, default `Codex review`):** post `/code-review`'s
-          findings as the PR comment with that exact marker at the START of the body, labeled
-          honestly — e.g. **"Codex review — UNAVAILABLE (usage limit); Claude /code-review
-          fallback"** — so `conductor merge-gate` still counts it AND the degradation stays visible.
-          Read the configured marker; do not assume it is the default.
+   5. **Opposite-host review.** Invoke the review wrapper for the host you are NOT — `conductor
+      preflight` names it for your host, and it is `codex` on a Claude-hosted run and `claude` on
+      a Codex-hosted one — asking it to run `requesting-code-review` and provide a read-only,
+      pre-merge review for PR#<n> against the phase's Spec sections and ADRs. Post the result as
+      a PR comment starting with the gate's review marker
+      (**`CONDUCTOR_REVIEW_MARKER`, default `<Opposite-host> review`** — `Codex review` on a
+      Claude-hosted run, `Claude review` on a Codex-hosted one).
+      **Usage-limit fallback — continue uninterrupted, never stall.** If the opposite host
+      reports its 5-hour OR weekly usage limit is exhausted (its stderr/stdout names a
+      usage/rate/quota limit, or its status shows the window spent — distinct from a transient
+      timeout, which you retry ONCE first), do NOT halt and do NOT park the phase until the
+      window resets: a spent WEEKLY quota would freeze the whole run for days, breaking the
+      "walk away and it keeps making progress" contract. Fall back to your OWN host's
+      `code-review` for the independent pre-merge review. The gate is OWNER-CONFIGURED and you
+      must NOT change its env, so honor two constraints as they are set:
+        - **Marker (`CONDUCTOR_REVIEW_MARKER`):** post `code-review`'s findings as the PR comment
+          with that exact marker at the START of the body, labeled honestly — e.g. **"<marker> —
+          UNAVAILABLE (usage limit); same-host code-review fallback"** — so `conductor merge-gate`
+          still counts it AND the degradation stays visible. **Read the configured marker; never
+          assume the default**, which itself depends on the run's host.
         - **Provenance (`CONDUCTOR_REVIEW_AUTHOR`):** if it is pinned to a non-worker account, a
           worker-posted fallback can NEVER be counted — do NOT post unusable reviews in a loop;
-          escalate needs-human instead (that config is incompatible with conductor's local-posting
-          Codex flow anyway). Check this BEFORE falling back.
+          escalate needs-human instead (that config is incompatible with conductor's
+          local-posting review flow anyway). Check this BEFORE falling back.
       Keep posting eligible final-state fallback reviews until `conductor merge-gate <pr>` passes —
       it needs `CONDUCTOR_MIN_REVIEWS` marker comments with the newest postdating the newest commit;
       do NOT assume that count is 2. Then **let the owner know** (the §9 *patch-later* branch, not a
       halt):
-      `escalate.file_followup(repo, "debt", "Codex-fallback review: phase #<n>", body, link_issue=<phase#>)`
+      `escalate.file_followup(repo, "debt", "Same-host fallback review: phase #<n>", body, link_issue=<phase#>)`
       with `body` naming the phase, the PR, which limit tripped (5-hour vs weekly), and that this
-      phase traded Codex's independence for Claude's — flag it for optional independent re-review.
+      phase traded the opposite host's independence for its own — flag it for optional
+      independent re-review.
       The open `debt` issue rides the handoff's `Open:` line to the final owner PR, where YOU decide;
       it SURFACES the degradation, it does not silently repair it. Keep working.
-   6. `/superpowers:receiving-code-review` — apply fixes, commit, then **codex re-reviews the
-      FINAL state** (posted as another "Codex review" comment; if Codex is still usage-limited the
-      step-5 fallback applies again — `/code-review` the final state under the same configured
-      marker); repeat until the last review postdates the last commit and raises nothing blocking.
+   6. `receiving-code-review` — apply fixes, commit, then **the opposite host re-reviews the
+      FINAL state** (posted as another marker comment; if it is still usage-limited the step-5
+      fallback applies again — `code-review` the final state under the same configured marker);
+      repeat until the last review postdates the last commit and raises nothing blocking.
       merge-gate enforces both: `CONDUCTOR_MIN_REVIEWS` marker comments and review-of-final-state —
       the fallback satisfies them by running the SAME independent review rounds on the final diff,
-      on `/code-review` instead of Codex.
+      on your own host's `code-review` instead of the opposite host's.
    7. **merge INTO THE RUN BRANCH with `conductor merge <pr>`** (§6.2) — the ONE merge command:
       it runs `merge-gate` and performs `gh pr merge --merge` (no squash) only if the gate is ok,
       and refuses `base=default` so the final owner PR can never be auto-merged. **Never run raw
