@@ -76,9 +76,9 @@ Copy this block verbatim into each plan's `## Global Constraints` section.
 
 | # | Plan | Repo | Depends on | Plan doc | Code |
 | --- | --- | --- | --- | --- | --- |
-| A1 | Host adapter for launcher, scheduler discovery, preflight | conductor | — | not written | — |
-| A2 | Host-neutral scheduling (retire `scheduled_tasks.json`) | conductor | — | not written | — |
-| A3 | Codex packaging (`.codex-plugin` + Codex catalog entry) | conductor, marketplace | **A1** | not written | — |
+| A1 | Host adapter for launcher, scheduler discovery, preflight | conductor | — | built directly | **PR #87** — 3 codex rounds, 1188 tests |
+| A2 | Host-neutral scheduling (retire `scheduled_tasks.json`) | conductor | — | built directly | merged into A1's branch |
+| A3 | Codex packaging (`.codex-plugin` + Codex catalog entry) | conductor, marketplace | **A1** | built directly | **PR #88** — 1 codex round |
 
 **Track B — improvement. After Codex-capable ships.** Every row below is **deferred**: retained in
 full, not a prerequisite for Track A unless Track A names it.
@@ -89,13 +89,39 @@ full, not a prerequisite for Track A unless Track A names it.
 | 01 | Run identity, project registry, per-run state | conductor | — | **written** | **merged** (PR #84) |
 | 02 | Ownership, leases, takeover, prune, rebind — *deferred* | conductor | 01 | not written | — |
 | 03 | Legacy run migration — *deferred* | conductor | 01, 02 | not written | — |
-| 04 | Host adapter layer and preflight floors — *deferred* | conductor | 01 | **written** | not started — `conductor/hosts/` does not exist on `main`; A1 ships a subset first |
+| 04 | Host adapter layer and preflight floors — *deferred* | conductor | 01 | **written** | A1 (PR #87) ships the subset; the launch surface (`worker_argv`, `worker_env`, `launch_prompt`) is still unimplemented on both adapters |
 | 05 | Heartbeat, checkpoint, no-compaction policy — *deferred* | conductor | 01, 02, 03, 04 | not written | scheduler slice carved out to A2 |
 | 06 | Branch/worktree/PR model, merge gates, sync phases — *deferred* | conductor | 01, 04 | not written | — |
 | 07 | Reviewer routing, structured review, review debt — *deferred* | conductor | 04, 06 | not written | — |
 | 08 | spec-craft dual-host — *deferred* | spec-craft | — | not written | — |
 | 09 | Packaging and marketplace dual catalogs — *deferred* | conductor, marketplace | 04, 08 | not written | conductor-side packaging slice carved out to A3 |
 | 10 | Public messaging and installation smokes — *deferred* | all three | 09 | not written | — |
+
+### What the done-gate measures, per plan
+
+The spec's seven assertions are executable on `feature/dual-host-done-gate` and report **3/7 green**.
+Each red names the plan that owns it — measured by running the gate, not estimated.
+
+| Assertion | State | Owned by |
+| --- | --- | --- |
+| A-DH-1 host vocabulary confined to adapters | GREEN | Track A |
+| A-DH-2 launch targets the recorded host | GREEN | Track A |
+| A-DH-3 Codex launch uses only Conductor artifacts | GREEN | Track A |
+| A-DH-4 host invocations time-bounded | RED | **05** — the worker launch is unbounded and holds `resume.lock` |
+| A-DH-5 relocation refuses with live run artifacts | RED | **00** — no relocation scan exists; also owner-gated |
+| A-DH-6 unresolvable default branch refuses merges | RED | **06** — `branches.py:91` returns the literal `"main"` |
+| A-DH-7 never completes the final default-branch PR | RED | **05/06** — no `finish`/`resume`/`heartbeat`/`status` verbs |
+
+So **four of seven assertions depend on Track B**, and the spec cannot go green until Plans 00, 05
+and 06 land. Track A shipping does not complete the spec — it completes the Codex-capable slice.
+
+> **A-DH-6 contradicts a live frozen assertion.** `assertions/manifest.yaml`'s `a10` requires
+> `default_branch()` to return exactly `"main"` on resolution failure; A-DH-6 forbids that literal as
+> a resolved value. Both are machine-checked in this repo and cannot both hold. `gate verify` reports
+> both intact because it verifies digests, not consistency across gates. Plan 06 owns the inversion
+> and must **re-derive** `a10`, not delete it.
+
+Full measurement: `docs/reviews/2026-08-21-dual-host-done-gate-measured-state.md`.
 
 Dependency edges are **interface** dependencies: plan N may be written and reviewed before its
 dependency merges, but it cannot go green until the interfaces it consumes exist. **One
