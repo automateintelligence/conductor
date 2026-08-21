@@ -38,3 +38,11 @@ assertions:
     timeout: 180
     level: spec
     kind: contract
+  - id: a-dh-4-host-invocations-are-time-bounded
+    claim: "every adapter-layer entry point that spawns a host process returns within its configured timeout against a hanging host with a non-zero actionable failure and no orphaned child, and reports no timeout against a responsive one"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_4_host_invocations_are_time_bounded.py"
+    setup: ""
+    teardown: ""
+    timeout: 600
+    level: spec
+    kind: property
