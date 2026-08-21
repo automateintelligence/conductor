@@ -5,8 +5,8 @@ it invents NO permission flags or tokens of its own. This module is the tested c
 decision:
 
 - ``RECIPE_PRIVILEGED_OPS`` — the ONE declared set of privileged operations an autodev
-  phase performs. `authority preview` (and `/conductor:start`'s less-privileged dry-run)
-  iterate THIS set, so the report can never drift from the declaration.
+  phase performs. `authority preview` (and the `conductor:start` skill's less-privileged
+  dry-run) iterate THIS set, so the report can never drift from the declaration.
 - ``resolve_posture`` — maps a detected (possibly unknown/unreadable) session permission
   mode to the run's posture, FAIL-CLOSED: a misread can only ever under-grant, never
   over-grant (frozen invariant A2).

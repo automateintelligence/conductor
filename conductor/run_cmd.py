@@ -7,7 +7,7 @@ only when exactly one active run exists.
 
 SCOPE: ``run new`` creates registry state, the run directory and ``run.json``. It does not create
 branches or worktrees, install a schedule, or record hosts — those belong to the branch/PR,
-heartbeat and adapter plans respectively, and ``/conductor:start`` composes them.
+heartbeat and adapter plans respectively, and the ``conductor:start`` skill composes them.
 
 Exit codes: 0 success, 1 refusal/failure, 2 ambiguous run, 3 no such run / no active run,
 64 usage.

@@ -297,8 +297,8 @@ def resolve_gate(
            .frozen`` (an edited ``run_branch`` or a planted unfrozen manifest); or
       (ii) the ``run_branch`` slug and the ``goal.md`` spec DISAGREE — ``run_branch`` was
            repointed onto a DIFFERENT (possibly already-green, frozen) gate than the one this
-           run declared. ``/conductor:start`` writes the two together, so at run time they
-           agree; a mismatch is repointed metadata.
+           run declared. The ``conductor:start`` skill writes the two together, so at run
+           time they agree; a mismatch is repointed metadata.
     A repo with no frozen gate at all, and a run whose run_branch/goal.md agree, is never
     affected."""
     root = repo_root or project_root()
@@ -350,7 +350,8 @@ def resolve_gate(
         elif source == "run_branch":
             # (ii) dodge onto a DIFFERENT, already-FROZEN gate by repointing run_branch:
             # run_branch and goal.md are two independent declarations of the run's spec, and
-            # /conductor:start writes them together. If goal.md names a DIFFERENT spec, the
+            # the `conductor:start` skill writes them together. If goal.md names a DIFFERENT
+            # spec, the
             # run_branch was repointed to validate an alternate baseline (e.g. another spec's
             # green gate) instead of this run's — fail closed (§5).
             goal = _goal_slug(root)

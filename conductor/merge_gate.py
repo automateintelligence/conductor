@@ -27,7 +27,8 @@ _CLOSES_RE = re.compile(r"(?i)\b(close[sd]?|fix(es|ed)?|resolve[sd]?)\s+#\d+")
 
 def _expected_base() -> str | None:
     """The run's integration branch, when one is configured: env CONDUCTOR_RUN_BRANCH,
-    else the `<project>/.conductor/run_branch` file `/conductor:start` writes (re-derived
+    else the `<project>/.conductor/run_branch` file the `conductor:start` skill writes
+    (re-derived
     from `git ls-remote 'conductor/run-*'` on a fresh clone). None = no run topology
     configured → the base leg is disabled (0.4.x direct-merge runs keep working)."""
     env = (os.environ.get("CONDUCTOR_RUN_BRANCH") or "").strip()
