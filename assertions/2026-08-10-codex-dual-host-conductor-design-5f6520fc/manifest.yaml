@@ -60,3 +60,11 @@ assertions:
     timeout: 300
     level: spec
     kind: property
+  - id: a-dh-6-unresolvable-default-branch-refuses-every-merge
+    claim: "when the repository's default branch cannot be resolved from authoritative remote metadata every automated merge is refused and no code path substitutes a literal fallback branch name, while the same otherwise-eligible merge succeeds against a resolvable default branch named neither main nor master"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_6_unresolvable_default_branch_refuses_merge.py"
+    setup: ""
+    teardown: ""
+    timeout: 600
+    level: spec
+    kind: property
