@@ -114,6 +114,9 @@ _HOST_NEUTRAL_NEEDLES = ("merge-gate", "closes #")
 # The skill a phase's per-task self-review invokes. A NAME, not an invocation — each host
 # renders it in its own form.
 _REVIEW_SKILL = "code-review"
+# The onboarding skill the per-phase ADR failure tells an operator to run, same rule: a
+# plugin-qualified NAME, rendered by the run's host when it is printed.
+_PREPARE_SKILL = "conductor:prepare"
 
 
 def recipe_needles(host_id: str) -> tuple[str, ...]:
@@ -328,6 +331,12 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"plan-unreadable: {exc}", file=sys.stderr)
         return 2
+    # The plan's OWN repo decides the host, not the caller's cwd: `conductor plan-lint` is run
+    # from anywhere, and the run's recorded host is what `runhost` resolves from that repo.
+    # Resolved once, ahead of both branches, because BOTH of them name a skill back to the
+    # operator and each host writes one differently.
+    root = _project_root(args.plan_md)
+    host = runhost.resolve(root)
     if args.phase is not None:
         # `-` = read the title from stdin. The ONLY form with no quoting failure mode,
         # which matters because the caller is a model composing a shell command around a
@@ -340,27 +349,26 @@ def main(argv: list[str] | None = None) -> int:
         for reason in reasons:
             print(reason, file=sys.stderr)
         if reasons:
+            # Named as THIS host writes it: the line is a remedy an operator is meant to
+            # type, and one host's spelling is not invocable on the other.
             print(
                 f"{args.plan_md}: this phase carries no usable **ADRs:** line, so nothing "
                 "would carry its architectural decisions to the worker. Run "
-                "/conductor:prepare on this repo to backfill the 0.9.0 plan dialect, "
-                "then re-fire.",
+                f"{load(host).native_invocation(_PREPARE_SKILL)} on this repo to backfill "
+                "the 0.9.0 plan dialect, then re-fire.",
                 file=sys.stderr,
             )
         return 1 if reasons else 0
     # Belt to _adr_index's braces: the warning leg is advisory end to end, so ANY failure
     # resolving it (unreadable dir, vanished path, permission change mid-walk) costs the
     # warnings and nothing else. The lint's verdict is never the warning leg's to change.
-    root = _project_root(args.plan_md)
     try:
         warnings = adr_warnings(text, root)
     except OSError as exc:
         warnings = [f"warn:phase-adr-unresolvable: {exc}"]
     for warning in warnings:
         print(warning, file=sys.stderr)
-    # The plan's OWN repo decides the host, not the caller's cwd: `conductor plan-lint` is run
-    # from anywhere, and `<root>/.conductor/host` is where /conductor:start recorded it.
-    reasons = lint(text, spec_path=args.spec, host_id=runhost.resolve(root))
+    reasons = lint(text, spec_path=args.spec, host_id=host)
     for reason in reasons:
         print(reason, file=sys.stderr)
     return 1 if reasons else 0

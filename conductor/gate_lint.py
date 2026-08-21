@@ -11,7 +11,7 @@ linter can catch without judgment:
 
 Boundary (deliberate): the judgment-requiring weaknesses — a hard-coded value tracking
 no source of truth, a `property` tested on one case, an "X is used" check that only
-proves X exists — belong to the red-team step in `/conductor:assertions-to-tests`,
+proves X exists — belong to the red-team step in `conductor:assertions-to-tests`,
 not here. Prose for what needs a mind; mechanism for what a machine can see.
 
 The pinned-command rule validates an EXACT argv shape, not token presence: optional

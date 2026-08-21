@@ -431,6 +431,36 @@ def test_phase_check_cli_names_prepare_as_the_fix(tmp_path, capsys):
     assert "/conductor:prepare" in err
 
 
+def test_phase_check_cli_names_prepare_in_the_recorded_hosts_own_form(
+    tmp_path, monkeypatch, capsys
+):
+    """The remedy line is a command an operator is meant to TYPE, and the two hosts do not
+    spell one the same way. A literal here is a Claude slash command: printed to a Codex
+    operator it names something their host cannot invoke, so the one actionable sentence the
+    failure carries sends them nowhere.
+
+    Every expected string comes from the adapters, so a hardcoded remedy fails the loop on
+    whichever host it is not.
+    """
+    from conductor.hosts import base, runhost
+
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    text = GOOD_PLAN.replace("**ADRs:** none\n", "")
+    renderings = {
+        h: base.load(h).native_invocation("conductor:prepare") for h in base.HOST_IDS
+    }
+    assert len(set(renderings.values())) == len(renderings), renderings
+    for host_id in base.HOST_IDS:
+        repo, plan = _repo_with_plan(tmp_path / host_id, text)
+        runhost.record(str(repo), host_id)
+        assert plan_lint.main([plan, "--phase", _P2]) == 1
+        err = capsys.readouterr().err
+        assert renderings[host_id] in err, (host_id, err)
+        for other_id, other in renderings.items():
+            if other_id != host_id:
+                assert other not in err, (host_id, err)
+
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 

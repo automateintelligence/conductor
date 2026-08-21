@@ -6,9 +6,10 @@ are derived rather than written down:
 * **Where skills live.** ``~/.claude`` with a marketplace plugin cache, or ``$CODEX_HOME`` with
   flat skill dirs, ``prompts/``, and a project-local ``./.codex/skills/``. Each adapter's
   ``discovered_commands`` owns its own roots.
-* **How a name is written.** ``/spec-craft:expectations`` under Claude, ``$expectations`` under
-  Codex — the plugin qualifier has no Codex counterpart, so it is dropped for both matching and
-  reporting by the one function that knows the rule, ``native_invocation``.
+* **How a name is written.** The requirement ``spec-craft:expectations`` keeps its plugin
+  qualifier and gains a slash prefix under Claude; under Codex it becomes a bare
+  ``$expectations`` — the plugin qualifier has no Codex counterpart, so it is dropped for both
+  matching and reporting by the one function that knows the rule, ``native_invocation``.
 * **Who reviews.** The opposite-host review wrapper is ``codex`` on a Claude-hosted run and
   ``claude`` on a Codex-hosted one. This is the requirement that actually flips, and getting it
   wrong greens a machine that can only ever produce a same-host review.

@@ -121,7 +121,7 @@ def _assertions_source(repo_root: str) -> tuple[dict, str]:
 
     Highest precedence: `$CONDUCTOR_ASSERTIONS_SOURCE` names THIS run's spec (its
     `.md` — the `.assertions.md` sibling is taken — or the `.assertions.md` itself).
-    `/conductor:start` sets it for the step-3 freeze, which runs BEFORE the goal is
+    The `conductor:start` skill sets it for the step-3 freeze, which runs BEFORE the goal is
     recorded: in a multi-spec repo the glob below would otherwise fail closed
     (`ambiguous-assertions-source`) or a stale `goal.md` would bind the wrong spec.
     Else, precise path: parse `<project>/.conductor/goal.md` for a
@@ -194,7 +194,7 @@ def record(
     baseline_path: str = DEFAULT_BASELINE,
     repo_root: str = PROJECT,
 ) -> str:
-    """Snapshot the current gate to the baseline file (called at /conductor:start)."""
+    """Snapshot the current gate to the baseline file (called at `conductor:start`)."""
     state = gate_state(manifest_path, repo_root)
     doc: dict = {"version": 1, "ids": state}
     sources, via = _assertions_source(repo_root)
