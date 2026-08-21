@@ -12,15 +12,25 @@ that depends on it works on the author's machine and silently does nothing on a 
 The scratch ``HOME`` and ``CODEX_HOME`` here therefore start EMPTY and are snapshotted before
 the fire, so anything the launch resolves through is provably Conductor's own artifact.
 
+WHAT A FIRE IS. The launch is not a Python call: it is the generated Tier-B cron driver
+executing. ``worker_argv``/``launch_prompt`` are declared on the ``HostAdapter`` Protocol and
+implemented by neither adapter, because Track A rejected resolving the executable and the
+prompt at GENERATION time — that is the shape the 2026-07-05 stall had. Track A resolves at
+FIRE time, inside the driver: the Codex driver derives ``CONDUCTOR_SOURCE`` from ``readlink -f``
+of whichever ``conductor`` bin resolves on that fire, never from ``CodexAdapter.source_root()``.
+So this test renders the real driver with the product's own entry point
+(``conductor resume-script write``) and RUNS it, and measures the prompt bytes the fake codex
+recorded.
+
+The package root is at a path chosen at test time and the whole fire is repeated at a SECOND
+test-chosen path. A resolution artifact that does not follow the relocation is a hardcoded
+constant that happens to exist on this machine.
+
 DELIBERATELY MECHANISM-NEUTRAL. The ground-truth review *recommends* emitting an explicit
 ``SKILL.md`` path instead of a bare ``$conductor:autodev`` token, but records that as a
 recommendation the plan writer owns, not a decision. Either form passes here: a path named in
 the prompt, or a dispatch/convention file Conductor installed that the prompt's token resolves
 through. What fails is depending on something Conductor did not install.
-
-The package root is at a path chosen at test time and the whole fire is repeated at a SECOND
-test-chosen path. A resolution artifact that does not follow the relocation is a hardcoded
-constant that happens to exist on this machine.
 """
 
 from __future__ import annotations
@@ -42,13 +52,19 @@ if str(ROOT) not in sys.path:
 
 from conductor.hosts import runhost  # noqa: E402  (needs ROOT on sys.path)
 
-RUN_KEY = "2026-08-10-codex-dual-host-conductor-design-5f6520fc"
 SKILL = "autodev"
 
 #: What identifies Conductor's autodev skill. Read out of SKILL.md FRONTMATTER, never off the
 #: filename: a launch pointing at any file that happens to be called SKILL.md would otherwise
 #: pass while resolving to a stranger's skill.
 FRONTMATTER_NAME = re.compile(r"^name:\s*(\S+)\s*$", re.MULTILINE)
+
+#: The directories the generated driver prepends to ``PATH`` before it resolves anything. The
+#: harness's own bin dir sits behind them, so a real ``codex`` or ``conductor`` in any of these
+#: would be measured instead of the fake — the setup guarantee below refuses rather than
+#: silently reporting on the wrong binary. ``$HOME`` is scratch and empty, so its entry cannot
+#: shadow anything.
+DRIVER_SYSTEM_PATH = ("/usr/local/bin", "/usr/bin", "/bin")
 
 _FAKE_CODEX = """#!/usr/bin/env python3
 import json, os, sys
@@ -67,6 +83,9 @@ class Fire:
         self.after: set[pathlib.Path] = set()
         self.prompt = ""
         self.argv: list[str] = []
+        self.workdir = pathlib.Path()
+        self.driver_rc: int | None = None
+        self.driver_log = ""
 
     @property
     def written_by_conductor(self) -> set[pathlib.Path]:
@@ -77,9 +96,18 @@ class Fire:
         """Conductor shipped it (under the package root) or wrote it during the fire."""
         return path in self.written_by_conductor or self.package in path.parents
 
+    @property
+    def diagnosis(self) -> str:
+        return (
+            f"\ndriver rc={self.driver_rc}\ndriver log:\n{self.driver_log or '(empty)'}"
+        )
+
 
 def _snapshot(*roots: pathlib.Path) -> set[pathlib.Path]:
-    return {p.resolve() for root in roots for p in root.rglob("*") if p.is_file()}
+    """Every file under ``roots``, by its literal path. Deliberately NOT resolved: a symlink
+    planted under the scratch HOME is a file under the scratch HOME, and resolving it would
+    move it out of the snapshot and out of this assertion's reach."""
+    return {p for root in roots for p in root.rglob("*") if p.is_file()}
 
 
 def _seed_package_root(root: pathlib.Path) -> None:
@@ -92,73 +120,111 @@ def _seed_package_root(root: pathlib.Path) -> None:
 
 def _fire(label: str) -> Fire:
     fire = Fire()
-    workdir = pathlib.Path(tempfile.mkdtemp(prefix=f"a-dh-3-{label}-"))
-    fire.package = (workdir / "package").resolve()
-    fire.home = (workdir / "home").resolve()
-    fire.codex_home = (workdir / "codex-home").resolve()
-    project = workdir / "project"
-    for directory in (fire.home, fire.codex_home, project):
+    fire.workdir = pathlib.Path(tempfile.mkdtemp(prefix=f"a-dh-3-{label}-")).resolve()
+    fire.package = fire.workdir / "package"
+    fire.home = fire.workdir / "home"
+    fire.codex_home = fire.workdir / "codex-home"
+    project = fire.workdir / "project"
+    worktree = fire.workdir / "worktree"
+    # The harness's bins live OUTSIDE the scratch host roots, so those roots can start — and be
+    # asserted — genuinely empty: no AGENTS.md, no skills/, no dispatch convention, nothing.
+    bindir = fire.workdir / "bin"
+    for directory in (fire.home, fire.codex_home, project, worktree, bindir):
         directory.mkdir(parents=True)
     _seed_package_root(fire.package)
-    fire.before = _snapshot(fire.home, fire.codex_home)
 
-    bindir = workdir / "bin"
-    bindir.mkdir()
-    log = workdir / "codex.jsonl"
+    log = fire.workdir / "codex.jsonl"
     log.write_text("", encoding="utf-8")
     fake = bindir / "codex"
     fake.write_text(_FAKE_CODEX.format(log=str(log)), encoding="utf-8")
     fake.chmod(0o755)
+    # `conductor` resolves through PATH to a SYMLINK into the test-chosen package tree. The
+    # driver derives Conductor's source root from `readlink -f` of the bin it resolved, so the
+    # symlink is what makes "the resolution artifact follows the package root" a property of
+    # the product's derivation rather than of an environment variable the test handed it.
+    os.symlink(fire.package / "bin" / "conductor", bindir / "conductor")
 
-    environ = {
+    base_env = {
         key: value
         for key, value in os.environ.items()
-        if key not in {runhost.HOST_ENV, "CONDUCTOR_HOME"}
+        if key not in {runhost.HOST_ENV, "CONDUCTOR_HOME", "CODEX_PLUGIN_ROOT"}
     }
-    environ["PATH"] = f"{bindir}{os.pathsep}{environ.get('PATH', '')}"
-    environ["HOME"] = str(fire.home)
-    environ["CODEX_HOME"] = str(fire.codex_home)
-    environ["CODEX_PLUGIN_ROOT"] = str(fire.package)
+    base_env["HOME"] = str(fire.home)
+    base_env["CODEX_HOME"] = str(fire.codex_home)
 
     previous = dict(os.environ)
     os.environ.clear()
-    os.environ.update(environ)
+    os.environ.update(base_env)
     try:
         runhost.record(str(project), "codex")
-        adapter = runhost.adapter(str(project))
-        argv = adapter.worker_argv(
-            state_root=str(project / ".conductor"),
-            run_key=RUN_KEY,
-            project_root=str(project),
-            posture="supervised",
-        )
-        worker_env = adapter.worker_env(
-            state_root=str(project / ".conductor"),
-            run_key=RUN_KEY,
-            project_root=str(project),
-        )
     finally:
         os.environ.clear()
         os.environ.update(previous)
 
-    subprocess.run(
-        argv,
-        cwd=str(project),
-        env={**environ, **worker_env},
-        stdin=subprocess.DEVNULL,
+    script = project / ".conductor" / "resume-autodev.sh"
+    render = subprocess.run(
+        [
+            str(ROOT / "bin" / "conductor"),
+            "resume-script",
+            "write",
+            "--project",
+            str(project),
+            "--worktree",
+            str(worktree),
+            "--out",
+            str(script),
+        ],
+        env=base_env,
+        capture_output=True,
+        text=True,
         timeout=60,
         check=False,
     )
+    assert render.returncode == 0, (
+        f"the product refused to render the codex driver "
+        f"(rc={render.returncode}):\n{render.stderr}"
+    )
+
+    # The FIRE's PATH is the harness bin dir plus exactly the system bin dirs the driver
+    # prepends anyway — so coreutils, python3 and the script's own `env bash` shebang stay
+    # reachable while this machine's real `codex` and `conductor`, which live further down the
+    # ambient PATH, are simply not on it. Appending dirs the driver already searches first
+    # cannot change what shadows what, which is what `test_no_system_bin_dir_shadows_the_
+    # harness_fakes` pins.
+    fire_env = dict(base_env)
+    fire_env["PATH"] = os.pathsep.join([str(bindir), *DRIVER_SYSTEM_PATH])
+
+    fire.before = _snapshot(fire.home, fire.codex_home)
+    proc = subprocess.run(
+        [str(script)],
+        env=fire_env,
+        cwd=str(fire.workdir),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    fire.driver_rc = proc.returncode
+    fire.after = _snapshot(fire.home, fire.codex_home)
+    log_path = project / ".conductor" / "resume-autodev.log"
+    fire.driver_log = (
+        log_path.read_text(encoding="utf-8", errors="replace")
+        if log_path.is_file()
+        else ""
+    )
+
     records = [
         json.loads(line)
         for line in log.read_text(encoding="utf-8").splitlines()
         if line
     ]
-    assert len(records) == 1, f"expected one codex launch, recorded {len(records)}"
+    assert len(records) == 1, (
+        f"expected one codex launch, recorded {len(records)}{fire.diagnosis}"
+    )
     fire.argv = records[0]["argv"]
     # The prompt is whatever the launch put in front of the model: the trailing positional.
     fire.prompt = fire.argv[-1]
-    fire.after = _snapshot(fire.home, fire.codex_home)
     return fire
 
 
@@ -169,6 +235,13 @@ def fire_at(label: str) -> Fire:
     if label not in _FIRES:
         _FIRES[label] = _fire(label)
     return _FIRES[label]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup():
+    yield
+    for fire in _FIRES.values():
+        shutil.rmtree(fire.workdir, ignore_errors=True)
 
 
 def _path_tokens(prompt: str) -> list[pathlib.Path]:
@@ -222,6 +295,22 @@ def _resolution_artifacts(fire: Fire) -> list[pathlib.Path]:
     return through
 
 
+def test_no_system_bin_dir_shadows_the_harness_fakes() -> None:
+    """Setup guarantee. The driver prepends the system bin dirs ahead of the harness's own, so
+    a real `codex` or `conductor` in one of them would be what the fire measured. Refuse loudly
+    rather than report on the wrong binary."""
+    shadowing = [
+        os.path.join(directory, name)
+        for directory in DRIVER_SYSTEM_PATH
+        for name in ("codex", "conductor")
+        if os.path.exists(os.path.join(directory, name))
+    ]
+    assert not shadowing, (
+        f"a real host/conductor binary sits ahead of the harness fakes on the driver's PATH: "
+        f"{shadowing}"
+    )
+
+
 def test_the_scratch_host_roots_start_empty() -> None:
     """Setup guarantee, asserted rather than assumed: with no AGENTS.md, no skills/ and no
     dispatch convention present before the fire, nothing the launch resolves through can be a
@@ -241,6 +330,7 @@ def test_the_launch_resolves_through_a_conductor_artifact(label: str) -> None:
         "the Codex launch names no artifact that resolves to Conductor's autodev skill.\n"
         f"prompt={fire.prompt!r}\npackage_root={fire.package}\n"
         f"files Conductor wrote under HOME/CODEX_HOME: {sorted(fire.written_by_conductor)}"
+        f"{fire.diagnosis}"
     )
     for artifact in artifacts:
         assert os.access(artifact, os.R_OK), artifact
