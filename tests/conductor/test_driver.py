@@ -839,3 +839,87 @@ def test_an_install_blocked_by_another_says_so_and_changes_nothing(
     assert (
         locks is not None
     )  # the primitive under test is conductor's own, not a new one
+
+
+# ---- A-DH-1: the durability prompt is the run host's own, never one host's literal ------
+#
+# `_scheduled_task_matches` compared the entry's prompt against a hardcoded Claude slash
+# command. That literal is unwritable on any other host, so the leg could only ever match a
+# Claude-hosted task: every other host's durable task read as absent, and `status` reported a
+# healthy unattended run as "NOT durable". The prompt now comes from the run's adapter, which
+# is the only thing that knows how each host spells an invocation.
+
+
+def _autodev_renderings() -> dict[str, str]:
+    """Each supported host's own rendering of the autodev skill, from the adapters."""
+    from conductor.hosts import base
+
+    return {
+        h: base.load(h).native_invocation("conductor:autodev") for h in base.HOST_IDS
+    }
+
+
+def test_every_host_spells_the_autodev_prompt_differently():
+    """The premise the test below rests on. If two hosts ever rendered the skill the same
+    way, the cross-product assertions would pass vacuously and this says so instead."""
+    renderings = _autodev_renderings()
+    assert len(set(renderings.values())) == len(renderings), renderings
+
+
+def test_a_scheduled_task_counts_only_when_its_prompt_is_this_hosts_own_form(tmp_path):
+    """Both the accepted and the rejected prompts come from the adapters, never from a
+    literal written here — a hardcoded comparison satisfies at most one host and therefore
+    fails this cross-product outright.
+
+    The path is passed in rather than taken from `scheduled_tasks_file()` so the matching
+    RULE can be exercised for every host: which hosts actually have such a file is a
+    separate fact, wired in `status` and covered by the tests above.
+    """
+    from conductor.hosts import base
+
+    root = str(tmp_path / "proj")
+    os.makedirs(root)
+    renderings = _autodev_renderings()
+    for host_id in base.HOST_IDS:
+        adapter = base.load(host_id)
+        for other_id, prompt in renderings.items():
+            path = tmp_path / f"tasks-{host_id}-from-{other_id}.json"
+            path.write_text(json.dumps([{"prompt": prompt, "cwd": root}]))
+            assert driver._scheduled_task_matches(root, str(path), adapter) is (
+                other_id == host_id
+            ), f"host={host_id} prompt={prompt!r}"
+
+
+def test_the_not_durable_message_spells_the_prompt_the_way_each_host_would(tmp_path):
+    """The remedy line is something an operator reads and acts on, so it must name the
+    prompt their OWN harness would have written. Checked per host against the adapters, so a
+    literal — which is one host's spelling — fails on the other."""
+    from conductor.hosts import base
+
+    renderings = _autodev_renderings()
+    tasks = tmp_path / "scheduled_tasks.json"
+    tasks.write_text("[]")
+    for host_id in base.HOST_IDS:
+        message = driver._not_durable_reason(
+            str(tmp_path), "conductor-autodev /proj", str(tasks), base.load(host_id)
+        )
+        assert renderings[host_id] in message, (host_id, message)
+        for other_id, other in renderings.items():
+            if other_id != host_id:
+                assert other not in message, (host_id, message)
+
+
+def test_the_end_to_end_status_message_carries_the_hosts_prompt(
+    tmp_path, monkeypatch, capsys
+):
+    """The wiring: `status` on a run whose host HAS a scheduled-task leg prints the reason
+    above verbatim, prompt included."""
+    proj, _root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    _isolate_scheduled_tasks(tmp_path, monkeypatch)
+    _record_host(proj, "claude")
+    assert driver.status(str(proj)) == 1
+    out = capsys.readouterr().out
+    renderings = _autodev_renderings()
+    assert renderings["claude"] in out, out
+    assert renderings["codex"] not in out, out

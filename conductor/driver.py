@@ -49,6 +49,14 @@ _FAILURE_MARKERS = (
 # window does the real filtering; this just bounds work on a long-lived log.
 _TAIL_LINES = 500
 
+#: The skill a durable driver fires, as a host-NEUTRAL plugin-qualified name. It is never
+#: written as an invocation here: each host spells one differently, and the adapter's
+#: `native_invocation` is the single place that knows how. Comparing against one host's
+#: spelling is a comparison that cannot match on the other, and the leg it guards then
+#: reports "not durable" for a driver that is durable — or, in the message below, tells an
+#: operator to look for a prompt their host would never write.
+_AUTODEV_SKILL = "conductor:autodev"
+
 #: How long a second writer waits for the first to finish before refusing. ONE value shared with
 #: `resume_script`, which is the other documented writer of the same file: two timeouts on one
 #: lock is two answers to "how long is a stuck holder".
@@ -75,17 +83,24 @@ def _crontab_lines() -> list[str]:
     return proc.stdout.splitlines()
 
 
-def _scheduled_task_matches(root: str, path: str | None) -> bool:
+def _scheduled_task_matches(
+    root: str, path: str | None, adapter: base.HostAdapter
+) -> bool:
     """Does a harness scheduled task durably drive THIS project? An entry counts only
-    when its prompt is /conductor:autodev AND its cwd/project field points at `root`.
-    The file merely EXISTING is not durability evidence — a stale or unrelated task
-    would false-green the health signal. Unparseable/unmatchable → False, fail-closed.
+    when its prompt is `adapter`'s own rendering of `_AUTODEV_SKILL` AND its cwd/project
+    field points at `root`. The file merely EXISTING is not durability evidence — a stale
+    or unrelated task would false-green the health signal. Unparseable/unmatchable → False,
+    fail-closed.
 
     `path` is the RUN'S host's scheduled-task file, or None for a host that has no such
     mechanism. None means the leg does not exist for this run — not that it is empty. A Codex
     run sitting on a machine where Claude has a task registered is not driven by that task:
     nothing fires its prompt into codex, so counting it would false-green the only signal an
-    operator has that an unattended run will actually resume."""
+    operator has that an unattended run will actually resume.
+
+    `adapter` is the RUN'S host's adapter, and it is what renders the prompt to match. A
+    literal here is a Claude spelling: it can only ever match a Claude-hosted task, so any
+    other host's durable task reads as absent no matter what it says."""
     if not path or not os.path.isfile(path):
         return False
     try:
@@ -114,10 +129,11 @@ def _scheduled_task_matches(root: str, path: str | None) -> bool:
     # on an operator's machine would report a stalled run as healthy.
     want = os.path.normpath(root)
     want_real = os.path.realpath(root)
+    want_prompt = adapter.native_invocation(_AUTODEV_SKILL)
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        if str(entry.get("prompt", "")).strip() != "/conductor:autodev":
+        if str(entry.get("prompt", "")).strip() != want_prompt:
             continue
         for field in ("cwd", "project", "workingDirectory", "working_directory"):
             value = entry.get(field)
@@ -127,6 +143,32 @@ def _scheduled_task_matches(root: str, path: str | None) -> bool:
             if os.path.normpath(cand) == want or os.path.realpath(cand) == want_real:
                 return True
     return False
+
+
+def _not_durable_reason(
+    root: str, marker: str, tasks_file: str | None, adapter: base.HostAdapter
+) -> str:
+    """Why no durable driver was found, naming ONLY the legs this host actually has.
+
+    Every host-specific noun is the adapter's: the harness file this host reads, and the
+    prompt as this host writes it. Reporting a missing scheduled-task entry to a Codex
+    operator sends them looking for a file their host never reads, and reporting a Claude
+    slash command as the prompt to look for names a line their harness would never have
+    written — in both cases the one actionable sentence the failure carries is wrong.
+
+    Separate from `status` so the wording can be checked for EVERY host: which hosts have a
+    scheduled-task file at all is a different fact, wired in `status` and covered there.
+    """
+    missing = f"no crontab line carrying '{marker}'"
+    if tasks_file:
+        missing += (
+            f" and no {os.path.basename(tasks_file)} entry driving {root} "
+            f"with {adapter.native_invocation(_AUTODEV_SKILL)}"
+        )
+    return (
+        f"driver: NOT durable — {missing}.\n"
+        f"Install one: conductor driver install --worktree <run-worktree>"
+    )
 
 
 def _recent_hours() -> float:
@@ -179,27 +221,16 @@ def status(project: str) -> int:
     driver with no fires yet — healthy."""
     root = resume_script.main_root(project)
     marker = resume_script.cron_marker(root)
-    tasks_file = runhost.adapter(root).scheduled_tasks_file()
+    adapter = runhost.adapter(root)
+    tasks_file = adapter.scheduled_tasks_file()
     # An ACTIVE crontab entry only: a commented-out/disabled line that still carries
     # the marker is not a durable driver and must not false-green the signal.
     if any(marker in ln and not ln.lstrip().startswith("#") for ln in _crontab_lines()):
         leg = "crontab marker"
-    elif _scheduled_task_matches(root, tasks_file):
+    elif _scheduled_task_matches(root, tasks_file, adapter):
         leg = "scheduled task"
     else:
-        # Name only the legs this host actually has. Reporting a missing
-        # scheduled_tasks.json entry to a Codex operator sends them looking for a file their
-        # host never reads.
-        missing = f"no crontab line carrying '{marker}'"
-        if tasks_file:
-            missing += (
-                f" and no scheduled_tasks.json entry driving {root} "
-                f"with /conductor:autodev"
-            )
-        print(
-            f"driver: NOT durable — {missing}.\n"
-            f"Install one: conductor driver install --worktree <run-worktree>"
-        )
+        print(_not_durable_reason(root, marker, tasks_file, adapter))
         return 1
     log_path = os.path.join(root, ".conductor", "resume-autodev.log")
     if not os.path.isfile(log_path):
@@ -227,10 +258,11 @@ def install(project: str, worktree: str, host: str | None = None) -> int:
 
     `host` names which host this run's fires spawn. It is the caller's to state because it is
     only knowable one level up: the
-    `/conductor:start` skill runs ON the host, while every layer below it is a subprocess with
-    no marker it can trust (Claude exports `CLAUDECODE`/`CLAUDE_PLUGIN_ROOT`, the Codex ground
-    truth records no exported analogue, and "neither present" is indistinguishable from a plain
-    shell — so a probe here could only ever positively identify claude).
+    `conductor:start` skill runs ON the host, while every layer below it is a subprocess with
+    no marker it can trust (Claude exports `CLAUDECODE` and the plugin-root variable named by
+    the Claude adapter's `PLUGIN_ROOT_ENV`, the Codex ground truth records no exported
+    analogue, and "neither present" is indistinguishable from a plain shell — so a probe here
+    could only ever positively identify claude).
 
     Omitting it leaves any EXISTING recording alone — a re-install must never move a live run
     onto another host as a side effect, not even via a stray `$CONDUCTOR_HOST` in the operator's
@@ -259,7 +291,8 @@ def install(project: str, worktree: str, host: str | None = None) -> int:
     is about to change.
 
     The lock is keyed on the driver SCRIPT, not on this entry point, because `install` is not
-    the only documented writer of it: `/conductor:start` reconcile regenerates a stale driver
+    the only documented writer of it: the `conductor:start` skill's reconcile regenerates a
+    stale driver
     with `conductor resume-script write` (skills/start/SKILL.md), which recreates this exact
     split state through a public path — that write renders the RECORDED host, which is still the
     old one until the line below runs. `resume_script._write` takes the same lock."""
