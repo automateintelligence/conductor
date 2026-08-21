@@ -177,6 +177,33 @@ def _merge_ref_verify(
         shutil.rmtree(wt, ignore_errors=True)
 
 
+def default_review_marker(host_id: str) -> str:
+    """The review-marker default for a run hosted on ``host_id``.
+
+    Derived from ``opposite(host_id)``, never spelled out. The literal default used to be
+    "Codex review", which is right for a Claude-hosted run and exactly wrong for a
+    Codex-hosted one: the reviewer there is Claude, so the gate would count comments carrying
+    a word the reviewer never wrote and block every phase on `reviews:0/2` with two genuine
+    reviews already on the pull request. `CONDUCTOR_REVIEW_MARKER` still overrides this —
+    A1 changes the default, it does not add a mechanism.
+    """
+    from conductor.hosts.base import opposite
+
+    return f"{opposite(host_id).capitalize()} review"
+
+
+def _review_marker() -> str:
+    """The configured marker, or the one this run's host implies. Read per call: tests
+    monkeypatch the env, and an empty marker would match every comment."""
+    configured = (os.environ.get("CONDUCTOR_REVIEW_MARKER") or "").strip()
+    if configured:
+        return configured
+    from conductor.hosts import runhost
+    from conductor.paths import project_root
+
+    return default_review_marker(runhost.resolve(project_root()))
+
+
 def check(
     repo: str,
     pr: int,
@@ -216,8 +243,7 @@ def check(
             blockers.append(f"base-mismatch:{d.get('baseRefName')}")
         if not _CLOSES_RE.search(d.get("body") or ""):
             blockers.append("closes-missing")  # recipe: one PR per phase, Closes #issue
-        # env read per call (tests monkeypatch); empty marker would match everything
-        marker = (os.environ.get("CONDUCTOR_REVIEW_MARKER") or "Codex review").lower()
+        marker = _review_marker().lower()
         min_reviews = int(os.environ.get("CONDUCTOR_MIN_REVIEWS", "2"))
         if min_reviews < 0:  # 0 disables the review legs; negative is invalid
             raise ValueError(f"CONDUCTOR_MIN_REVIEWS must be >= 0, got {min_reviews}")
@@ -289,7 +315,10 @@ if __name__ == "__main__":
     try:
         pr_num = int(sys.argv[1])
     except ValueError:
-        print(f"usage: conductor merge-gate <pr> — expected an integer, got {sys.argv[1]!r}", file=sys.stderr)
+        print(
+            f"usage: conductor merge-gate <pr> — expected an integer, got {sys.argv[1]!r}",
+            file=sys.stderr,
+        )
         sys.exit(64)
     try:
         repo = _resolve_repo()

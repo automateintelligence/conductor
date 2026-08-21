@@ -111,9 +111,9 @@ trap this spec exists to kill. Every assertion below is written to fail if the i
 - **Kind:** contract.
 
 ## A13 — driver-status-nonzero-without-durable-driver
-- **Claim:** `conductor driver status` exits non-zero when no durable driver exists and zero when one does.
-- **Setup:** a project with no `conductor-autodev` crontab marker / no `scheduled_tasks.json`; then one with a marker present.
-- **Observation:** absent → non-zero; present → zero.
+- **Claim:** `conductor driver status` exits non-zero when no durable driver exists for the run's own host and zero when one does — on every supported host. Durability evidence is host-derived, never assumed: a scheduled-task file belonging to a host this run does not launch is not evidence about this run.
+- **Setup:** for each supported host recorded in `.conductor/host`: a project with no `conductor-autodev` crontab marker and no scheduled-task entry from a mechanism that host reads; then the same project with the marker present. Plus one machine seeded with a single harness scheduled-task file naming two projects by exact path — one Claude-hosted, one Codex-hosted — and no crontab marker for either.
+- **Observation:** absent → non-zero on every host; marker present → zero on every host. On the seeded machine the Claude-hosted project → zero (the scheduled-task leg still counts on the host that owns it) and the Codex-hosted project → non-zero, with stdout naming no harness file its host never reads.
 - **Kind:** property.
 
 ## A14 — driver-status-flags-recent-failed-fires

@@ -117,7 +117,7 @@ assertions:
     level: spec
     kind: contract
   - id: a13-driver-status-nonzero-without-driver
-    claim: "conductor driver status exits non-zero without a durable driver and zero with the crontab marker present"
+    claim: "conductor driver status exits non-zero without a durable driver for the run's own host and zero with the crontab marker present, on every supported host; a harness scheduled task greens only the host whose mechanism it is"
     command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a13_driver_status_durable.py"
     setup: ""
     teardown: ""

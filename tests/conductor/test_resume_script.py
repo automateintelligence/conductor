@@ -1,15 +1,20 @@
 """Tier-B resume-driver generator: the runtime-resolution contract that fixes the 2026-07-05
 silent-stall (generation-time-pinned bins that rot on upgrade)."""
 
+import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
+import time
 
 import pytest
 
 from conductor import resume_script as rs
+from conductor.hosts import codex as codex_host
+from tests.conductor.conftest import stale_version_siblings
 
 PROJECT = "/home/u/programming/proj"
 WORKTREE = "/home/u/programming/proj-run-x"
@@ -482,14 +487,23 @@ def _mk_env_harness(tmp):
     return project, driver, home, fired
 
 
-def _fire_driver(driver, home):
+def _fire_driver(driver, home, extra_env=None):
     env = {
         "HOME": str(home),
         "PATH": "/usr/bin:/bin",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
+        **(extra_env or {}),
     }
+    # cwd is the temp HOME, never the suite's own checkout. A driver that resolves anything
+    # relative to `.` would otherwise find THIS conductor tree and pass on ambient luck — the
+    # suite runs from inside a valid install, so a wrong answer and a right one look alike.
     return subprocess.run(
-        ["bash", str(driver)], env=env, capture_output=True, text=True, timeout=30
+        ["bash", str(driver)],
+        env=env,
+        cwd=str(home),
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
 
 
@@ -788,8 +802,13 @@ def test_main_root_identical_from_linked_worktree(tmp_path):
         ["git", "-C", str(proj), "commit", "--allow-empty", "-q", "-m", "x"],
         check=True,
         timeout=30,
-        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        },
     )
     wt = tmp_path / "wt"
     subprocess.run(
@@ -917,9 +936,1004 @@ def test_install_cron_quotes_a_root_with_spaces(tmp_path, monkeypatch):
         assert ln.endswith(rs.cron_marker(main_root)), ln
 
 
-def test_install_cron_on_a_non_repo_fails_with_a_named_reason(tmp_path, monkeypatch, capsys):
+def test_install_cron_on_a_non_repo_fails_with_a_named_reason(
+    tmp_path, monkeypatch, capsys
+):
     _stub_crontab(tmp_path, monkeypatch)
     not_repo = tmp_path / "plain"
     not_repo.mkdir()
     assert rs.main(["install-cron", "--project", str(not_repo)]) == 1
     assert "cannot resolve main root" in capsys.readouterr().err
+
+
+# ---- A1: the driver spawns the RUN'S host, not always claude ----------------------------
+#
+# The measurement that motivated A1: 18 of the 36 host-coupled Python lines in conductor/ are
+# in this file, and every one of them is on the path between "cron fires" and "an agent runs".
+# A Codex user installing conductor today gets a driver that resolves `claude`.
+
+# Literal, never `base.HOST_IDS`: parametrizing over the value under test would let a
+# falsifier that shrinks HOST_IDS DELETE cases instead of failing them.
+A1_HOSTS = ("claude", "codex")
+
+
+def test_the_host_matrix_covers_exactly_the_supported_hosts():
+    from conductor.hosts import base
+
+    assert A1_HOSTS == base.HOST_IDS
+
+
+def _project_recorded_as(tmp, host_id):
+    """A project whose run is recorded as `host_id`, plus its worktree."""
+    from conductor.hosts import runhost
+
+    project = tmp / "proj"
+    worktree = tmp / "wt"
+    (project / ".conductor").mkdir(parents=True)
+    worktree.mkdir()
+    runhost.record(str(project), host_id)
+    return str(project), str(worktree)
+
+
+def test_render_for_a_claude_recorded_run_is_the_claude_driver(tmp_path):
+    project, worktree = _project_recorded_as(tmp_path, "claude")
+    s = rs.render(project, worktree)
+    assert 'CLAUDE_BIN="$(command -v claude || true)"' in s
+    assert '"$CLAUDE_BIN" -p "/conductor:autodev" "$@"' in s
+
+
+def test_render_for_an_unrecorded_run_is_byte_identical_to_the_recorded_claude_one(
+    tmp_path, monkeypatch
+):
+    """Every run installed before A1 has no `.conductor/host`. Those must not change host on
+    the next regeneration — that would silently switch which agent drives a live run.
+
+    `$CONDUCTOR_HOST` is cleared rather than assumed absent: with it set to `codex` both renders
+    are codex and this compares two identical wrong answers. It is the only test in this file
+    that supplies the resolver NOTHING, so it is the only one that can catch a broken
+    derivation, and it has to actually be unsupplied to do that."""
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    project, worktree = _project_recorded_as(tmp_path, "claude")
+    recorded = rs.render(project, worktree)
+    os.remove(os.path.join(project, ".conductor", "host"))
+    unrecorded = rs.render(project, worktree)
+    assert unrecorded == recorded
+    assert 'CLAUDE_BIN="$(command -v claude || true)"' in unrecorded
+
+
+def test_render_for_a_codex_recorded_run_resolves_and_launches_codex(tmp_path):
+    """The A1 goal in one assertion: the cron fire spawns `codex`, not `claude`."""
+    project, worktree = _project_recorded_as(tmp_path, "codex")
+    s = rs.render(project, worktree)
+    assert 'CODEX_BIN="$(command -v codex || true)"' in s
+    assert "command -v claude" not in s
+    spawns = [
+        ln.strip() for ln in s.splitlines() if ln.strip().startswith('"$CODEX_BIN"')
+    ]
+    # ONE fire. The driver spawns the host exactly twice and the other spawn is the bounded
+    # `plugin list` lookup, which is enumerated here rather than filtered out by shape: a third
+    # `codex` invocation appearing in this script is a fact a reader of this test should have to
+    # look at, not something a `startswith("exec")` filter quietly absorbs.
+    fire = [ln for ln in spawns if " exec " in ln]
+    assert len(fire) == 1, spawns
+    assert [ln for ln in spawns if ln not in fire] == [
+        '"$CODEX_BIN" plugin list --json </dev/null >"$CODEX_PLUGIN_OUT" 2>/dev/null &'
+    ], spawns
+    assert fire[0].startswith('"$CODEX_BIN" exec --cd "$WORKTREE"')
+    assert "skills/autodev/SKILL.md" in fire[0]
+
+
+def test_a_codex_driver_never_names_the_claude_binary_or_its_plugin_cache(tmp_path):
+    project, worktree = _project_recorded_as(tmp_path, "codex")
+    s = rs.render(project, worktree)
+    for token in (
+        "CLAUDE_BIN",
+        "$HOME/.local/bin/claude",
+        '$HOME"/.claude/plugins/cache',
+        "--dangerously-skip-permissions",
+        "--permission-mode",
+        "CONDUCTOR_RESUME_CLAUDE_FLAGS",
+    ):
+        assert token not in s, token
+
+
+def test_a_claude_driver_never_names_codex_flags(tmp_path):
+    project, worktree = _project_recorded_as(tmp_path, "claude")
+    s = rs.render(project, worktree)
+    for token in (
+        "CODEX_BIN",
+        "--sandbox",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "CONDUCTOR_RESUME_CODEX_FLAGS",
+    ):
+        assert token not in s, token
+
+
+@pytest.mark.parametrize("host_id", A1_HOSTS)
+def test_every_hosts_render_is_valid_bash(host_id, tmp_path):
+    if not (bash := _which("bash")):
+        pytest.skip("bash not available")
+    project, worktree = _project_recorded_as(tmp_path, host_id)
+    proc = subprocess.run(
+        [bash, "-n"],
+        input=rs.render(project, worktree),
+        text=True,
+        capture_output=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize("host_id", A1_HOSTS)
+def test_every_hosts_render_shell_escapes_paths(host_id, tmp_path):
+    if not (bash := _which("bash")):
+        pytest.skip("bash not available")
+    project, _ = _project_recorded_as(tmp_path, host_id)
+    s = rs.render(project, "/home/u/pro j'x")
+    assert (
+        subprocess.run([bash, "-n"], input=s, text=True, capture_output=True).returncode
+        == 0
+    )
+    assert 'WORKTREE="/home/u/pro j\'x"' not in s
+
+
+@pytest.mark.parametrize("host_id", A1_HOSTS)
+def test_every_hosts_render_keeps_the_three_guards_and_the_rot_ban(host_id, tmp_path):
+    project, worktree = _project_recorded_as(tmp_path, host_id)
+    s = rs.render(project, worktree)
+    assert "flock -n 9" in s
+    assert "assert run --level spec" in s
+    assert 'CONDUCTOR_HOME="$WORKTREE"' in s
+    assert "driver-unresolved" in s and "exit 3" in s
+    assert "env-unsafe" in s and "exit 5" in s
+    for pat, why in rs._ROT_PATTERNS:
+        assert not pat.search(s), f"{host_id}: {why}"
+
+
+def test_verify_flags_an_installed_driver_from_the_previous_template(tmp_path):
+    """TEMPLATE_VERSION must move whenever the generated text does, or an already-installed
+    driver never regenerates and the whole change ships inert."""
+    project, worktree = _project_recorded_as(tmp_path, "claude")
+    installed = tmp_path / "resume-autodev.sh"
+    installed.write_text(
+        rs.render(project, worktree).replace(
+            rs._MARKER, "# conductor-resume-template: v4"
+        )
+    )
+    ok, reasons = rs.verify(project, worktree, str(installed))
+    assert not ok
+    assert any("regenerate" in r for r in reasons), reasons
+
+
+def test_verify_regenerates_when_the_recorded_host_changes(tmp_path):
+    """Re-recording a run onto the other host must make the installed driver stale, or the
+    run keeps firing the old agent forever."""
+    from conductor.hosts import runhost
+
+    project, worktree = _project_recorded_as(tmp_path, "claude")
+    installed = tmp_path / "resume-autodev.sh"
+    installed.write_text(rs.render(project, worktree))
+    assert rs.verify(project, worktree, str(installed))[0]
+    runhost.record(project, "codex")
+    ok, reasons = rs.verify(project, worktree, str(installed))
+    assert not ok, reasons
+
+
+# ---- A1: the owner-env allowlist ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "var",
+    [
+        "CONDUCTOR_MERGE_VERIFY",
+        "CONDUCTOR_PLUGIN_DIRS",
+        "DOCKER_HOST",
+        "CONDUCTOR_RESUME_CLAUDE_FLAGS",
+        "CONDUCTOR_RESUME_CODEX_FLAGS",
+        "CONDUCTOR_SPEC_ROOTS",
+    ],
+)
+def test_owner_env_migration_allowlist_covers_every_declared_variable(var):
+    """An owner variable missing from this list is silently DROPPED when a driver carrying it
+    inline is regenerated. CONDUCTOR_SPEC_ROOTS is the live example: a project whose specs are
+    not under docs/specs resolves its gate interactively and then fails across the cron loop."""
+    assert var in rs.OWNER_ENV_VARS
+    assert rs._OWNER_ENV_RE.findall(f"export {var}=x\n") == [var]
+
+
+def test_the_allowlist_regex_is_derived_from_the_declared_set_not_hand_written():
+    """A hand-maintained alternation drifts from the declaration the day someone adds a
+    variable to one and not the other."""
+    for var in rs.OWNER_ENV_VARS:
+        assert rs._OWNER_ENV_RE.findall(f"export {var}=x\n") == [var]
+    assert rs._OWNER_ENV_RE.findall("export CONDUCTOR_NOT_DECLARED=x\n") == []
+
+
+# ---- A1: the codex driver actually fires codex (end to end, real bash) --------------------
+
+
+#: The one marketplace and version every harness entry below is installed from. The install
+#: root is NOT emitted by `plugin list --json`; it is
+#: `$CODEX_HOME/plugins/cache/<marketplaceName>/<name>/<version>`, so these three strings are
+#: what decides where the fixture must put the plugin tree.
+_MARKET, _VERSION = "openai-curated", "d6169bef"
+
+
+def _codex_plugin_list_json(plugins, disabled=()):
+    """What `codex plugin list --json` prints — the shape verified on codex-cli 0.147.0 by
+    recording the CLI's own output (`tests/conductor/fixtures/`).
+
+    `source.path` is the MARKETPLACE SOURCE tree, which is not where the plugin is installed.
+    Callers pass that source path here and put the actual plugin under the derived install root;
+    a fixture that passes one path for both cannot fail when the driver reads the wrong one.
+
+    `disabled` names plugins the operator turned off — 0.147.0 keeps those in `installed[]` with
+    `"enabled": false`. Hardcoding `True` is why nothing could tell an operator's disabled
+    conductor from a live one before the driver went ahead and exec'd its `bin/conductor`.
+
+    Each entry is `(name, source_path)` or `(name, source_path, marketplace)`. The third element
+    exists so two marketplaces can ship one plugin NAME at once — a state a fixture pinned to a
+    single marketplace cannot describe, and therefore cannot fail on.
+    """
+    return json.dumps(
+        {
+            "installed": [
+                {
+                    "pluginId": f"{name}@{market}",
+                    "name": name,
+                    "marketplaceName": market,
+                    "version": _VERSION,
+                    "installed": True,
+                    "enabled": name not in disabled,
+                    "source": {"source": "local", "path": str(source_path)},
+                    "installPolicy": "AVAILABLE",
+                    "authPolicy": "NEVER",
+                }
+                for name, source_path, market in (
+                    (*p, _MARKET) if len(p) == 2 else p for p in plugins
+                )
+            ]
+        }
+    )
+
+
+def _mk_codex_harness(
+    tmp,
+    *,
+    install_conductor_plugin=True,
+    on_path=False,
+    plugin_list_hangs=False,
+    plugin_list_ignores_term=False,
+    conductor_plugin_disabled=False,
+    second_marketplace=None,
+    plugin_root_missing=False,
+):
+    """A Codex-recorded run on a machine that installed conductor the way a Codex user does:
+    as a PLUGIN, whose bin is therefore NOT on PATH (skills/start/SKILL.md says exactly this).
+
+    `conductor` is deliberately absent from the temp HOME's .local/bin unless `on_path` — a
+    fixture that plants it there proves only that `command -v` works. The stub `codex` answers
+    `plugin list --json`, which is how the driver is expected to find the plugin root.
+
+    The two roots are DIFFERENT, because on a real Codex they are: the installed copy sits at
+    `$CODEX_HOME/plugins/cache/<marketplace>/<name>/<version>`, while `source.path` names the
+    marketplace tree it was copied from. Both are populated, and the source one is a complete
+    decoy — its own `bin/conductor` and `skills/autodev/SKILL.md` — so a driver that resolves
+    off `source.path` fires successfully against the wrong tree instead of failing to resolve.
+    That is the state the previous fixture could not express, because it passed one path twice.
+    """
+    from conductor.hosts import runhost
+
+    project = tmp / "proj"
+    worktree = tmp / "wt"
+    home = tmp / "home"
+    bindir = home / ".local" / "bin"
+    plugin_root = (
+        home / ".codex" / "plugins" / "cache" / _MARKET / "conductor" / _VERSION
+    )
+    source_root = tmp / "codex-marketplace" / "plugins" / "conductor"
+    skill = plugin_root / "skills" / "autodev"
+    for d in (
+        project / ".conductor",
+        worktree,
+        bindir,
+        skill,
+        plugin_root / "bin",
+        source_root / "skills" / "autodev",
+        source_root / "bin",
+    ):
+        d.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: autodev\n---\n")
+    (source_root / "skills" / "autodev" / "SKILL.md").write_text(
+        "---\nname: autodev\n---\n"
+    )
+    decoy = source_root / "bin" / "conductor"
+    decoy.write_text("#!/bin/sh\nexit 1\n")
+    os.chmod(decoy, 0o755)
+    # A STALE version directory either side of the installed one, each a COMPLETE decoy. The
+    # cache keeps a version segment and an upgrade or a failed cleanup leaves the old tree
+    # beside the new one; with only ever one version directory here, a driver that ignored the
+    # version `plugin list` reported and globbed any on-disk one resolved the same path and
+    # every test stayed green. Complete, so such a driver FIRES against the wrong tree — a
+    # visibly wrong answer — rather than merely failing to resolve.
+    for stale in stale_version_siblings(plugin_root.name):
+        (plugin_root.parent / stale / "skills" / "autodev").mkdir(parents=True)
+        (plugin_root.parent / stale / "skills" / "autodev" / "SKILL.md").write_text(
+            "---\nname: autodev\n---\n"
+        )
+        (plugin_root.parent / stale / "bin").mkdir()
+        stale_bin = plugin_root.parent / stale / "bin" / "conductor"
+        stale_bin.write_text("#!/bin/sh\nexit 1\n")
+        os.chmod(stale_bin, 0o755)
+    argv_file = tmp / "argv"
+    entries: list[tuple] = (
+        [("conductor", source_root)] if install_conductor_plugin else []
+    )
+    if second_marketplace:
+        # A SECOND plugin, also called `conductor`, from another marketplace — complete, with
+        # its own bin and autodev skill, and listed FIRST the way 0.147.0 orders it. Nothing on
+        # disk distinguishes it from the real one except the identity `plugin list` reports.
+        rival = (
+            home
+            / ".codex"
+            / "plugins"
+            / "cache"
+            / second_marketplace
+            / "conductor"
+            / _VERSION
+        )
+        (rival / "skills" / "autodev").mkdir(parents=True)
+        (rival / "skills" / "autodev" / "SKILL.md").write_text("---\n---\n")
+        (rival / "bin").mkdir()
+        rival_bin = rival / "bin" / "conductor"
+        rival_bin.write_text("#!/bin/sh\nexit 1\n")
+        os.chmod(rival_bin, 0o755)
+        entries.insert(
+            0,
+            (
+                "conductor",
+                tmp / "rival-marketplace" / "conductor",
+                second_marketplace,
+            ),
+        )
+    listed = _codex_plugin_list_json(
+        entries,
+        disabled=("conductor",) if conductor_plugin_disabled else (),
+    )
+    # `plugin_list_hangs` is the CLI that never returns. It sleeps far longer than any bound the
+    # driver could reasonably impose, so a driver that does not bound the call is measurably
+    # stuck rather than merely slow. `plugin_list_ignores_term` is the same hang wearing the one
+    # property that makes a plain `timeout` no bound at all: it declines SIGTERM, so `timeout`
+    # without `--kill-after` reports 124 and then waits for the child anyway.
+    if plugin_list_ignores_term:
+        plugin_arm = "trap '' TERM; sleep 8; exit 0"
+    elif plugin_list_hangs:
+        plugin_arm = "sleep 8; exit 0"
+    else:
+        plugin_arm = f"printf '%s' '{listed}'; exit 0"
+    codex = bindir / "codex"
+    codex.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = plugin ]; then {plugin_arm}; fi\n'
+        f'for a in "$@"; do printf \'%s\\n\' "$a"; done > "{argv_file}"\nexit 0\n'
+    )
+    os.chmod(codex, 0o755)
+    stub_conductor = (bindir if on_path else plugin_root / "bin") / "conductor"
+    stub_conductor.write_text("#!/bin/sh\nexit 1\n")  # gate not green -> proceed
+    os.chmod(stub_conductor, 0o755)
+    if plugin_root_missing:
+        # Codex still LISTS the plugin; only the tree its identity implies is gone — the
+        # machine where the cache moved under a version bump, or an install landed half
+        # written. Indistinguishable from "never installed" until the driver says which.
+        shutil.rmtree(plugin_root)
+    runhost.record(str(project), "codex")
+    driver = project / ".conductor" / "resume-autodev.sh"
+    driver.write_text(rs.render(str(project), str(worktree)))
+    os.chmod(driver, 0o755)
+    return project, driver, home, argv_file, stub_conductor
+
+
+def _fire_codex(tmp, name, env_line=None):
+    base = tmp / name
+    base.mkdir()
+    project, driver, home, argv_file, _conductor = _mk_codex_harness(base)
+    if env_line is not None:
+        env_file = project / ".conductor" / "resume-env.sh"
+        env_file.write_text(env_line + "\n")
+        os.chmod(env_file, 0o600)
+    proc = _fire_driver(driver, home)
+    log_file = project / ".conductor" / "resume-autodev.log"
+    log = log_file.read_text() if log_file.is_file() else ""
+    argv = argv_file.read_text().splitlines() if argv_file.is_file() else []
+    return proc, log, argv
+
+
+def test_a_codex_run_fires_the_codex_binary_with_an_exec_invocation(tmp_path):
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    proc, log, argv = _fire_codex(tmp_path, "fire")
+    assert "fire-start" in log, (proc.returncode, proc.stdout, proc.stderr, log)
+    assert proc.returncode == 0
+    assert argv[:3] == ["exec", "--cd", str(tmp_path / "fire" / "wt")], argv
+    assert argv[-1].startswith("Read ")
+    assert argv[-1].endswith("/skills/autodev/SKILL.md and execute it.")
+    # -p is --profile to codex: the prompt must never be its value
+    assert "-p" not in argv, argv
+    assert "--profile" not in argv, argv
+    assert "/conductor:autodev" not in argv, argv
+
+
+def test_a_plugin_installed_conductor_survives_a_cron_fire_with_nothing_on_path(
+    tmp_path,
+):
+    """The install a Codex user actually has. `skills/start/SKILL.md` states that installed
+    plugin binaries are NOT on PATH, nothing installs a shim, and nothing persists
+    CODEX_PLUGIN_ROOT — so `command -v conductor` is empty at fire time and the whole run
+    stops at the unresolved guard before Codex is ever spawned.
+
+    The prompt must name the SKILL.md inside the INSTALLED plugin root. Asserting only that it
+    ends in `/skills/autodev/SKILL.md` would pass on any tree the driver happened to find,
+    including this suite's own checkout."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "plugin-install"
+    base.mkdir()
+    project, driver, home, argv_file, conductor = _mk_codex_harness(base)
+    assert not (
+        home / ".local" / "bin" / "conductor"
+    ).exists()  # the fixture's whole point
+    proc = _fire_driver(driver, home)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 0, (proc.stdout, proc.stderr, log)
+    assert "driver-unresolved" not in log
+    assert "fire-start" in log
+    argv = argv_file.read_text().splitlines()
+    root = conductor.parent.parent
+    assert argv[-1] == f"Read {root}/skills/autodev/SKILL.md and execute it.", argv
+
+
+def test_a_hanging_plugin_lookup_is_bounded_and_names_itself_in_the_log(
+    tmp_path, monkeypatch
+):
+    """The lookup runs BEFORE `fire-start` is logged and BEFORE the flock is taken, so an
+    unbounded one leaves a live process with no log line at all — and the next cron tick, twenty
+    minutes later, starts another. Nothing about that is distinguishable from a healthy quiet
+    run. Bound it, and give expiry its own line so the stall is attributable to this call rather
+    than inferred from silence."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    if not _which("timeout"):
+        pytest.skip("coreutils timeout not available")
+    monkeypatch.setattr(codex_host, "PLUGIN_LIST_TIMEOUT_S", 1)
+    base = tmp_path / "hang"
+    base.mkdir()
+    project, driver, home, argv_file, _c = _mk_codex_harness(
+        base, plugin_list_hangs=True
+    )
+
+    started = time.monotonic()
+    proc = _fire_driver(driver, home)
+    elapsed = time.monotonic() - started
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert "plugin-list-timeout" in log, log
+    assert elapsed < 6, (elapsed, log)
+    # ...and it still fails CLOSED: an unresolvable conductor is exit 3, never a fire.
+    assert proc.returncode == 3, (proc.returncode, log)
+    assert not argv_file.exists()
+
+
+def _bin_without(tmp, *hidden):
+    """A PATH directory mirroring the real one MINUS `hidden`.
+
+    The no-`timeout` machine (a bare macOS) is the branch the driver's fallback exists for, and
+    it was declared untestable "because /usr/bin/timeout is always there" — so the only thing
+    holding that branch was a text assertion, and a text assertion cannot notice that the
+    command it names never returns. Mirroring the search path by symlink makes the machine
+    reachable: everything the fragment runs still resolves, and exactly the utilities named here
+    do not.
+    """
+    shadow = tmp / "no-timeout-bin"
+    shadow.mkdir()
+    for d in ("/usr/bin", "/bin"):
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            if name in hidden or (shadow / name).exists():
+                continue
+            try:
+                (shadow / name).symlink_to(os.path.join(d, name))
+            except OSError:
+                pass
+    for name in hidden:
+        assert not (shadow / name).exists()
+    return shadow
+
+
+def _run_plugin_lookup(tmp, *, hide_timeout, plugin_arm):
+    """Run the driver's plugin-lookup fragment VERBATIM under a PATH the test controls.
+
+    The whole driver cannot be used for this: it re-adds `/usr/bin:/bin` to PATH before
+    resolving anything, so no test PATH can hide coreutils from a fired driver. The fragment is
+    the same text the driver embeds — `resume_bin_resolution` indents this and nothing else — so
+    running it directly is the branch, not a paraphrase of it.
+    """
+    project = tmp / "proj"
+    (project / ".conductor").mkdir(parents=True)
+    codex_bin = tmp / "codex"
+    codex_bin.write_text(f"#!/bin/sh\n{plugin_arm}\n")
+    os.chmod(codex_bin, 0o755)
+    script = tmp / "lookup.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\nset -u\n"
+        f"PROJECT={shlex.quote(str(project))}\n"
+        'LOG="$PROJECT/.conductor/resume-autodev.log"\n'
+        "ts() { date -Is 2>/dev/null || date; }\n"
+        f"CODEX_BIN={shlex.quote(str(codex_bin))}\n"
+        + codex_host.CodexAdapter().plugin_list_lookup()
+        + "\nprintf 'RC=%s\\n' \"$CODEX_PLUGIN_RC\"\n"
+        + "printf 'JSON=%s\\n' \"$CODEX_PLUGIN_JSON\"\n"
+    )
+    path = (
+        str(_bin_without(tmp, "timeout", "gtimeout"))
+        if hide_timeout
+        else os.environ.get("PATH", "/usr/bin:/bin")
+    )
+    started = time.monotonic()
+    proc = subprocess.run(
+        ["bash", str(script)],
+        env={"PATH": path, "LANG": os.environ.get("LANG", "C.UTF-8")},
+        cwd=str(tmp),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    elapsed = time.monotonic() - started
+    log_file = project / ".conductor" / "resume-autodev.log"
+    out = dict(
+        ln.split("=", 1)
+        for ln in proc.stdout.splitlines()
+        if ln.startswith(("RC=", "JSON="))
+    )
+    return (
+        proc,
+        out,
+        (log_file.read_text() if log_file.is_file() else ""),
+        elapsed,
+        project,
+    )
+
+
+@pytest.mark.parametrize("hide_timeout", [False, True])
+@pytest.mark.parametrize(
+    "plugin_arm",
+    ["sleep 8", "trap '' TERM; sleep 8"],
+    ids=["hangs", "hangs-and-ignores-term"],
+)
+def test_the_plugin_lookup_is_bounded_on_every_machine(
+    tmp_path, monkeypatch, hide_timeout, plugin_arm
+):
+    """One ceiling, four machines. `timeout <n>` with no `--kill-after` is not a bound at all
+    against a CLI that declines TERM (probed: `timeout 1` around such a process returned 124
+    after the child's full three seconds), and a machine with no `timeout` binary ran the lookup
+    with no ceiling whatsoever — before `fire-start`, before the flock, so every twenty-minute
+    tick stacked another live process behind no log line any consumer reads."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    if not hide_timeout and not _which("timeout"):
+        pytest.skip("coreutils timeout not available")
+    monkeypatch.setattr(codex_host, "PLUGIN_LIST_TIMEOUT_S", 1)
+    monkeypatch.setattr(codex_host, "PLUGIN_LIST_KILL_GRACE_S", 1)
+
+    proc, out, log, elapsed, project = _run_plugin_lookup(
+        tmp_path, hide_timeout=hide_timeout, plugin_arm=plugin_arm
+    )
+
+    # 1s limit + 1s kill grace, generously bounded — never the child's own 8.
+    assert elapsed < 6, (elapsed, proc.stderr, log)
+    # 124 is an expiry reported by `timeout`; 137 is one it had to escalate to KILL.
+    assert out["RC"] in ("124", "137"), (out, log)
+    assert "plugin-list-timeout" in log, log
+    assert out["JSON"] == ""
+    # ...and no scratch file is left behind in the owner's `.conductor`.
+    assert [
+        p.name for p in (project / ".conductor").iterdir() if "plugin-list." in p.name
+    ] == []
+
+
+@pytest.mark.parametrize("hide_timeout", [False, True])
+def test_a_healthy_plugin_lookup_answers_the_same_on_every_machine(
+    tmp_path, hide_timeout
+):
+    """Bounding the call must not break the call: refusing the lookup where coreutils is absent
+    would break every plugin-installed conductor on a bare macOS, which is a working
+    configuration. Both bounded paths have to return the CLI's own answer, unchanged."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    if not hide_timeout and not _which("timeout"):
+        pytest.skip("coreutils timeout not available")
+
+    proc, out, log, _elapsed, project = _run_plugin_lookup(
+        tmp_path,
+        hide_timeout=hide_timeout,
+        plugin_arm="printf '%s' '{\"installed\":[]}'",
+    )
+
+    assert out["RC"] == "0", (out, proc.stderr, log)
+    assert out["JSON"] == '{"installed":[]}'
+    assert "plugin-list-timeout" not in log
+    assert [
+        p.name for p in (project / ".conductor").iterdir() if "plugin-list." in p.name
+    ] == []
+
+
+def test_a_term_ignoring_plugin_lookup_is_still_bounded(tmp_path, monkeypatch):
+    """`timeout N` without `--kill-after` is not a bound: it signals at N and then WAITS for a
+    child that declines the signal. Probed on this machine, `timeout 1` around a process that
+    traps TERM returned 124 only after the child's full three seconds — so the driver's ceiling
+    was whatever the hung CLI felt like, and every twenty-minute tick could start another."""
+    if not _which("bash") or not _which("timeout"):
+        pytest.skip("bash + coreutils timeout not available")
+    monkeypatch.setattr(codex_host, "PLUGIN_LIST_TIMEOUT_S", 1)
+    monkeypatch.setattr(codex_host, "PLUGIN_LIST_KILL_GRACE_S", 1)
+    base = tmp_path / "term-ignoring"
+    base.mkdir()
+    project, driver, home, argv_file, _c = _mk_codex_harness(
+        base, plugin_list_ignores_term=True
+    )
+
+    started = time.monotonic()
+    proc = _fire_driver(driver, home)
+    elapsed = time.monotonic() - started
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert "plugin-list-timeout" in log, log
+    # 1s limit + 1s kill grace, generously bounded — never the child's own 8.
+    assert elapsed < 6, (elapsed, log)
+    assert proc.returncode == 3, (proc.returncode, log)
+    assert not argv_file.exists()
+
+
+def test_a_conductor_plugin_codex_lists_but_cannot_locate_names_that_in_the_log(
+    tmp_path,
+):
+    """The driver's half of the three-state answer. Codex reports conductor installed and
+    enabled and the root that identity implies is gone; the fire still has to fail closed, but
+    `driver-unresolved` alone is also exactly what an uninstalled plugin produces, so the log
+    sent an owner to reinstall a plugin `codex plugin list` was reporting the whole time."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "root-gone"
+    base.mkdir()
+    project, driver, home, argv_file, _c = _mk_codex_harness(
+        base, plugin_root_missing=True
+    )
+
+    proc = _fire_driver(driver, home)
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert "plugin-root-unverified" in log, log
+    assert "plugin=conductor" in log, log
+    # ...and it still fails CLOSED: no resolvable conductor is exit 3, never a fire.
+    assert "driver-unresolved" in log, log
+    assert proc.returncode == 3, (proc.returncode, log)
+    assert not argv_file.exists()
+
+
+def test_a_conductor_plugin_that_is_simply_absent_claims_no_moved_root(tmp_path):
+    """The other side of the same distinction: nothing listed means nothing to say about a
+    root, and a driver that logged `plugin-root-unverified` there would be inventing an install
+    to explain a plugin that was never installed."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "not-installed"
+    base.mkdir()
+    project, driver, home, _argv, _c = _mk_codex_harness(
+        base, install_conductor_plugin=False
+    )
+
+    proc = _fire_driver(driver, home)
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert "plugin-root-unverified" not in log, log
+    assert "driver-unresolved" in log, log
+    assert proc.returncode == 3, (proc.returncode, log)
+
+
+def test_a_rival_marketplaces_conductor_is_never_exec_d_by_the_driver(tmp_path):
+    """Two installed plugins both called `conductor`, from two marketplaces. Keyed on the bare
+    name the driver takes whichever `plugin list` printed first — an attacker only has to
+    publish a plugin by that name to have cron exec its `bin/conductor` every twenty minutes,
+    unattended, with the owner's posture flags. Conductor cannot rank marketplaces, so an
+    ambiguous name must resolve to nothing and the guard must fire."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "rival"
+    base.mkdir()
+    project, driver, home, argv_file, conductor = _mk_codex_harness(
+        base, second_marketplace="evil-market"
+    )
+
+    proc = _fire_driver(driver, home)
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 3, (proc.returncode, log)
+    assert "driver-unresolved codex=" in log
+    assert not argv_file.exists()
+
+
+def test_a_disabled_conductor_plugin_is_never_exec_d_by_the_driver(tmp_path):
+    """The operator disabled conductor. 0.147.0 still lists it, its tree is still on disk and
+    its `bin/conductor` is still executable — so a driver that reads `installed[]` without the
+    `enabled` bit fires the very plugin the operator turned off, every twenty minutes, from
+    cron. Stop at the guard instead."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "disabled"
+    base.mkdir()
+    project, driver, home, argv_file, conductor = _mk_codex_harness(
+        base, conductor_plugin_disabled=True
+    )
+    assert conductor.exists()  # the fixture's point: present, executable, and OFF
+
+    proc = _fire_driver(driver, home)
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 3, (proc.returncode, log)
+    assert "driver-unresolved codex=" in log
+    assert not argv_file.exists()
+
+
+def test_a_codex_fire_stops_loud_when_codex_knows_of_no_conductor_plugin(tmp_path):
+    """Nothing on PATH, no CODEX_PLUGIN_ROOT, and codex reports no such plugin: the run must
+    stop at the guard with the reason logged, never spawn codex with an unresolvable prompt."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "no-plugin"
+    base.mkdir()
+    project, driver, home, argv_file, _c = _mk_codex_harness(
+        base, install_conductor_plugin=False
+    )
+    proc = _fire_driver(driver, home)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 3
+    assert "driver-unresolved codex=" in log
+    assert not argv_file.exists()
+    assert "fire-start" not in log
+    # ...and the skill path it reports must be EMPTY, not a tree derived from whatever cwd
+    # happened to be. A cwd-derived answer is how this suite — which runs from inside a real
+    # conductor checkout — makes an unresolved driver look resolved.
+    assert "skill=/skills/autodev/SKILL.md" in log, log
+
+
+def test_a_conductor_on_path_still_wins_over_the_plugin_lookup(tmp_path):
+    """A dev checkout on PATH is a supported install too, and it must not be shadowed by
+    whatever `codex plugin list` reports."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "on-path"
+    base.mkdir()
+    project, driver, home, argv_file, conductor = _mk_codex_harness(base, on_path=True)
+    skill = home / ".local" / "skills" / "autodev"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: autodev\n---\n")
+    proc = _fire_driver(driver, home)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 0, (proc.stdout, proc.stderr, log)
+    argv = argv_file.read_text().splitlines()
+    assert argv[-1] == f"Read {skill}/SKILL.md and execute it.", argv
+
+
+def test_a_stale_codex_plugin_root_never_overrides_the_resolved_bins_own_tree(tmp_path):
+    """`CODEX_PLUGIN_ROOT` is an owner/environment variable nothing keeps current — a plugin
+    uninstall or an upgrade leaves it naming a directory that is gone or empty. Taking it AHEAD
+    of the resolved bin means a machine with a perfectly good `conductor` on PATH checks the
+    stale tree and exits 3 on every fire, which contradicts this driver's own stated rule that
+    the skill tree derives ONLY from a resolved bin."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "stale-root"
+    base.mkdir()
+    project, driver, home, argv_file, _c = _mk_codex_harness(base, on_path=True)
+    skill = home / ".local" / "skills" / "autodev"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: autodev\n---\n")
+    stale = base / "uninstalled-plugin"  # named, and not there
+    assert not stale.exists()
+
+    proc = _fire_driver(driver, home, extra_env={"CODEX_PLUGIN_ROOT": str(stale)})
+
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 0, (proc.returncode, log)
+    argv = argv_file.read_text().splitlines()
+    assert argv[-1] == f"Read {skill}/SKILL.md and execute it.", argv
+
+
+def test_a_codex_run_fails_loud_when_the_skill_tree_is_missing(tmp_path):
+    """A prompt pointing at a nonexistent SKILL.md does not fail fast — it burns a whole
+    context discovering the path is wrong. Fail before the fire, like an unresolved bin."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "noskill"
+    base.mkdir()
+    project, driver, home, argv_file, conductor = _mk_codex_harness(base)
+    os.remove(conductor.parent.parent / "skills" / "autodev" / "SKILL.md")
+    proc = _fire_driver(driver, home)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 3
+    assert "driver-unresolved codex=" in log
+    assert not argv_file.exists()
+    assert "fire-start" not in log
+
+
+@pytest.mark.parametrize(
+    "env_line,expected",
+    [
+        (None, "supervised"),
+        ('CONDUCTOR_RESUME_CODEX_FLAGS="--sandbox read-only"', "supervised"),
+        ('CONDUCTOR_RESUME_CODEX_FLAGS="--sandbox workspace-write"', "scoped"),
+        ('CONDUCTOR_RESUME_CODEX_FLAGS="--approve-for-me"', "scoped"),
+        (
+            'CONDUCTOR_RESUME_CODEX_FLAGS="--dangerously-bypass-approvals-and-sandbox"',
+            "full-bypass",
+        ),
+        (
+            'CONDUCTOR_RESUME_CODEX_FLAGS="--sandbox workspace-write --dangerously-bypass-approvals-and-sandbox"',
+            "full-bypass",
+        ),
+        (
+            "CONDUCTOR_RESUME_CODEX_FLAGS=\"--cd '/tmp/a danger-full-access'\"",
+            "supervised",
+        ),
+        # `--` ends codex's option parsing (verified against codex-cli 0.147.0): the flag
+        # after it becomes the PROMPT positional and grants nothing.
+        (
+            'CONDUCTOR_RESUME_CODEX_FLAGS="-- --dangerously-bypass-approvals-and-sandbox"',
+            "supervised",
+        ),
+        (
+            'CONDUCTOR_RESUME_CODEX_FLAGS="--approve-for-me -- --dangerously-bypass-approvals-and-sandbox"',
+            "scoped",
+        ),
+    ],
+)
+def test_a_codex_fire_labels_its_posture_from_codex_flags(tmp_path, env_line, expected):
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    name = f"posture{abs(hash((env_line, expected)))}"
+    _proc, log, _argv = _fire_codex(tmp_path, name, env_line)
+    lines = _posture_lines(log)
+    assert lines, log
+    assert any(f"posture={expected}" in ln for ln in lines), (expected, lines)
+
+
+def test_the_shell_posture_derivation_agrees_with_its_python_mirror(tmp_path):
+    """Two derivations of the same label drift; the log then misrepresents the fire. Every
+    case above is checked against the adapter that renders the shell."""
+    from conductor.hosts import base
+
+    adapter = base.load("codex")
+    for args, expected in (
+        ([], "supervised"),
+        (["--sandbox", "workspace-write"], "scoped"),
+        (["--approve-for-me"], "scoped"),
+        (["--dangerously-bypass-approvals-and-sandbox"], "full-bypass"),
+        (["--", "--dangerously-bypass-approvals-and-sandbox"], "supervised"),
+        (
+            ["--approve-for-me", "--", "--dangerously-bypass-approvals-and-sandbox"],
+            "scoped",
+        ),
+    ):
+        assert adapter.posture_of(args) == expected
+
+
+def test_a_codex_run_ignores_the_claude_flag_variable_entirely(tmp_path):
+    """An owner who set CONDUCTOR_RESUME_CLAUDE_FLAGS on a machine that later runs Codex must
+    not have those flags smuggled into a `codex exec` argv, and must not be labelled
+    full-bypass for a posture Codex never granted."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    _proc, log, argv = _fire_codex(
+        tmp_path,
+        "leak",
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"',
+    )
+    assert "--dangerously-skip-permissions" not in argv, argv
+    assert any("posture=supervised" in ln for ln in _posture_lines(log)), log
+
+
+def test_a_codex_driver_holds_the_same_flock_and_gate_guards(tmp_path):
+    """A second fire while one holds the lock must exit 0 without launching — the guard is
+    host-neutral and must not have been lost in the rewrite."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    base = tmp_path / "gate"
+    base.mkdir()
+    project, driver, home, argv_file, conductor = _mk_codex_harness(base)
+    conductor.write_text("#!/bin/sh\nexit 0\n")  # done-gate green -> no-op fire
+    os.chmod(conductor, 0o755)
+    proc = _fire_driver(driver, home)
+    assert proc.returncode == 0
+    assert not argv_file.exists()
+
+
+# ---- A1: the write-time posture nudge follows the host -----------------------------------
+
+
+@pytest.mark.parametrize(
+    "host_id,flags_var",
+    [
+        ("claude", "CONDUCTOR_RESUME_CLAUDE_FLAGS"),
+        ("codex", "CONDUCTOR_RESUME_CODEX_FLAGS"),
+    ],
+)
+def test_the_write_nudge_names_the_hosts_own_flag_variable(
+    host_id, flags_var, tmp_path, capsys
+):
+    from conductor.hosts import base
+
+    project, worktree = _project_recorded_as(tmp_path, host_id)
+    out = tmp_path / "resume-autodev.sh"
+    rs.main(["write", "--project", project, "--worktree", worktree, "--out", str(out)])
+    err = capsys.readouterr().err
+    assert flags_var in err
+    # and never the other host's variable, which would tell the owner to set something the
+    # driver for this run does not read
+    other = base.load(base.opposite(host_id)).FLAGS_VAR
+    assert other not in err, err
+
+
+@pytest.mark.parametrize(
+    "host_id,decided_line",
+    [
+        ("claude", 'CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"'),
+        (
+            "codex",
+            'CONDUCTOR_RESUME_CODEX_FLAGS="--dangerously-bypass-approvals-and-sandbox"',
+        ),
+    ],
+)
+def test_a_decided_posture_silences_the_nudge_per_host(
+    host_id, decided_line, tmp_path, capsys
+):
+    project, worktree = _project_recorded_as(tmp_path, host_id)
+    out = tmp_path / "out" / "resume-autodev.sh"
+    out.parent.mkdir()
+    (out.parent / "resume-env.sh").write_text(decided_line + "\n")
+    rs.main(["write", "--project", project, "--worktree", worktree, "--out", str(out)])
+    assert "Pick a posture" not in capsys.readouterr().err
+
+
+def test_the_other_hosts_decided_posture_does_not_silence_the_nudge(tmp_path, capsys):
+    """A Claude posture in resume-env.sh decides nothing for a Codex run: that run still
+    fires supervised and its owner still needs telling."""
+    project, worktree = _project_recorded_as(tmp_path, "codex")
+    out = tmp_path / "out" / "resume-autodev.sh"
+    out.parent.mkdir()
+    (out.parent / "resume-env.sh").write_text(
+        'CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"\n'
+    )
+    rs.main(["write", "--project", project, "--worktree", worktree, "--out", str(out)])
+    assert "Pick a posture" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "host_id,own,foreign",
+    [
+        ("claude", "CONDUCTOR_RESUME_CLAUDE_FLAGS", "CONDUCTOR_RESUME_CODEX_FLAGS"),
+        ("codex", "CONDUCTOR_RESUME_CODEX_FLAGS", "CONDUCTOR_RESUME_CLAUDE_FLAGS"),
+    ],
+)
+def test_a_driver_documents_only_the_variables_its_own_fire_reads(
+    host_id, own, foreign
+):
+    """The MIGRATION allowlist is the union — a driver being regenerated may carry either
+    host's inline config and neither may be dropped. What a driver DOCUMENTS is narrower:
+    naming a variable this run never reads is how an owner sets Claude flags on a Codex run
+    and wonders why nothing changed."""
+    from conductor.hosts import base
+
+    vars_for = rs.owner_env_vars_for(base.load(host_id))
+    assert own in vars_for
+    assert foreign not in vars_for
+    assert "CONDUCTOR_SPEC_ROOTS" in vars_for
+    assert set(vars_for) < set(rs.OWNER_ENV_VARS)

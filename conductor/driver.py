@@ -28,13 +28,36 @@ import subprocess
 import sys
 
 from conductor import resume_script
+from conductor.core import locks
+from conductor.hosts import base, runhost
 
 _RECENT_HOURS_ENV = "CONDUCTOR_DRIVER_RECENT_HOURS"
 _RECENT_HOURS_DEFAULT = 24.0
 _FIRE_END_RE = re.compile(r"fire-end rc=(\d+)")
+#: Log markers the generated driver writes when a fire could not do its job. DECLARED, because
+#: the set is what `status` can see and anything outside it is a stall reported as clean:
+#: `plugin-list-timeout` is written BEFORE `fire-start` and before the flock, so when the Codex
+#: plugin lookup is cut off it is the only line that fire ever writes — and status matching just
+#: two shapes greened exactly that driver. A marker the driver emits and this list omits is a
+#: silent stall by construction, so they are added together.
+_FAILURE_MARKERS = (
+    "driver-unresolved",
+    "plugin-list-timeout",
+    "plugin-root-unverified",
+)
 # Only this many trailing log lines are considered "the recent tail" — the recency
 # window does the real filtering; this just bounds work on a long-lived log.
 _TAIL_LINES = 500
+
+#: How long a second writer waits for the first to finish before refusing. ONE value shared with
+#: `resume_script`, which is the other documented writer of the same file: two timeouts on one
+#: lock is two answers to "how long is a stuck holder".
+INSTALL_LOCK_TIMEOUT_S = resume_script.INSTALL_LOCK_TIMEOUT_S
+
+#: The advisory lock serializing every writer of this project's driver script. Defined in
+#: `resume_script` because the lock is keyed on the FILE, and that module owns the file — see
+#: `resume_script.install_lock_for`.
+install_lock_path = resume_script.install_lock_path
 
 
 def _crontab_lines() -> list[str]:
@@ -52,20 +75,18 @@ def _crontab_lines() -> list[str]:
     return proc.stdout.splitlines()
 
 
-def _scheduled_tasks_file() -> str:
-    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(
-        os.path.expanduser("~"), ".claude"
-    )
-    return os.path.join(cfg, "scheduled_tasks.json")
-
-
-def _scheduled_task_matches(root: str) -> bool:
+def _scheduled_task_matches(root: str, path: str | None) -> bool:
     """Does a harness scheduled task durably drive THIS project? An entry counts only
     when its prompt is /conductor:autodev AND its cwd/project field points at `root`.
     The file merely EXISTING is not durability evidence — a stale or unrelated task
-    would false-green the health signal. Unparseable/unmatchable → False, fail-closed."""
-    path = _scheduled_tasks_file()
-    if not os.path.isfile(path):
+    would false-green the health signal. Unparseable/unmatchable → False, fail-closed.
+
+    `path` is the RUN'S host's scheduled-task file, or None for a host that has no such
+    mechanism. None means the leg does not exist for this run — not that it is empty. A Codex
+    run sitting on a machine where Claude has a task registered is not driven by that task:
+    nothing fires its prompt into codex, so counting it would false-green the only signal an
+    operator has that an unattended run will actually resume."""
+    if not path or not os.path.isfile(path):
         return False
     try:
         with open(path, encoding="utf-8") as f:
@@ -85,11 +106,12 @@ def _scheduled_task_matches(root: str) -> bool:
             return False
     else:
         return False
-    # HERMETICITY INVARIANT (frozen A13): the frozen no-durable fixture does NOT
-    # isolate this file, so only the exact-project match below keeps the frozen gate
-    # independent of real machine state. NEVER loosen this to a prompt-only or
-    # basename match — a real scheduled task on the dev machine would then
-    # false-green the frozen "no durable driver" test.
+    # EXACT-PROJECT INVARIANT (frozen A13): NEVER loosen this to a prompt-only or
+    # basename match. A13 pins BOTH directions off one seeded harness file — the
+    # entry naming the claude project must green it, the entry naming the codex
+    # project must not green that one — so a looser match would false-green a run
+    # whose host cannot be driven by that task at all, and any unrelated task left
+    # on an operator's machine would report a stalled run as healthy.
     want = os.path.normpath(root)
     want_real = os.path.realpath(root)
     for entry in entries:
@@ -134,7 +156,7 @@ def _is_recent(line: str, now: datetime.datetime, hours: float) -> bool:
 
 
 def _recent_failures(lines: list[str]) -> list[str]:
-    """The recent `driver-unresolved` / `fire-end rc=<non-zero>` lines, verbatim."""
+    """The recent `_FAILURE_MARKERS` / `fire-end rc=<non-zero>` lines, verbatim."""
     now = datetime.datetime.now().astimezone()
     hours = _recent_hours()
     failures = []
@@ -142,7 +164,9 @@ def _recent_failures(lines: list[str]) -> list[str]:
         if not line.strip():
             continue
         m = _FIRE_END_RE.search(line)
-        failing = "driver-unresolved" in line or (m is not None and int(m.group(1)) != 0)
+        failing = any(marker in line for marker in _FAILURE_MARKERS) or (
+            m is not None and int(m.group(1)) != 0
+        )
         if failing and _is_recent(line, now, hours):
             failures.append(line)
     return failures
@@ -155,18 +179,25 @@ def status(project: str) -> int:
     driver with no fires yet — healthy."""
     root = resume_script.main_root(project)
     marker = resume_script.cron_marker(root)
+    tasks_file = runhost.adapter(root).scheduled_tasks_file()
     # An ACTIVE crontab entry only: a commented-out/disabled line that still carries
     # the marker is not a durable driver and must not false-green the signal.
-    if any(
-        marker in ln and not ln.lstrip().startswith("#") for ln in _crontab_lines()
-    ):
+    if any(marker in ln and not ln.lstrip().startswith("#") for ln in _crontab_lines()):
         leg = "crontab marker"
-    elif _scheduled_task_matches(root):
+    elif _scheduled_task_matches(root, tasks_file):
         leg = "scheduled task"
     else:
+        # Name only the legs this host actually has. Reporting a missing
+        # scheduled_tasks.json entry to a Codex operator sends them looking for a file their
+        # host never reads.
+        missing = f"no crontab line carrying '{marker}'"
+        if tasks_file:
+            missing += (
+                f" and no scheduled_tasks.json entry driving {root} "
+                f"with /conductor:autodev"
+            )
         print(
-            f"driver: NOT durable — no crontab line carrying '{marker}' and no "
-            f"scheduled_tasks.json entry driving {root} with /conductor:autodev.\n"
+            f"driver: NOT durable — {missing}.\n"
             f"Install one: conductor driver install --worktree <run-worktree>"
         )
         return 1
@@ -189,18 +220,91 @@ def status(project: str) -> int:
     return 0
 
 
-def install(project: str, worktree: str) -> int:
+def install(project: str, worktree: str, host: str | None = None) -> int:
     """The fail-closed default for an unattended run — no durability judgment call:
     write the resume script (through `resume-script write`, so its inline-owner-env
-    no-clobber guard is respected) and then the marker-tagged crontab lines."""
+    no-clobber guard is respected) and then the marker-tagged crontab lines.
+
+    `host` names which host this run's fires spawn. It is the caller's to state because it is
+    only knowable one level up: the
+    `/conductor:start` skill runs ON the host, while every layer below it is a subprocess with
+    no marker it can trust (Claude exports `CLAUDECODE`/`CLAUDE_PLUGIN_ROOT`, the Codex ground
+    truth records no exported analogue, and "neither present" is indistinguishable from a plain
+    shell — so a probe here could only ever positively identify claude).
+
+    Omitting it leaves any EXISTING recording alone — a re-install must never move a live run
+    onto another host as a side effect, not even via a stray `$CONDUCTOR_HOST` in the operator's
+    shell. A run with NO recording gets one anyway, naming the host this install actually
+    rendered. Leaving it unrecorded is what let the two disagree: the render honours
+    `$CONDUCTOR_HOST`, the next reconcile runs from cron without it, and the run silently
+    regenerates back to claude.
+
+    ORDER: the script is rendered and written FIRST, and only a written script is recorded. The
+    two are one durable fact and the recording is the half that reroutes everything else — cron
+    fires whatever the script says, while `status`, preflight, plan-lint and the merge gate all
+    believe the recording. Recording first made a failure split them: the inline-owner-env
+    no-clobber guard refused the old driver (rc 2), the recording said codex, and the surviving
+    script still fired claude — permanently, because the guard refuses every retry. Rolling the
+    record back on failure would fix that case but not a crash between the steps. This order
+    fails the other way instead: a crash after the write leaves a new script and an older
+    recording, which `resume-script verify` already reports as stale and reconcile regenerates.
+    Inconsistent-and-self-healing beats inconsistent-and-stuck.
+
+    SERIALIZED: that ordering argument only holds for ONE install. Two of them naming different
+    hosts interleave straight through it — codex writes, claude writes and records, codex
+    records — and both return 0 while the script fires claude and `.conductor/host` says codex.
+    That state is not the self-healing kind: `resume-script verify` reports it, but `status`
+    does not, and nothing reconciles before the next cron tick fires the wrong host. The lock
+    covers the decision as well as the writes, because `chosen` reads the recording a competitor
+    is about to change.
+
+    The lock is keyed on the driver SCRIPT, not on this entry point, because `install` is not
+    the only documented writer of it: `/conductor:start` reconcile regenerates a stale driver
+    with `conductor resume-script write` (skills/start/SKILL.md), which recreates this exact
+    split state through a public path — that write renders the RECORDED host, which is still the
+    old one until the line below runs. `resume_script._write` takes the same lock."""
     root = resume_script.main_root(project)
-    out = os.path.join(root, ".conductor", "resume-autodev.sh")
+    lock = install_lock_path(root)
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    try:
+        with locks.hold(lock, kind="project", timeout=INSTALL_LOCK_TIMEOUT_S):
+            return _install_locked(root, worktree, host)
+    except locks.LockTimeout as e:
+        # Loud, and having changed nothing: the lock is taken before the first write, so a
+        # refusal here cannot have replaced a live driver on its way out.
+        print(f"driver install: {e}", file=sys.stderr)
+        return 1
+
+
+def _install_locked(root: str, worktree: str, host: str | None) -> int:
+    """`install`'s body, under the install lock. Split out so the critical section is exactly
+    the durable fact and nothing returns early past the lock's release."""
+    # Validate BEFORE anything is written: a typo'd host must not leave a driver behind.
+    chosen = (
+        base.load(host).id
+        if host
+        else (runhost.recorded(root) or runhost.resolve(root))
+    )
+    out = resume_script.driver_script_path(root)
     os.makedirs(os.path.dirname(out), exist_ok=True)
+    # `--host` explicitly, never via the recording: it is not written yet, and the render must
+    # be the host this install decided on rather than the one the project is leaving behind.
     rc = resume_script.main(
-        ["write", "--project", root, "--worktree", worktree, "--out", out]
+        [
+            "write",
+            "--project",
+            root,
+            "--worktree",
+            worktree,
+            "--out",
+            out,
+            "--host",
+            chosen,
+        ]
     )
     if rc != 0:
         return rc
+    runhost.record(root, chosen)
     return resume_script.install_cron(root)
 
 
@@ -215,6 +319,13 @@ def main(argv: list[str] | None = None) -> int:
         "--worktree", required=True, help="run worktree the fires resume in"
     )
     sp.add_argument(
+        "--host",
+        default=None,
+        choices=base.HOST_IDS,
+        help="record which host the fires spawn (default: leave the run's recording alone; "
+        "an unrecorded run is claude)",
+    )
+    sp.add_argument(
         "--project",
         default=None,
         help="any path inside the repo (default: CONDUCTOR_HOME, else cwd)",
@@ -225,16 +336,19 @@ def main(argv: list[str] | None = None) -> int:
     project = args.project or os.environ.get("CONDUCTOR_HOME") or os.getcwd()
     try:
         if args.cmd == "install":
-            return install(project, args.worktree)
+            return install(project, args.worktree, args.host)
         return status(project)
     except subprocess.CalledProcessError as e:
         detail = (e.stderr or "").strip()
-        print(
-            f"cannot resolve main root for {project}: {detail or e}", file=sys.stderr
-        )
+        print(f"cannot resolve main root for {project}: {detail or e}", file=sys.stderr)
         return 1
     except resume_script.CrontabReadError as e:
         print(str(e), file=sys.stderr)
+        return 1
+    except base.UnknownHost as e:
+        # A typo'd or unsupported host: name it, never traceback, and never fall back to a
+        # host the operator did not ask for.
+        print(f"driver {args.cmd} failed: {e}", file=sys.stderr)
         return 1
     except OSError as e:
         # e.g. `crontab` binary missing on the install path — name it, never traceback.

@@ -72,6 +72,18 @@ def _check_order(kind: str, rank: int, run_key: str | None, path: str) -> None:
                 )
 
 
+def is_held(path: str) -> bool:
+    """Is the lock file at ``path`` already held by THIS context?
+
+    For the outermost-holder-wins pattern: a nested caller that would take a lock its caller
+    already holds must skip it, because ``flock`` is per open-file-description and
+    ``_check_order`` refuses the re-entrant acquisition outright. Keyed on the resolved path for
+    the same reason re-entrancy is: the file is the lock, whatever kind it was named with.
+    """
+    resolved = os.path.realpath(path)
+    return any(held_path == resolved for _, _, _, held_path in _held.get())
+
+
 @contextlib.contextmanager
 def hold(
     path: str,

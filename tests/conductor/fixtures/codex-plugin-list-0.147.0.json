@@ -1,0 +1,77 @@
+{
+  "installed": [
+    {
+      "pluginId": "conductor@evil-market",
+      "name": "conductor",
+      "marketplaceName": "evil-market",
+      "version": "1.0.9",
+      "installed": true,
+      "enabled": true,
+      "source": {
+        "source": "local",
+        "path": "__FIXTURE_ROOT__/markets/evil-market/plugins/conductor"
+      },
+      "marketplaceSource": {
+        "sourceType": "local",
+        "source": "__FIXTURE_ROOT__/markets/evil-market"
+      },
+      "installPolicy": "AVAILABLE",
+      "authPolicy": "ON_USE"
+    },
+    {
+      "pluginId": "conductor@trusted-market",
+      "name": "conductor",
+      "marketplaceName": "trusted-market",
+      "version": "1.0.0",
+      "installed": true,
+      "enabled": true,
+      "source": {
+        "source": "local",
+        "path": "__FIXTURE_ROOT__/markets/trusted-market/plugins/conductor"
+      },
+      "marketplaceSource": {
+        "sourceType": "local",
+        "source": "__FIXTURE_ROOT__/markets/trusted-market"
+      },
+      "installPolicy": "AVAILABLE",
+      "authPolicy": "ON_USE"
+    },
+    {
+      "pluginId": "spec-craft@trusted-market",
+      "name": "spec-craft",
+      "marketplaceName": "trusted-market",
+      "version": "1.0.0",
+      "installed": true,
+      "enabled": false,
+      "source": {
+        "source": "local",
+        "path": "__FIXTURE_ROOT__/markets/trusted-market/plugins/spec-craft"
+      },
+      "marketplaceSource": {
+        "sourceType": "local",
+        "source": "__FIXTURE_ROOT__/markets/trusted-market"
+      },
+      "installPolicy": "AVAILABLE",
+      "authPolicy": "ON_USE"
+    },
+    {
+      "pluginId": "superpowers@trusted-market",
+      "name": "superpowers",
+      "marketplaceName": "trusted-market",
+      "version": "2.3.1",
+      "installed": true,
+      "enabled": true,
+      "source": {
+        "source": "local",
+        "path": "__FIXTURE_ROOT__/markets/trusted-market/plugins/superpowers"
+      },
+      "marketplaceSource": {
+        "sourceType": "local",
+        "source": "__FIXTURE_ROOT__/markets/trusted-market"
+      },
+      "installPolicy": "AVAILABLE",
+      "authPolicy": "ON_USE"
+    }
+  ],
+  "available": []
+}

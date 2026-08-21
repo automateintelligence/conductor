@@ -25,9 +25,9 @@
       }
     },
     "a13-driver-status-nonzero-without-driver": {
-      "entry": "d3ad7a8d45323f663c2fa75af5d6ddbbf6eaece10afe4cecab08010606d53171",
+      "entry": "cf368b7beae7a163f3a14d0c6eff6b9c1243cc627d44a1fd527dd44dee1c2bb6",
       "files": {
-        "assertions/self_enforcement/test_a13_driver_status_durable.py": "8e6768f7e7d90c744d40f3ccd4295ee62839f7bfb34b95185ec2f7458e826628"
+        "assertions/self_enforcement/test_a13_driver_status_durable.py": "f143d16507446b21693f70567c012111e898d84e2caa5608a26ed54b03e7ad5f"
       }
     },
     "a14-driver-status-flags-failed-fires": {
