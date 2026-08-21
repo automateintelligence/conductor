@@ -16,8 +16,6 @@ Sharing *argv construction* is not.
 
 from __future__ import annotations
 
-import re
-import subprocess
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -31,10 +29,9 @@ POSTURES = ("supervised", "scoped", "full-bypass")
 # `codex --version` and `codex exec --help` HANG when stdin is an open pipe or a terminal
 # (ground truth §"Codex help hangs without stdin redirection"). Under cron the symptom is a
 # stuck worker, not a failed one, so every probe in this package redirects stdin from /dev/null
-# and bounds itself with a timeout.
-VERSION_PROBE_TIMEOUT = 20.0
-
-_VERSION_RE = re.compile(r"(\d+(?:\.\d+)+)")
+# and bounds itself with a timeout. The probes that do so live in the adapter that owns the
+# subcommand being probed (`codex.installed_plugins`, `CodexAdapter.plugin_list_lookup`); this
+# module carries no shared probe helper, because the only one it ever had had no callers.
 
 
 class UnknownHost(ValueError):
@@ -230,53 +227,3 @@ def reject_flaglike_prompt(prompt: str) -> str:
             "trailing positional argument and must not start with '-'."
         )
     return prompt
-
-
-def probe_version(
-    executable: str, *, timeout: float = VERSION_PROBE_TIMEOUT
-) -> tuple[int, ...]:
-    """``<executable> --version`` parsed into a comparable tuple.
-
-    ``stdin=DEVNULL`` is the whole point of this helper existing rather than each adapter
-    calling ``subprocess.run``: without it ``codex --version`` hangs forever instead of
-    answering (ground truth §"Codex help hangs without stdin redirection").
-    """
-    try:
-        proc = subprocess.run(
-            [executable, "--version"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except FileNotFoundError as exc:
-        raise HostUnavailable(f"{executable!r} is not executable") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise HostUnavailable(
-            f"{executable} --version did not answer within {timeout}s (no write occurred); "
-            f"check the install with: command -v {executable}"
-        ) from exc
-    if proc.returncode != 0:
-        raise HostUnavailable(
-            f"{executable} --version exited {proc.returncode}: "
-            f"{(proc.stderr or proc.stdout or '').strip()[:200]}"
-        )
-    match = _VERSION_RE.search(proc.stdout) or _VERSION_RE.search(proc.stderr)
-    if not match:
-        raise HostUnavailable(
-            f"{executable} --version printed no dotted version number: "
-            f"{(proc.stdout or proc.stderr).strip()[:200]!r}"
-        )
-    return tuple(int(part) for part in match.group(1).split("."))
-
-
-def assert_minimum_version(adapter: HostAdapter) -> tuple[int, ...]:
-    """The installed version, or ``HostVersionTooOld`` naming the floor and the exact check."""
-    found = adapter.version()
-    floor = adapter.minimum_version()
-    if found < floor:
-        raise HostVersionTooOld(
-            f"{adapter.id} {'.'.join(map(str, found))} is below the supported floor "
-            f"{'.'.join(map(str, floor))} (no write occurred). {adapter.upgrade_hint()}"
-        )
-    return found
