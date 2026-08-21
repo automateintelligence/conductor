@@ -2,10 +2,12 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
 from conductor import preflight
+from conductor.hosts import codex as codex_host
 from tests.conductor.conftest import stale_version_siblings
 
 _ALL = {
@@ -785,3 +787,120 @@ def test_a_project_recorded_as_codex_is_preflighted_against_the_codex_root(
     out = preflight.check(project_root=str(proj))
 
     assert out["missing"] == ["$expectations"], out
+
+
+# ------------------------------------------- a host that cannot be asked is not a host with nothing
+
+#: `sleep`, resolved off the DEFAULT path rather than the ambient one. The fixtures below run
+#: after `$PATH` has already been narrowed to a stub directory, so `shutil.which("sleep")` there
+#: answers None and the "hanging" fake exits 127 instantly — an answering fake wearing a hanging
+#: fake's name, which passes the very code it exists to falsify.
+_SLEEP = shutil.which("sleep", path=os.defpath)
+assert _SLEEP, (
+    "no `sleep` on the default path; the hanging-host fixtures cannot be built"
+)
+
+
+def _codex_that_never_answers(tmp_path, monkeypatch, *, timeout=0.5):
+    """Replace the stub `codex` with one that outlives its own bound.
+
+    Written into the SAME `stub-bin` `_codex_install` put on PATH, so the machine underneath is
+    a fully installed one: every plugin root is on disk and every skill is really there. The
+    only thing wrong with it is that Codex will not answer, which is the whole point — a
+    degrade that reports this machine as missing its stack is reporting a fact that is false.
+    """
+    bindir = tmp_path / "stub-bin"
+    exe = bindir / "codex"
+    # `sleep` by ABSOLUTE path: PATH here is `stub-bin` plus nothing, so a bare `sleep` would
+    # not resolve and the fake would answer instantly instead of hanging.
+    exe.write_text(f"#!/bin/sh\nexec {_SLEEP} 60\n")
+    os.chmod(exe, 0o755)
+    _link_git(bindir)
+    monkeypatch.setattr(codex_host, "PLUGIN_LIST_TIMEOUT_S", timeout)
+    return bindir
+
+
+def test_an_unanswerable_plugin_probe_degrades_to_unverified_never_missing(
+    tmp_path, monkeypatch
+):
+    """The machine is fully installed and Codex will not say so. `missing` is then a false
+    statement about the owner's disk, and it comes with the one instruction that cannot help:
+    install what is already there. `unverified` is the honest verdict — and it is still not a
+    pass, so the run stops either way."""
+    _codex_install(tmp_path, monkeypatch)
+    _codex_that_never_answers(tmp_path, monkeypatch)
+
+    out = preflight.check(project_root=str(tmp_path / "project"))
+
+    assert not out["ok"], out
+    assert out["missing"] == [], out
+    assert "$expectations" in out["unverified"], out
+    assert "$writing-plans" in out["unverified"], out
+
+
+def test_the_expiry_advice_names_the_probe_instead_of_prescribing_a_reinstall(
+    tmp_path, monkeypatch
+):
+    """`unverified` has three causes and an expiry shares a remedy with neither of the others:
+    nothing is known about any skill, so "install the plugin" and "repair a broken install" are
+    both guesses. The only actionable thing is the probe that expired and how to re-run it."""
+    _codex_install(tmp_path, monkeypatch)
+    _codex_that_never_answers(tmp_path, monkeypatch)
+
+    advice = "\n".join(
+        preflight.check(project_root=str(tmp_path / "project"))["advice"]
+    )
+
+    assert "install it" not in advice.lower(), advice
+    assert "unattributed skill" not in advice.lower(), advice
+    assert "not on disk" not in advice.lower(), advice
+    assert "plugin list --json" in advice, advice  # the operation that expired
+    assert "no write occurred" in advice, advice  # a read-only probe, and it says so
+
+
+def test_the_expiry_keeps_the_names_that_were_established_before_the_probe(
+    tmp_path, monkeypatch
+):
+    """Anti-over-correction: degrading must not also discard what discovery already knew.
+    `$autodev` resolves from conductor's own checkout and never depended on the probe, so a
+    degrade that reports it unresolved has thrown away a fact that was never in doubt."""
+    _codex_install(tmp_path, monkeypatch)
+    _codex_that_never_answers(tmp_path, monkeypatch)
+
+    out = preflight.check(
+        required=["conductor:autodev"], project_root=str(tmp_path / "project")
+    )
+
+    assert out["ok"], out
+
+
+def test_a_probe_expiry_does_not_crash_the_preflight_entry_point(tmp_path, monkeypatch):
+    """The user-visible contract under a hung host: a report and a non-zero exit, never a
+    traceback. An unhandled `HostProbeTimeout` reaching `__main__` would replace the advice an
+    owner needs with a stack trace, and `conductor preflight` is step 0 of every start."""
+    _codex_install(tmp_path, monkeypatch)
+    bindir = _codex_that_never_answers(tmp_path, monkeypatch, timeout=1.0)
+
+    project = tmp_path / "project"
+    project.mkdir(exist_ok=True)
+    proc = subprocess.run(
+        [sys.executable, "-m", "conductor.preflight"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            **os.environ,
+            "PATH": f"{bindir}{os.pathsep}{os.defpath}",
+            "PYTHONPATH": os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            ),
+            "CONDUCTOR_HOST": "codex",
+            "CODEX_HOME": str(tmp_path / "codex-home"),
+        },
+    )
+
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "UNVERIFIED:" in proc.stderr, proc.stderr
+    assert "MISSING:" not in proc.stderr, proc.stderr

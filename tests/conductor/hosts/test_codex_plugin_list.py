@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 
 import pytest
 
-from conductor.hosts import codex
+from conductor.hosts import base, codex, discovery
 from tests.conductor.conftest import stale_version_siblings
 
 _FIXTURE = os.path.join(
@@ -320,3 +321,122 @@ def test_neither_parser_treats_an_unexpected_top_level_shape_as_an_installed_plu
         assert proc.stderr == "", (payload, proc.stderr)
         assert proc.stdout.strip() == ""
         assert codex.plugin_roots_from_json(payload) == {}
+
+
+# --------------------------------------------- a probe that never answers is its own answer
+
+#: `sleep`, resolved off the DEFAULT path rather than the ambient one. The fixtures below run
+#: after `$PATH` has already been narrowed to a stub directory, so `shutil.which("sleep")` there
+#: answers None and the "hanging" fake exits 127 instantly — an answering fake wearing a hanging
+#: fake's name, which passes the very code it exists to falsify.
+_SLEEP = shutil.which("sleep", path=os.defpath)
+assert _SLEEP, (
+    "no `sleep` on the default path; the hanging-host fixtures cannot be built"
+)
+
+
+def _codex_that_never_answers(tmp_path, monkeypatch, *, timeout=0.5):
+    """A `codex` on PATH that outlives its own bound, and a bound short enough to test.
+
+    `PLUGIN_LIST_TIMEOUT_S` is patched rather than waited out: twenty seconds is the production
+    bound and this test is about which ANSWER an expiry produces, not how long it takes.
+    """
+    bindir = tmp_path / "hanging-bin"
+    bindir.mkdir(exist_ok=True)
+    exe = bindir / "codex"
+    # `sleep` by ABSOLUTE path: PATH is about to be replaced with `bindir` alone, and a fake
+    # that dies with "sleep: not found" is a fake that answers instantly — the opposite of what
+    # this fixture is for, and it would have passed the swallow-the-expiry code it exists to
+    # falsify.
+    exe.write_text(f"#!/bin/sh\nexec {_SLEEP} 60\n")
+    os.chmod(exe, 0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr(codex, "PLUGIN_LIST_TIMEOUT_S", timeout)
+    return bindir
+
+
+def test_a_plugin_probe_that_never_answers_raises_instead_of_reporting_no_plugins(
+    tmp_path, monkeypatch
+):
+    """ "Codex answered nothing" and "Codex never answered" are different facts and must not
+    arrive at the caller as the same value.
+
+    Returning three empties for an expiry told preflight that a machine with a hung Codex has
+    no plugins installed, and preflight then reported every plugin-qualified skill as MISSING —
+    advice to install what the owner may already have. The expiry is the caller's decision to
+    make, so it has to reach the caller.
+    """
+    _codex_that_never_answers(tmp_path, monkeypatch)
+
+    with pytest.raises(base.HostProbeTimeout) as expiry:
+        codex.installed_plugins()
+
+    report = str(expiry.value)
+    assert "plugin list --json" in report, report  # the operation that expired
+    assert "no write occurred" in report, report  # a read-only probe, and it says so
+    assert "codex plugin list --json" in report, report  # the exact reproduce command
+
+
+def test_the_expiry_is_a_host_error_and_not_a_raw_subprocess_one(tmp_path, monkeypatch):
+    """A bare `TimeoutExpired` would make every caller import `subprocess` to handle a fact
+    about the host, and would be caught by any `except subprocess.SubprocessError` that meant
+    to tolerate a malformed answer."""
+    _codex_that_never_answers(tmp_path, monkeypatch)
+
+    with pytest.raises(base.HostUnavailable) as expiry:
+        codex.installed_plugins()
+
+    assert not isinstance(expiry.value, subprocess.SubprocessError)
+
+
+def test_codex_answering_nothing_still_returns_three_empties(tmp_path, monkeypatch):
+    """The anti-over-correction. An expiry raises; a Codex that ANSWERS, with nothing to say or
+    with a non-zero exit, still returns the empty partition it always did — otherwise the fix
+    turns every uninstalled-plugin machine into a hard failure."""
+    bindir = tmp_path / "answering-bin"
+    bindir.mkdir(exist_ok=True)
+    for name, script in (
+        ("empty", "#!/bin/sh\nprintf '{\"installed\": []}'\n"),
+        ("failing", "#!/bin/sh\nexit 3\n"),
+    ):
+        exe = bindir / "codex"
+        exe.write_text(script)
+        os.chmod(exe, 0o755)
+        monkeypatch.setenv("PATH", str(bindir))
+        assert codex.installed_plugins() == ({}, [], frozenset()), name
+
+
+def test_host_skills_propagates_the_expiry_carrying_what_it_had_already_established(
+    tmp_path, monkeypatch
+):
+    """`host_skills` answers "what is invocable", and after an unanswered probe that is not
+    known — so it must not hand back the filesystem legs alone in the SHAPE of a healthy
+    answer. It carries them as `partial` instead, so the policy layer degrades with every fact
+    that was established and none that were not."""
+    home = tmp_path / "codex-home"
+    (home / "skills" / "flat-user-skill").mkdir(parents=True)
+    (home / "skills" / "flat-user-skill" / "SKILL.md").write_text(
+        "---\nname: flat-user-skill\n---\n"
+    )
+    monkeypatch.setenv(codex.CONFIG_DIR_ENV, str(home))
+    _codex_that_never_answers(tmp_path, monkeypatch)
+
+    with pytest.raises(base.HostProbeTimeout) as expiry:
+        codex.CodexAdapter().host_skills(project_root=str(tmp_path / "project"))
+
+    partial = expiry.value.partial
+    # The SHAPE is part of the contract: `preflight.check` degrades by using this in place of
+    # the snapshot it did not get, so anything that is not a `HostSkills` is not usable there.
+    assert isinstance(partial, discovery.HostSkills), partial
+    assert "flat-user-skill" in partial.commands
+    assert partial.unverifiable_plugins == frozenset()
+
+
+def test_discovered_commands_does_not_swallow_the_expiry_either(tmp_path, monkeypatch):
+    """`discovered_commands` is the member preflight's `available_commands` calls, so an expiry
+    it absorbed would never reach the policy layer at all."""
+    monkeypatch.setenv(codex.CONFIG_DIR_ENV, str(tmp_path / "codex-home"))
+    _codex_that_never_answers(tmp_path, monkeypatch)
+
+    with pytest.raises(base.HostProbeTimeout):
+        codex.CodexAdapter().discovered_commands(project_root=str(tmp_path / "project"))

@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import textwrap
 
-from conductor.hosts import discovery
+from conductor.hosts import base, discovery
 
 #: ``--ignore-user-config`` skips ``config.toml`` but auth still uses ``CODEX_HOME`` (ground
 #: truth §"Session and config isolation"), so this is the Codex config root unconditionally.
@@ -223,8 +223,16 @@ def _claims_from_json(text: str) -> dict[str, set[str]]:
 
 
 def installed_plugins() -> tuple[dict[str, str], list[str], frozenset[str]]:
-    """``({attributable name: root}, [contested roots], {unverifiable names})``, or three
-    empties if Codex cannot be asked.
+    """``({attributable name: root}, [contested roots], {unverifiable names})``, three empties
+    when Codex answers nothing, or ``HostProbeTimeout`` when Codex never answers at all.
+
+    Those last two are DIFFERENT ANSWERS and this function must not merge them. Three empties
+    means "Codex was asked and reports no plugin identities" — a legitimate answer preflight
+    degrades on. An expired probe means the question was never answered, so nothing at all is
+    known about what is installed. Returning empties for both would tell the caller a machine
+    with a hung Codex has no plugins, and preflight would then report every plugin-qualified
+    skill as MISSING — advice to install what the owner may already have. The expiry is raised
+    instead, and ``preflight.check`` maps it to ``unverified``, which is what it means.
 
     Asking the host is the only way to attribute a skill to a plugin on Codex: skill directories
     are flat and carry no plugin qualifier, so nothing on disk says whose a skill is. What comes
@@ -250,6 +258,15 @@ def installed_plugins() -> tuple[dict[str, str], list[str], frozenset[str]]:
             text=True,
             timeout=PLUGIN_LIST_TIMEOUT_S,
         )
+    except subprocess.TimeoutExpired as expiry:
+        # BEFORE the broad handler below, because TimeoutExpired IS a SubprocessError: the
+        # order is what keeps "never answered" out of the "answered nothing" bucket.
+        raise base.HostProbeTimeout(
+            f"`codex plugin list --json` did not answer within {PLUGIN_LIST_TIMEOUT_S}s and was "
+            f"killed; no write occurred. Codex could not be asked which plugins are installed, "
+            f"so plugin attribution is unknown rather than empty. Reproduce with: "
+            f"codex plugin list --json </dev/null"
+        ) from expiry
     except (OSError, subprocess.SubprocessError):
         return {}, [], frozenset()
     if proc.returncode != 0:
@@ -590,20 +607,34 @@ class CodexAdapter:
         to enumerate — so it travels in the second half of the answer instead. Without it,
         "codex says spec-craft is installed and its tree is gone" and "spec-craft was never
         installed" arrive at preflight as the same empty contribution.
+
+        An expired ``codex plugin list --json`` PROPAGATES rather than degrading here. This
+        method's answer is "what is invocable", and after an unanswered probe that is not known;
+        returning the filesystem legs alone would be an answer of the same shape as a healthy
+        one, and preflight would read a hung Codex as a machine with no plugins installed. The
+        expiry carries those legs as ``partial`` instead, so the policy layer degrades with
+        every fact that WAS established and none that were not.
         """
         home = self.source_root()
         project = project_root or os.getcwd()
         cmds = discovery.skill_names(f"{home}/skills/*/SKILL.md")
         cmds |= discovery.command_names(f"{home}/prompts/*.md")
         cmds |= discovery.skill_names(f"{project}/.{self.id}/skills/*/SKILL.md")
-        attributed, contested, unverifiable = installed_plugins()
-        for name, root in attributed.items():
-            cmds |= discovery.qualified(name, root)
-        for root in contested:
-            cmds |= discovery.plugin_contents(root)
         cmds |= discovery.scan_plugin_dir(
             discovery.CONDUCTOR_ROOT, discovery.ALL_MANIFEST_DIRS
         )
         for root in discovery.dev_plugin_roots():
             cmds |= discovery.scan_plugin_dir(root, (f".{self.id}-plugin",))
+        # LAST, so everything above is established before the host is asked and can travel with
+        # the expiry. Union order is otherwise irrelevant — these are sets.
+        try:
+            attributed, contested, unverifiable = installed_plugins()
+        except base.HostProbeTimeout as expiry:
+            raise base.HostProbeTimeout(
+                str(expiry), partial=discovery.HostSkills(cmds, frozenset())
+            ) from expiry
+        for name, root in attributed.items():
+            cmds |= discovery.qualified(name, root)
+        for root in contested:
+            cmds |= discovery.plugin_contents(root)
         return discovery.HostSkills(cmds, unverifiable)

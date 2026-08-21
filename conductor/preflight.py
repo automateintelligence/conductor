@@ -27,7 +27,7 @@ import sys
 from typing import TypedDict
 
 from conductor.hosts import discovery, runhost
-from conductor.hosts.base import opposite
+from conductor.hosts.base import HostProbeTimeout, opposite
 
 
 class CheckResult(TypedDict):
@@ -132,6 +132,7 @@ def _advice(
     unresolved: list[str],
     unverified: list[str],
     unlocatable: frozenset[str] = frozenset(),
+    expired: str | None = None,
 ) -> list[str]:
     """One actionable line per missing skill, one per unverifiable one, then the dependency
     note when it applies.
@@ -140,11 +141,13 @@ def _advice(
     there, so "install it" is wrong advice and an owner who follows it learns to ignore the
     gate. What is missing is the plugin's claim on it.
 
-    ``unverified`` has TWO causes and they do not share a remedy, so they do not share a
+    ``unverified`` has THREE causes and they do not share a remedy, so they do not share a
     sentence. A flat, hand-copied skill is installed and merely unattributable — install the
     plugin properly. A plugin the host lists but cannot locate is a BROKEN install: the owner
     has it, the tree the host named is not there, and telling them to install it points at the
-    one thing that is not wrong.
+    one thing that is not wrong. And an expired probe (``expired``) is neither: the host was
+    never able to answer, so NOTHING is known about any of them, and the only honest line names
+    the probe that expired rather than guessing at a remedy per skill.
 
     The note is the Track A answer to a packaging fact A3 verified against codex-cli 0.147.0:
     ``.codex-plugin/plugin.json`` has no ``dependencies`` field — the 180 manifests in the
@@ -169,6 +172,12 @@ def _advice(
                 f"{rendered} — environment-provided; install a `{name}` skill on this host"
             )
     for name in unverified:
+        if expired is not None:
+            lines.append(
+                f"{adapter.native_invocation(name)} — {adapter.id} could not be asked what is "
+                f"installed, so this is neither confirmed present nor confirmed absent."
+            )
+            continue
         plugin = name.split(":", 1)[0]
         if plugin in unlocatable:
             lines.append(
@@ -185,6 +194,8 @@ def _advice(
                 f"is the `{plugin}` plugin's: it resolves as an unattributed skill. Install "
                 f"`{plugin}` as a {adapter.id} plugin so its identity is recoverable."
             )
+    if expired is not None:
+        lines.append(f"NOTE: {expired}")
     if plugins and not adapter.resolves_plugin_dependencies:
         lines.append(
             f"NOTE: {adapter.id} does not resolve plugin dependencies, so installing conductor "
@@ -207,15 +218,37 @@ def check(
     # two halves of a single answer, and asking for them separately would let them describe
     # different moments. A caller that supplies `available` has supplied a set of names and
     # nothing else, so it knows of no unlocatable plugin — never a leftover from another host.
+    expired: str | None = None
     if available is not None:
         avail, unlocatable = available, frozenset()
     else:
-        snapshot = adapter.host_skills(project_root=project_root)
+        # THE POLICY LAYER for an unanswerable host probe. The adapter raises because it cannot
+        # know what an expired probe means for this run; this is where that is decided, and the
+        # decision is `unverified` — reported, never a pass, never a crash, and never the hard
+        # refusal that would strand a run over one slow bounded lookup.
+        try:
+            snapshot = adapter.host_skills(project_root=project_root)
+        except HostProbeTimeout as expiry:
+            expired = str(expiry)
+            snapshot = (
+                expiry.partial
+                if isinstance(expiry.partial, discovery.HostSkills)
+                else discovery.HostSkills(set(), frozenset())
+            )
         avail, unlocatable = snapshot.commands, snapshot.unverifiable_plugins
     # Match on the name AS THIS HOST RESOLVES IT: `native_invocation` is the single place that
     # knows Claude keeps the plugin qualifier and Codex drops it, so matching and reporting
     # cannot drift apart into a preflight that greens on a name it then prints differently.
     outcomes = [(name, _resolve(name, adapter, avail, unlocatable)) for name in names]
+    if expired is not None:
+        # "Not in the set" does not mean "not installed" when the set could not be enumerated.
+        # Every plugin-provided name is absent from `avail` for a reason that has nothing to do
+        # with whether it is installed, and a bare requirement may be plugin-provided too, so
+        # NO absence here is evidence. `missing` would send the owner to install what they may
+        # already have; `unverified` is the honest verdict, and it is still not a pass.
+        outcomes = [
+            (name, "unverified" if out == "missing" else out) for name, out in outcomes
+        ]
     unresolved = [name for name, out in outcomes if out == "missing"]
     unverified = [name for name, out in outcomes if out == "unverified"]
     # `ok` is a PASS, not an absence of hard failures: a skill whose plugin identity could not
@@ -224,7 +257,7 @@ def check(
         "ok": not unresolved and not unverified,
         "missing": [adapter.native_invocation(name) for name in unresolved],
         "unverified": [adapter.native_invocation(name) for name in unverified],
-        "advice": _advice(adapter, unresolved, unverified, unlocatable),
+        "advice": _advice(adapter, unresolved, unverified, unlocatable, expired),
     }
 
 

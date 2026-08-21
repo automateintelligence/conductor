@@ -45,6 +45,30 @@ class HostUnavailable(RuntimeError):
     """The host's executable, source root, or version could not be resolved."""
 
 
+class HostProbeTimeout(HostUnavailable):
+    """A bounded host probe was killed for exceeding its timeout: the host could not be asked.
+
+    Its own class rather than a plain ``HostUnavailable`` because the two are different facts
+    with opposite remedies, and a caller that cannot tell them apart gives the wrong advice: an
+    absent executable means the host is not installed, while an expired probe means the host IS
+    installed and did not answer. Reporting the second as the first sends an owner to reinstall
+    something they already have.
+
+    Raised at the probe, where the timeout is the only thing known. What an unanswerable probe
+    MEANS for a run is policy and belongs to the caller — ``conductor.preflight`` degrades it to
+    ``unverified`` rather than to ``missing``. A probe that swallowed the expiry itself would
+    take that decision away from the layer that owns it, and would hand back an answer
+    indistinguishable from "asked, and the host reported nothing".
+
+    ``partial`` carries whatever the probe's caller had already established before it asked the
+    host, so degrading does not also discard facts that were never in doubt.
+    """
+
+    def __init__(self, message: str, *, partial: object = None) -> None:
+        super().__init__(message)
+        self.partial = partial
+
+
 class HostVersionTooOld(RuntimeError):
     """The installed host is below the supported floor (design line 365)."""
 
