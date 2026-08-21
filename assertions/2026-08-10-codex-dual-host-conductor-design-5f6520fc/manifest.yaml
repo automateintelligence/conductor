@@ -68,3 +68,11 @@ assertions:
     timeout: 600
     level: spec
     kind: property
+  - id: a-dh-7-final-pull-request-is-never-completed
+    claim: "no Conductor CLI verb performs, requests, or enables any action that could complete the final integration-to-default pull request, while a phase pull request still merges into its run integration branch and finish refuses the unmerged final pull request"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_7_final_pull_request_is_never_completed.py"
+    setup: ""
+    teardown: ""
+    timeout: 600
+    level: spec
+    kind: property
