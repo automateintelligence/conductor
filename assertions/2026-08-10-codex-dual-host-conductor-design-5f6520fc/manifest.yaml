@@ -11,8 +11,14 @@
 #   CONDUCTOR_GATE_SLUG=2026-08-10-codex-dual-host-conductor-design-5f6520fc \
 #     ./bin/conductor assert run
 #
-# A-DH-5/6/7 are deliberately absent: they govern relocation and merge automation, which the
-# roadmap defers to Track B (docs/superpowers/plans/2026-08-10-codex-dual-host-ROADMAP.md).
+# A-DH-5/6/7 are PRESENT AND RED, deliberately. They govern relocation and merge automation,
+# which the roadmap defers to Track B (docs/superpowers/plans/2026-08-10-codex-dual-host-ROADMAP.md):
+# Plan 00 owns the relocation safety scan, Plan 02 the owner records A-DH-5 variant (b) needs,
+# Plan 05 the resume/finish/heartbeat/status verbs A-DH-7 sweeps, Plan 06 fail-closed
+# default-branch resolution and final-PR protection. Absent, they were hidden in the denominator
+# and the gate read "3/4 green"; present, the gate measures all seven and names what is missing.
+# Each red assertion FAILS with the absent feature and its owning plan in the message — none of
+# them skips, xfails, or passes vacuously. Do not green them by implementing product code here.
 assertions:
   - id: a-dh-1-host-vocabulary-confined-to-adapters
     claim: "no Python module outside the host-adapter layer contains a Claude slash-command invocation, a Codex dollar-prefixed skill invocation, CLAUDE_PLUGIN_ROOT, or a host-specific permission or sandbox flag string"
@@ -44,5 +50,13 @@ assertions:
     setup: ""
     teardown: ""
     timeout: 600
+    level: spec
+    kind: property
+  - id: a-dh-5-relocation-refuses-live-run-artifacts
+    claim: "the relocation safety check refuses, before mutating anything, when a live process, a registered linked worktree, or an installed schedule resolves beneath the checkout being relocated"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_5_relocation_refuses_live_run_artifacts.py"
+    setup: ""
+    teardown: ""
+    timeout: 300
     level: spec
     kind: property
