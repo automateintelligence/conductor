@@ -137,7 +137,10 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    - **Reconcile-first, EXACT name:** `RB="$(conductor run-branch name <spec>)"` — the
      single-sourced resolver; never derive the slug in prose — then
      `git ls-remote "$(conductor remote)" "refs/heads/$RB"` — exists → reuse; absent → create off
-     `$(conductor default-branch)` and push. NEVER bind by wildcard scan
+     `D="$(conductor default-branch)" || HALT` and push. That resolver FAILS CLOSED — it prints
+     nothing and exits non-zero when the repo's default cannot be resolved from remote metadata;
+     HALT and tell the owner to fix the remote metadata rather than branching off a guess.
+     NEVER bind by wildcard scan
      (`conductor/run-*`): with two active runs a scan grabs the wrong spec's branch.
    - **Stale-run cleanup first:** if `.conductor/run_branch` names a branch that no longer exists
      on the remote (the owner merged the final PR and deleted it — the run is over), remove the

@@ -7,9 +7,9 @@
       }
     },
     "a10-default-branch-never-empty": {
-      "entry": "2db0eb0e941648a14aec164de651e144c71d7ed6030b57a8878e4e3c97ef93c1",
+      "entry": "63ef766933393a6daf08aa4b2ade8a36dc264130aaa0467e14f2aad799243e95",
       "files": {
-        "assertions/self_enforcement/test_a10_default_branch.py": "e55a59693bc9d9d72c76bc2a3b22b387f0755bccbfaa5261ba6a03b982172059"
+        "assertions/self_enforcement/test_a10_default_branch.py": "f3341b95228e1f14a84e1efafa3fe0dd3f6ed4e8d716e756f61395bcb8866b85"
       }
     },
     "a11-run-branch-name-deterministic": {

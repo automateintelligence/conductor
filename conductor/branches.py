@@ -9,9 +9,19 @@ as a CLI verb the prose calls instead of re-deriving.
 byte-identical `conductor/run-<slug>`, different spec STEMS → different names (the slug
 carries the filename's stem — the a11-pinned granularity — so two specs sharing a stem in
 different directories map to the same run branch; one run per spec stem). `default_branch`
-resolves the repo's real default (gh repo view, then the origin/HEAD symbolic ref) and
-fails OPEN to `main` — exit 0, NEVER an empty string, which would make a downstream
-`git fetch "$R" ""` operate on the wrong ref.
+resolves the repo's real default from AUTHORITATIVE remote metadata (gh repo view, then the
+origin/HEAD symbolic ref) and fails CLOSED: when neither probe can name the branch it raises
+`DefaultBranchUnresolvable` and the CLI verb exits non-zero having printed NOTHING on stdout.
+
+It used to fail OPEN to the literal `main` (design §"Branch, worktree, and pull-request
+model", assertion A-DH-6: "If the default branch cannot be resolved, every automated merge is
+refused; there is no fallback default"). A guessed default is worse than no default: on a repo
+whose default is `trunk` the guess silently names a branch that either does not exist or is
+somebody else's, and the fetch/merge/PR-base built from it is wrong while looking healthy. The
+empty-string hazard the fail-open was guarding — `git fetch "$R" ""` operating on the wrong ref
+— is closed the other way: the verb never emits an empty line, because on failure it emits no
+line at all and a non-zero status the shell caller must check (`D="$(conductor default-branch)"
+|| exit 1`).
 """
 
 from __future__ import annotations
@@ -88,8 +98,21 @@ def _git_default() -> str | None:
     return target[len(prefix) :] or None
 
 
+class DefaultBranchUnresolvable(RuntimeError):
+    """No authoritative probe could name the repository's default branch.
+
+    Raised instead of returning a guess. Callers must propagate the refusal: nothing that
+    consumes a default branch (fetch base, merge base, final-PR base, protection probe) has a
+    safe thing to do without one."""
+
+
 def default_branch() -> str:
-    """The repo's default branch; ANY failure or empty result fails open to `main`."""
+    """The repo's default branch, from authoritative remote metadata only — fail CLOSED.
+
+    Tries `gh repo view` (server truth), then the `refs/remotes/<remote>/HEAD` symbolic ref.
+    If neither answers, raises `DefaultBranchUnresolvable` naming both probes. NEVER
+    substitutes a literal (`main`/`master`/anything): A-DH-6 forbids a fallback default, and a
+    wrong-but-plausible branch name is undetectable downstream."""
     for probe in (_gh_default, _git_default):
         try:
             name = probe()
@@ -97,13 +120,19 @@ def default_branch() -> str:
             name = None
         if name:
             return name
-    return "main"
+    raise DefaultBranchUnresolvable(
+        "unresolvable-default-branch: neither `gh repo view --json defaultBranchRef` nor the "
+        "refs/remotes/<remote>/HEAD symbolic ref could name this repository's default branch. "
+        "Refusing rather than substituting a fallback name. Fix the repository's remote "
+        "metadata (authenticate `gh`, or run `git remote set-head <remote> -a`) and retry."
+    )
 
 
 _USAGE = (
     "usage:\n"
     "  conductor run-branch name <spec.md>   emit the canonical conductor/run-<slug>\n"
-    "  conductor default-branch              emit the repo default (fail-open: main)\n"
+    "  conductor default-branch              emit the repo default (fail-closed: refuses,\n"
+    "                                        printing nothing, when it cannot be resolved)\n"
 )
 
 
@@ -115,7 +144,15 @@ def main(argv: list[str]) -> int:
         print(run_branch_name(argv[1]))
         return 0
     if argv and argv[0] == "default":
-        print(default_branch())
+        try:
+            name = default_branch()
+        except DefaultBranchUnresolvable as exc:
+            # stdout stays EMPTY — not an empty line. A shell caller doing
+            # D="$(conductor default-branch)" gets "" plus a non-zero status to check;
+            # printing a blank line here would look like a resolved value to `read`.
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(name)
         return 0
     print(_USAGE, file=sys.stderr, end="")
     return 64
