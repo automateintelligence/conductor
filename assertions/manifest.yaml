@@ -93,7 +93,7 @@ assertions:
     level: spec
     kind: contract
   - id: a10-default-branch-never-empty
-    claim: "conductor default-branch prints one non-empty line; on resolution failure exactly 'main'"
+    claim: "conductor default-branch prints one non-empty line naming the resolved default and nothing else; on resolution failure it refuses (non-zero, byte-empty stdout, cause named on stderr) and never substitutes a literal fallback"
     command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/self_enforcement/test_a10_default_branch.py"
     setup: ""
     teardown: ""

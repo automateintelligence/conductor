@@ -93,10 +93,11 @@ trap this spec exists to kill. Every assertion below is written to fail if the i
 - **Kind:** contract.
 
 ## A10 — default-branch-never-empty
-- **Claim:** `conductor default-branch` always prints a non-empty branch name; on resolution failure it prints `main`.
-- **Setup:** a normal repo, and a simulated `gh`/`git` resolution failure.
-- **Observation:** stdout is non-empty in both cases; on the failure path stdout is exactly `main`. It MUST NOT print an empty line.
+- **Claim:** `conductor default-branch` prints a branch name only when it resolved one from authoritative remote metadata: exactly one non-empty line and exit 0, or — on resolution failure — a refusal with byte-empty stdout, a non-zero exit, and the cause named on stderr. It never substitutes a literal fallback.
+- **Setup:** a repo whose real default is `trunk` (so a hard-coded literal cannot pass by luck), and the same repo with `gh` and the `origin/HEAD` symbolic ref both unable to answer.
+- **Observation:** resolvable → exit 0 and stdout exactly `trunk`; unresolvable → non-zero exit, stdout byte-empty, stderr naming default-branch resolution. Swept across both configurations, stdout has no third shape. It MUST NOT print an empty line, and MUST NOT print `main`/`master` as the answer on the failure path.
 - **Kind:** property.
+- **Re-derived 2026-08-21** (dual-host design §"Branch, worktree, and pull-request model" / A-DH-6: "If the default branch cannot be resolved, every automated merge is refused; there is no fallback default"). The original claim's fail-open half — "on resolution failure it prints `main`" — is exactly what A-DH-6 forbids; the never-empty half is retained and tightened (byte-empty, not a blank line), and the never-a-literal-fallback clause is added. Strictly stronger: every configuration the old form rejected, this one still rejects.
 
 ## A11 — run-branch-name-deterministic
 - **Claim:** `conductor run-branch name <spec>` is deterministic and canonical.

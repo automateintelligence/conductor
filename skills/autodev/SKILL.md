@@ -40,8 +40,11 @@ step 3b's terminal crontab removal.
    assume `origin`** — it derives the remote from the repo URL (many repos use `github`), matching
    what `merge-gate` uses; a hardcoded `origin` fails the fetch/merge on those repos.
 1b. **KEEP THE RUN BRANCH CURRENT (every fire, before anything else builds).** On the run
-   branch, with `R="$(conductor remote)"` and `D="$(conductor default-branch)"` (the
-   single-sourced default-branch resolver): `git fetch "$R" "$D" && git merge "$R/$D"`
+   branch, with `R="$(conductor remote)"` and `D="$(conductor default-branch)" || HALT` (the
+   single-sourced default-branch resolver — it FAILS CLOSED: it prints nothing and exits
+   non-zero when the repo's default cannot be resolved from remote metadata, so you MUST check
+   the status and HALT/escalate rather than continue with an empty `$D`, which would make
+   `git fetch "$R" ""` operate on the wrong ref): `git fetch "$R" "$D" && git merge "$R/$D"`
    (MERGE, never rebase — a
    shared integration branch's history is load-bearing; phase branches may rebase, the run
    branch never does). Conflicts get resolved NOW, by you, in this small increment — or
@@ -66,7 +69,8 @@ step 3b's terminal crontab removal.
    **3a. OPEN THE FINAL OWNER PR (run topology only — skip when no run branch is configured).**
    Verify the run branch is not behind the default branch (step 1b just merged; re-check).
    Generate the review packet — `conductor run-packet <run-branch> > /tmp/packet.md` — then,
-   with `D="$(conductor default-branch)"`,
+   with `D="$(conductor default-branch)" || HALT` (fail-closed — an unresolved default means
+   NO final PR is opened; never guess a base),
    `gh pr create --base "$D" --head <run-branch> --body-file /tmp/packet.md`, title
    "Conductor run complete: <spec-slug> — owner review", and assign the owner. **NEVER merge
    this PR — not with merge-gate ok, not with --admin, not at all.** It is the owner's single
