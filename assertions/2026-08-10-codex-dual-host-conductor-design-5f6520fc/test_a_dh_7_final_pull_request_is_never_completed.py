@@ -260,6 +260,11 @@ def _invocations(sweep: Sweep) -> dict[str, list[list[str]]]:
         "run": [["list"], ["show", "--run", sweep.run_key]],
         "gate-dir": [[sweep.spec_relpath]],
         "gate": [["verify"], ["lint"]],
+        # Read-only relocation scan. It is swept for the same reason every other verb is:
+        # the prohibition is on ANY registered verb completing the final pull request, and
+        # a verb nobody sweeps is a hole whatever its intent. `--checkout` is the sweep's
+        # own work tree, so the scan never reads the real one.
+        "doctor": [["relocation", "--checkout", work]],
         # The four verbs the assertion spec names that `bin/conductor` does not register yet.
         # Their argument shape is the design spec's own (`conductor finish --run <run-key>`,
         # `conductor resume --run <run-key>`), so they join the sweep the moment Plan 05
