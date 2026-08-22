@@ -189,6 +189,15 @@ def _read_crontab() -> str:
     )
 
 
+def read_crontab() -> str:
+    """The installed crontab, for READERS outside this module.
+
+    `conductor.doctor` has to ask what is scheduled without acquiring any right to write it, and
+    a second `crontab -l` implementation elsewhere is how "no crontab for this user" starts being
+    read as a failure in one place and as emptiness in another. One reader, one absence rule."""
+    return _read_crontab()
+
+
 def _write_crontab(lines: list[str]) -> int:
     """Replace the user crontab via `crontab -`."""
     body = "\n".join(lines) + "\n" if lines else ""
