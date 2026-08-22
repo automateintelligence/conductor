@@ -44,6 +44,15 @@ _FAILURE_MARKERS = (
     "driver-unresolved",
     "plugin-list-timeout",
     "plugin-root-unverified",
+    # The fire's own silence bound expiring. It is written BETWEEN `fire-start` and
+    # `fire-end rc=`, so `fire-end rc=124|137` would also be seen — but only the marker says
+    # WHICH failure it was, and only the marker survives a driver killed before it could write
+    # its `fire-end` line at all.
+    "fire-timeout",
+    # The fire ran with no supervisor because `ps` did not resolve, so nothing bounded it. That
+    # is the pre-fix behaviour, deliberately degraded to rather than a false kill — and it is a
+    # stall waiting to happen, so status has to see it.
+    "fire-unsupervised",
 )
 # Only this many trailing log lines are considered "the recent tail" — the recency
 # window does the real filtering; this just bounds work on a long-lived log.

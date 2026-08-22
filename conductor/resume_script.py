@@ -41,7 +41,7 @@ from conductor.hosts import base, runhost
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and the
 # `conductor:start` skill's reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 6
+TEMPLATE_VERSION = 8
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
@@ -240,6 +240,162 @@ def uninstall_cron(project: str) -> int:
     return _write_crontab(kept)
 
 
+#: The CPU half of the fire's progress token, as an awk program over ``ps -eo pgid=,time=``.
+#: Sums the whole seconds of CPU consumed by EVERY process in one process group. Whole seconds
+#: is the honest resolution and not a rounding compromise: what this feeds is the question "did
+#: the fire do ANY work in the last window", and `ps` reports CPU in seconds on every platform
+#: Conductor supports. Kept as its own constant because the driver template is an f-string and
+#: awk is nothing but braces.
+_FIRE_CPU_AWK = (
+    '$1 == g { gsub(/-/, ":", $2); n = split($2, f, ":"); s = 0; '
+    "for (i = 1; i <= n; i++) s = s * 60 + f[i]; t += s } "
+    "END { print t + 0 }"
+)
+
+
+def fire_supervision_prologue() -> str:
+    """Everything the fire watchdog needs, emitted just BEFORE the fire is launched.
+
+    WHY A SILENCE BOUND AND NOT A CEILING. The fire holds `.conductor/resume.lock` for its
+    whole life, so a host that never answers holds it forever: every later twenty-minute tick
+    fails `flock -n` and exits 0, and a permanently blocked run writes exactly the log a
+    healthy idle one writes. The obvious fix — `timeout -k G T` around the fire, the shape
+    `plugin_list_lookup` uses — cannot be applied here, and that is a fact about the workload
+    rather than a preference: a legitimate phase runs for HOURS (one live fire in this
+    project's own log ran 2h58m and wrote nothing at all until its final second), so a T short
+    enough for an operator to act on kills working phases and a T long enough to be safe
+    bounds nothing anyone will ever see. A LONG fire and a DEAD fire are what have to be told
+    apart, and elapsed time cannot tell them apart at any value of T.
+
+    So the fire is bounded on SILENCE. Progress is sampled as the whole seconds of CPU burned
+    by every process in the fire's process group PLUS the bytes the fire has appended to the
+    driver log, and either one moving resets the clock. The two signals are OR-ed because the
+    hosts are silent in different ways: a headless Claude prints nothing for hours but is a
+    node runtime burning CPU throughout, while `codex exec` streams its events to the log from
+    the first seconds. A fire showing neither is not working.
+
+    ``set -m`` is load-bearing twice over, not a style choice: without its own process group
+    the fire would share this driver's, the sampler would read this driver's own polling as
+    the worker's progress and stamp it alive forever, and the kill below could not reach the
+    worker's descendants.
+    """
+    return (
+        "# --- FIRE SUPERVISION --------------------------------------------------------------\n"
+        "# The bound on the fire is SILENCE, never elapsed time. A real phase runs for hours and\n"
+        "# a headless Claude writes nothing to this log until its last second, so a wall-clock\n"
+        "# ceiling either kills working phases or bounds nothing. Progress = whole seconds of CPU\n"
+        "# burned by every process in the fire's process group + bytes the fire appended to this\n"
+        "# log; either moving resets the clock:\n"
+        "#   FIRE_STARTUP  no progress AT ALL this long after launch = it never started (blocked\n"
+        "#                 before doing any work; a host subcommand waiting on stdin is the known\n"
+        "#                 instance). This is what catches a host that never answers.\n"
+        "#   FIRE_IDLE     no progress this long AFTER some = it stopped. Much longer, because it\n"
+        "#                 has proven it works and killing a live phase costs an hour of real work.\n"
+        "# The values are `conductor.hosts.base`'s, beside the plugin-lookup bound: the host layer\n"
+        "# declares what it will wait for a host process to do, this script enforces one of them.\n"
+        f"FIRE_STARTUP={base.FIRE_STARTUP_TIMEOUT_S}\n"
+        f"FIRE_IDLE={base.FIRE_IDLE_TIMEOUT_S}\n"
+        f"FIRE_GRACE={base.FIRE_KILL_GRACE_S}\n"
+        f"FIRE_POLL={base.FIRE_POLL_S}\n"
+        "# `ps` is how CPU is attributed. With no `ps` the only progress signal left is output,\n"
+        "# and a healthy Claude fire produces none for hours — so an unresolvable `ps` degrades to\n"
+        "# an UNSUPERVISED fire that SAYS SO in the log (a marker `conductor driver status` reads)\n"
+        "# rather than to a watchdog that would kill every working phase on that machine.\n"
+        'FIRE_PS="$(command -v ps || true)"\n'
+        'FIRE_LOG0="$(wc -c < "$LOG" 2>/dev/null || printf 0)"\n'
+        "fire_progress() {\n"
+        "    # $1 = the fire's process-group id. One token; any change in it is progress.\n"
+        '    fire_cpu="$("$FIRE_PS" -eo pgid=,time= 2>/dev/null | awk -v g="$1" \''
+        + _FIRE_CPU_AWK
+        + "')\"\n"
+        "    printf '%s/%s' \"${fire_cpu:-0}\" "
+        '"$(wc -c < "$LOG" 2>/dev/null || printf 0)"\n'
+        "}\n"
+        "# The fire gets its OWN process group: the sampler must not read this driver's polling as\n"
+        "# the worker's progress, and the kill must reach the worker's whole tree.\n"
+        "set -m"
+    )
+
+
+def fire_watchdog(h: base.HostAdapter) -> str:
+    """The supervision loop, emitted just AFTER the fire is launched in the background.
+
+    Sets ``rc`` — the worker's own status when it finished on its own, and `timeout`'s
+    vocabulary when it did not: 124 for an expiry the TERM settled, 137 for one that needed the
+    KILL. Those are the same two values `plugin_list_lookup` already logs, so the log speaks one
+    expiry vocabulary rather than two.
+
+    The report line is the failure report §"Failure handling" requires, minus one field this
+    layer does not have. It names the operation, the executable, which of the two windows
+    expired, how long the fire actually ran, how many bytes it wrote, and the exact inspect and
+    recovery commands. It does NOT name a run key: the driver is handed a project root and a
+    worktree and nothing else, and inventing an identifier here to satisfy a reader would be
+    worse than the honest omission.
+    """
+    bin_var = f'"${h.BIN_VAR}"'
+    return (
+        "# If this DRIVER is signalled, take the worker down with it: `set -m` moved the fire out\n"
+        "# of this process group, so it would otherwise outlive the driver holding the lock.\n"
+        "trap 'kill -TERM -\"$FIRE_PID\" 2>/dev/null || true; exit 143' TERM INT HUP\n"
+        'if [ -z "$FIRE_PS" ]; then\n'
+        "    printf '%s fire-unsupervised reason=no-ps bin=%s\\n' \"$(ts)\" "
+        f"{bin_var}"
+        ' >> "$LOG"\n'
+        '    wait "$FIRE_PID"\n'
+        "    rc=$?\n"
+        "else\n"
+        "    fire_started=$SECONDS\n"
+        "    fire_sampled=$SECONDS\n"
+        '    fire_mark="$(fire_progress "$FIRE_PID")"\n'
+        "    fire_deadline=$(( SECONDS + FIRE_STARTUP ))\n"
+        "    fire_limit=$FIRE_STARTUP\n"
+        '    fire_rc=""\n'
+        '    while kill -0 "$FIRE_PID" 2>/dev/null; do\n'
+        "        # One-second steps so a fire that finishes is noticed at once, but SAMPLED only\n"
+        "        # every FIRE_POLL: `ps -e` walks the whole process table and a phase runs for\n"
+        "        # hours. Polling the sampler every second would be the more expensive half of\n"
+        "        # this driver.\n"
+        "        sleep 1\n"
+        '        [ $(( SECONDS - fire_sampled )) -ge "$FIRE_POLL" ] || continue\n'
+        "        fire_sampled=$SECONDS\n"
+        '        fire_now="$(fire_progress "$FIRE_PID")"\n'
+        '        if [ "$fire_now" != "$fire_mark" ]; then\n'
+        '            fire_mark="$fire_now"\n'
+        "            fire_deadline=$(( SECONDS + FIRE_IDLE ))\n"
+        "            fire_limit=$FIRE_IDLE\n"
+        '        elif [ "$SECONDS" -ge "$fire_deadline" ]; then\n'
+        "            # TERM first, then KILL: a bound expressed only as a TERM is not a bound,\n"
+        "            # because a child that traps or ignores it keeps running and its supervisor\n"
+        "            # keeps waiting. 124 = the TERM settled it, 137 = the KILL had to.\n"
+        "            printf '%s fire-timeout op=worker-dispatch bin=%s silent=%ss elapsed=%ss "
+        "wrote: log=+%sB worktree=unknown inspect: git -C %s status --short "
+        "recover: %s driver status --project %s\\n' \\\n"
+        f'                "$(ts)" {bin_var} '
+        '"$fire_limit" "$(( SECONDS - fire_started ))" \\\n'
+        '                "$(( $(wc -c < "$LOG" 2>/dev/null || printf 0) - FIRE_LOG0 ))" \\\n'
+        '                "$WORKTREE" "$CONDUCTOR" "$PROJECT" >> "$LOG"\n'
+        '            kill -TERM -"$FIRE_PID" 2>/dev/null || kill -TERM "$FIRE_PID" 2>/dev/null || true\n'
+        '            sleep "$FIRE_GRACE"\n'
+        '            if kill -0 "$FIRE_PID" 2>/dev/null; then\n'
+        '                kill -KILL -"$FIRE_PID" 2>/dev/null || kill -KILL "$FIRE_PID" 2>/dev/null || true\n'
+        "                fire_rc=137\n"
+        "            else\n"
+        "                fire_rc=124\n"
+        "            fi\n"
+        '            wait "$FIRE_PID" 2>/dev/null || true\n'
+        "            break\n"
+        "        fi\n"
+        "    done\n"
+        '    if [ -n "$fire_rc" ]; then\n'
+        "        rc=$fire_rc\n"
+        "    else\n"
+        '        wait "$FIRE_PID"\n'
+        "        rc=$?\n"
+        "    fi\n"
+        "fi"
+    )
+
+
 def render(project: str, worktree: str, host: str | None = None) -> str:
     """The Tier-B driver script, deterministic in (project, worktree, host). project = the owner
     main-checkout root (lock + log live there, shared across drivers); worktree = the run
@@ -353,8 +509,11 @@ for arg in "$@"; do
     prev="$arg"
 done
 printf '%s fire-start posture=%s\\n' "$(ts)" "$POSTURE" >> "$LOG"
-{h.resume_fire_command()} >> "$LOG" 2>&1
-rc=$?
+{fire_supervision_prologue()}
+{h.resume_fire_command()} >> "$LOG" 2>&1 &
+FIRE_PID=$!
+set +m
+{fire_watchdog(h)}
 printf '%s fire-end rc=%s\\n' "$(ts)" "$rc" >> "$LOG"
 exit "$rc"
 """

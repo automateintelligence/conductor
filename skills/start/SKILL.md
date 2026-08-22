@@ -262,8 +262,10 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      `conductor driver status`: it exits non-zero when the durable driver is missing (printing
      why, with the install command) or when recent fires in
      `<main-root>/.conductor/resume-autodev.log` show `driver-unresolved`, `plugin-list-timeout`
-     (a Codex plugin lookup cut off at its bound — logged before the fire ever starts) or
-     `fire-end rc=` non-zero (the generated driver logs all three) — those offending log lines are NAMED verbatim.
+     (a Codex plugin lookup cut off at its bound — logged before the fire ever starts),
+     `fire-timeout` (the fire showed no progress for its whole silence window and was killed),
+     `fire-unsupervised` (no `ps` on the machine, so nothing bounded the fire) or
+     `fire-end rc=` non-zero (the generated driver logs all five) — those offending log lines are NAMED verbatim.
      On a non-zero status, WARN the owner loudly — the run has been failing to make
      headless progress. (The driver already fails loud per-fire; the tested status command makes
      a repeated failure visible at the next owner check-in instead of accumulating unnoticed.)
