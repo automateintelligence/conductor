@@ -41,7 +41,7 @@ from conductor.hosts import base, runhost
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and the
 # `conductor:start` skill's reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 8
+TEMPLATE_VERSION = 9
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
@@ -116,6 +116,19 @@ def main_root(path: str) -> str:
 #: stuck holder rather than a busy one, and waiting behind it forever is the failure this whole
 #: path exists to avoid.
 INSTALL_LOCK_TIMEOUT_S = 30.0
+
+#: How long the expiry report may spend asking the resolved conductor WHICH run this driver is
+#: firing for, and how long between the TERM that asks that lookup to stop and the KILL that
+#: makes it.
+#:
+#: Small on purpose, and both halves are load-bearing. The question is answered from
+#: project-local state, it is asked only on the expiry path, and its answer is printed BEFORE the
+#: stuck worker is signalled — so a lookup that hangs delays the very kill it is annotating and
+#: makes an already-degraded path worse. The escalation is `conductor.hosts.codex`'s discipline
+#: rather than a second one: a bound expressed only as a TERM is not a bound, because a child
+#: that traps or ignores the signal keeps running and its supervisor keeps waiting.
+RUN_LOOKUP_TIMEOUT_S = 10
+RUN_LOOKUP_KILL_GRACE_S = 5
 
 
 def driver_script_path(root: str) -> str:
@@ -325,12 +338,27 @@ def fire_watchdog(h: base.HostAdapter) -> str:
     KILL. Those are the same two values `plugin_list_lookup` already logs, so the log speaks one
     expiry vocabulary rather than two.
 
-    The report line is the failure report §"Failure handling" requires, minus one field this
-    layer does not have. It names the operation, the executable, which of the two windows
-    expired, how long the fire actually ran, how many bytes it wrote, and the exact inspect and
-    recovery commands. It does NOT name a run key: the driver is handed a project root and a
-    worktree and nothing else, and inventing an identifier here to satisfy a reader would be
-    worse than the honest omission.
+    The report line is the failure report §"Failure handling" requires. It names WHICH RUN
+    stalled, the operation, the executable, which of the two windows expired, how long the fire
+    actually ran, how many bytes it wrote, and the exact inspect and recovery commands.
+
+    THE RUN IDENTITY IS RESOLVED, NEVER ASSERTED. The driver has more than ``$PROJECT`` and
+    ``$WORKTREE``: it has ``$CONDUCTOR``, a conductor bin it has already resolved and proved
+    executable, and ``conductor run resolve`` is the single definition of which run an invocation
+    means (``conductor/core/resolve.py``) — so the driver asks it the same question an operator
+    would ask from the same shell, rather than deriving a second answer of its own. A project
+    that has no registered run to resolve still has the durable name every run is created with,
+    ``<project>/.conductor/run_branch``, and the report says WHICH of the two it got:
+    ``run_key=`` is a registry-resolved key, ``run_branch=`` is the branch file. They are
+    different facts and are never printed under one label.
+
+    When neither answers, the line carries no run identity at all. A constant ``run_key=unknown``
+    would satisfy a reader scanning for the field while telling them nothing, which is worse than
+    the honest omission this line used to make for want of anything to resolve.
+
+    The lookup is BOUNDED (``RUN_LOOKUP_TIMEOUT_S``) and skipped outright on a machine with no
+    ``timeout`` binary. It runs on an already-degraded path and BEFORE the TERM, so an unbounded
+    one would postpone the termination of a stuck worker to annotate the log about it.
     """
     bin_var = f'"${h.BIN_VAR}"'
     return (
@@ -364,13 +392,40 @@ def fire_watchdog(h: base.HostAdapter) -> str:
         "            fire_deadline=$(( SECONDS + FIRE_IDLE ))\n"
         "            fire_limit=$FIRE_IDLE\n"
         '        elif [ "$SECONDS" -ge "$fire_deadline" ]; then\n'
+        "            # WHICH RUN stalled, asked of the resolver that owns that question rather\n"
+        "            # than derived here. Bounded, because this is printed BEFORE the worker is\n"
+        "            # signalled and a lookup that hangs would postpone the kill it annotates; a\n"
+        "            # machine with no `timeout` skips it rather than trading a stall for a\n"
+        "            # worse one. Nothing is printed unless a value really came back.\n"
+        '            fire_run=""\n'
+        '            fire_bound="$(command -v timeout || command -v gtimeout || true)"\n'
+        '            if [ -n "$fire_bound" ] && [ -x "${CONDUCTOR:-}" ]; then\n'
+        f'                fire_key="$("$fire_bound" -k {RUN_LOOKUP_KILL_GRACE_S} '
+        f"{RUN_LOOKUP_TIMEOUT_S} \\\n"
+        '                    "$CONDUCTOR" run resolve --project "$PROJECT" '
+        '</dev/null 2>/dev/null)"\n'
+        "                # One safe name segment or nothing (conductor.core.names\n"
+        "                # .is_safe_segment): a conductor that writes anything else to stdout\n"
+        "                # must not have it logged as this run's identity.\n"
+        '                case "$fire_key" in ""|*[!a-z0-9._-]*) fire_key="" ;; esac\n'
+        '                [ -z "$fire_key" ] || fire_run=" run_key=$fire_key"\n'
+        "            fi\n"
+        "            # No registered run to resolve — fall back to the durable name every run is\n"
+        "            # created with. A bash `read`, so the fallback costs no process at all on a\n"
+        "            # path that is already failing. Labelled for what it is: a branch, not a key.\n"
+        '            if [ -z "$fire_run" ] && [ -r "$PROJECT/.conductor/run_branch" ]; then\n'
+        '                fire_branch=""\n'
+        '                read -r fire_branch < "$PROJECT/.conductor/run_branch" || true\n'
+        '                case "$fire_branch" in ""|*[!a-z0-9./_-]*) fire_branch="" ;; esac\n'
+        '                [ -z "$fire_branch" ] || fire_run=" run_branch=$fire_branch"\n'
+        "            fi\n"
         "            # TERM first, then KILL: a bound expressed only as a TERM is not a bound,\n"
         "            # because a child that traps or ignores it keeps running and its supervisor\n"
         "            # keeps waiting. 124 = the TERM settled it, 137 = the KILL had to.\n"
-        "            printf '%s fire-timeout op=worker-dispatch bin=%s silent=%ss elapsed=%ss "
+        "            printf '%s fire-timeout%s op=worker-dispatch bin=%s silent=%ss elapsed=%ss "
         "wrote: log=+%sB worktree=unknown inspect: git -C %s status --short "
         "recover: %s driver status --project %s\\n' \\\n"
-        f'                "$(ts)" {bin_var} '
+        f'                "$(ts)" "$fire_run" {bin_var} '
         '"$fire_limit" "$(( SECONDS - fire_started ))" \\\n'
         '                "$(( $(wc -c < "$LOG" 2>/dev/null || printf 0) - FIRE_LOG0 ))" \\\n'
         '                "$WORKTREE" "$CONDUCTOR" "$PROJECT" >> "$LOG"\n'

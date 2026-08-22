@@ -1981,13 +1981,23 @@ sys.exit({rc})
 """
 
 
-def _mk_fire_harness(tmp, fire_text, *, ps=True):
+#: The `conductor` this harness puts on the driver's PATH by default. `exit 1` is the done-gate
+#: probe answering NOT-green, which is what lets the fire happen at all.
+_STUB_CONDUCTOR = "#!/bin/sh\nexit 1\n"
+
+
+def _mk_fire_harness(tmp, fire_text, *, ps=True, conductor_text=_STUB_CONDUCTOR):
     """A project whose `claude` is ``fire_text``, wired the way `_mk_env_harness` wires one.
 
     ``ps=False`` is a machine with no `ps` binary. It cannot be produced by hiding one from
     ``PATH`` — the driver re-adds `/usr/bin:/bin` before resolving anything, which is exactly
     how the plugin lookup's no-`timeout` branch came to be the one that ran with no ceiling —
     so the PATH-repair line itself is repointed at a directory holding everything BUT `ps`.
+
+    ``conductor_text`` is the `conductor` the driver resolves. The default answers every verb
+    non-green; the run-identity tests below hand it one that delegates `conductor run` to the
+    REAL CLI, so what resolves the run key is the product's own resolver over real run state and
+    not a scripted answer.
     """
     project = tmp / "proj"
     worktree = tmp / "wt"
@@ -2001,9 +2011,7 @@ def _mk_fire_harness(tmp, fire_text, *, ps=True):
     fire.write_text(fire_text)
     os.chmod(fire, 0o755)
     stub_conductor = bindir / "conductor"
-    stub_conductor.write_text(
-        "#!/bin/sh\nexit 1\n"
-    )  # gate not green -> proceed to the fire
+    stub_conductor.write_text(conductor_text)
     os.chmod(stub_conductor, 0o755)
     text = rs.render(str(project), str(worktree))
     if not ps:
@@ -2300,3 +2308,199 @@ def test_the_fire_runs_in_its_own_process_group(tmp_path, short_fire_bounds):
     # for. The exclusion is structural: the sampler sums one process group and the fire has
     # its own.
     assert driver_pgid != pgid, (driver_pgid, pgid)
+
+
+# ---- the expiry report names WHICH RUN stalled -----------------------------------------------
+#
+# §"Failure handling" requires every actionable failure to report the run key. `fire-timeout`
+# named the executable, the window and the worktree but never the run, so an operator reading a
+# timeout line in a project could not tell which run had stopped. The driver is not
+# identity-less: it has an already-resolved `$CONDUCTOR`, and `conductor run resolve` is the
+# single definition of which run an invocation means. What these pin is that the value is
+# RESOLVED — a run that exists is named, a run that does not is not invented, and the lookup
+# cannot outlive the kill it precedes.
+
+#: The `conductor` the run-identity tests put on the driver's PATH. `run` goes to the REAL CLI —
+#: so the run key in the log is the product's own resolver answering over real registry state —
+#: while every other verb stays the harness's non-green done-gate probe. Nothing about run
+#: identity is scripted here; the shim only decides which binary answers.
+_DELEGATING_CONDUCTOR = (
+    '#!/bin/sh\ncase "$1" in\n  run) exec {real} "$@" ;;\nesac\nexit 1\n'
+)
+
+#: A `conductor run` that traps SIGTERM and blocks forever — the lookup's own hanging host. It
+#: records its pid so the escalation to KILL can be proved rather than assumed.
+_HANGING_CONDUCTOR = """#!/usr/bin/env python3
+import os, signal, sys
+if sys.argv[1:2] != ["run"]:
+    sys.exit(1)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+with open({pids!r}, "a", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()) + "\\n")
+while True:
+    signal.pause()
+"""
+
+
+def _real_conductor_bin():
+    """This checkout's own `bin/conductor` — the CLI under test, not a copy of it."""
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(rs.__file__))),
+        "bin",
+        "conductor",
+    )
+
+
+def _git(repo, *args):
+    subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+    )
+
+
+def _register_a_run(project):
+    """Make ``project`` a repository with one registered run; return its run key.
+
+    Real `git init`, a real spec file and the real `conductor run new`, because the point of the
+    leg below is that the driver reads back an identity the product minted."""
+    _git(project.parent, "init", "-q", str(project))
+    _git(project, "config", "user.email", "t@example.invalid")
+    _git(project, "config", "user.name", "t")
+    (project / "docs" / "specs").mkdir(parents=True)
+    (project / "docs" / "specs" / "alpha.md").write_text("# alpha\n")
+    _git(project, "add", "docs/specs/alpha.md")
+    _git(project, "commit", "-qm", "spec")
+    made = subprocess.run(
+        [_real_conductor_bin(), "run", "new", "docs/specs/alpha.md"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert made.returncode == 0, made.stderr
+    return made.stdout.strip()
+
+
+def _fire_timeout_line(log):
+    lines = [ln for ln in log.splitlines() if " fire-timeout" in ln]
+    assert len(lines) == 1, log
+    return lines[0]
+
+
+def test_a_stalled_fire_names_the_run_it_was_firing_for(tmp_path, short_fire_bounds):
+    """The run key on the timeout line is the one `conductor run new` minted for this project.
+
+    Not a rendered constant and not a second derivation: the driver asks the resolved conductor
+    the same question an operator would (`conductor run resolve --project <p>`), and the key
+    compared against here is the CLI's own output from a different process."""
+    if not _which("bash") or not _which("timeout"):
+        pytest.skip("bash and coreutils timeout required")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _HANGING_FIRE.format(pids=str(tmp_path / "fire.pids")),
+        conductor_text=_DELEGATING_CONDUCTOR.format(
+            real=shlex.quote(_real_conductor_bin())
+        ),
+    )
+    run_key = _register_a_run(project)
+
+    proc, _elapsed = _fire_supervised(driver, home, pids, timeout=90)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    _reap(pids)
+
+    assert proc.returncode in (124, 137), (proc.returncode, log)
+    line = _fire_timeout_line(log)
+    assert f"run_key={run_key}" in line, line
+    # A key the resolver really minted, so a driver that printed a plausible-looking constant
+    # fails here rather than passing on shape.
+    assert run_key and run_key != "unknown", run_key
+    # ...and it did not ALSO claim the branch fallback, which is a different fact.
+    assert "run_branch=" not in line, line
+
+
+def test_a_stalled_fire_falls_back_to_the_run_branch_when_no_run_is_registered(
+    tmp_path, short_fire_bounds
+):
+    """No registry to resolve, but the durable name every run is created with is right there.
+
+    Reported as `run_branch=`, never as `run_key=`: `conductor/run-<spec-slug>` is a branch name
+    and calling it a key would be a claim the file does not support."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path, _HANGING_FIRE.format(pids=str(tmp_path / "fire.pids"))
+    )
+    (project / ".conductor" / "run_branch").write_text("conductor/run-alpha\n")
+
+    proc, _elapsed = _fire_supervised(driver, home, pids, timeout=60)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    _reap(pids)
+
+    assert proc.returncode in (124, 137), (proc.returncode, log)
+    line = _fire_timeout_line(log)
+    assert "run_branch=conductor/run-alpha" in line, line
+    assert "run_key=" not in line, line
+
+
+def test_a_stalled_fire_names_no_run_when_none_can_be_resolved(
+    tmp_path, short_fire_bounds
+):
+    """THE ANTI-LIE. Nothing to resolve — no registry, no run_branch — so the line carries no
+    run identity at all.
+
+    A `run_key=unknown` would satisfy any reader (or checker) scanning for the field while
+    telling them nothing, and it is the one outcome worse than the omission this line used to
+    make. The rest of the report survives intact: what is omitted is the value, not the line."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path, _HANGING_FIRE.format(pids=str(tmp_path / "fire.pids"))
+    )
+    proc, _elapsed = _fire_supervised(driver, home, pids, timeout=60)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    _reap(pids)
+
+    assert proc.returncode in (124, 137), (proc.returncode, log)
+    line = _fire_timeout_line(log)
+    assert "run_key" not in line, line
+    assert "run_branch" not in line, line
+    assert "op=worker-dispatch" in line and "driver status --project" in line, line
+
+
+def test_the_run_lookup_cannot_outlive_the_kill_it_annotates(
+    tmp_path, short_fire_bounds, monkeypatch
+):
+    """The lookup runs BEFORE the stuck worker is signalled, so an unbounded one would postpone
+    the termination it exists to describe.
+
+    The fake `conductor run` IGNORES SIGTERM, so a bound expressed only as a TERM is not a bound
+    here: an empty survivor census is what proves the escalation to KILL happened rather than
+    the fake having exited on its own."""
+    if not _which("bash") or not _which("timeout"):
+        pytest.skip("bash and coreutils timeout required")
+    monkeypatch.setattr(rs, "RUN_LOOKUP_TIMEOUT_S", 3)
+    monkeypatch.setattr(rs, "RUN_LOOKUP_KILL_GRACE_S", 2)
+    lookup_pids = tmp_path / "lookup.pids"
+    lookup_pids.write_text("")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _HANGING_FIRE.format(pids=str(tmp_path / "fire.pids")),
+        conductor_text=_HANGING_CONDUCTOR.format(pids=str(lookup_pids)),
+    )
+    proc, _elapsed = _fire_supervised(driver, home, pids, timeout=60)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    lookup_alive = _survivors(lookup_pids)
+    fire_alive = _survivors(pids)
+    _reap(lookup_pids)
+    _reap(pids)
+
+    assert [int(x) for x in lookup_pids.read_text().split()], (
+        "the hanging lookup never ran; nothing was measured"
+    )
+    assert lookup_alive == [], f"the run lookup survived its bound: {lookup_alive}"
+    assert proc.returncode in (124, 137), (proc.returncode, log)
+    line = _fire_timeout_line(log)
+    # An expired lookup resolved nothing, so it claims nothing...
+    assert "run_key=" not in line, line
+    # ...and the fire it was annotating was still killed.
+    assert fire_alive == [], f"the fire outlived a lookup that hung: {fire_alive}"
