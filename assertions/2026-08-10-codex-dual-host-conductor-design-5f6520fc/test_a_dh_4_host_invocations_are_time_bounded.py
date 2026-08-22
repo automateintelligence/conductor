@@ -10,6 +10,29 @@ A hang is not a failure: nothing errors, nothing reports, and an unattended fire
 owner instead of a recoverable one. ``codex --help`` hanging without stdin redirection is the
 known instance.
 
+AMENDMENT, 2026-08-22 — THE IDENTITY CLAUSE WAS NARROWED, AND WHY. Recorded here because this
+branch carries no ``<spec>.assertions.md`` to hold it (the document exists only on ``main``, in
+a lineage this branch never merged), and the narrowing must not be discoverable only from a
+diff.
+
+The Claim above governs "every Conductor-initiated host subprocess — version probe, PREFLIGHT,
+CAPABILITY CHECK, worker launch, reviewer launch", while §"Failure handling" required every
+actionable failure to report "run key and current state". Those two sentences could not both be
+satisfied. ``conductor preflight`` takes no arguments (``bin/conductor``) and
+``skills/start/SKILL.md`` runs it as STEP 0 — before the gate is written, before
+``.conductor/run_branch`` exists, before ``conductor run new``. Its job is to decide whether a
+run may start, so the identity the report demanded is the thing whose existence the probe is run
+to authorise. The same holds for the plugin capability check underneath it
+(``conductor.hosts.codex.installed_plugins``). No honest path supplies a run key to a first-start
+preflight; the only ways to green it were to invent one or to accept a report that named nothing.
+
+§"Failure handling" bullet 1 now reads: the run key and current state, WHEN THE FAILURE OCCURS
+WITHIN A RESOLVED RUN; a pre-run capability probe (version probe, preflight, plugin capability
+check) reports the HOST ID and the PROJECT ROOT in their place. The clause below is therefore
+conditional, not relaxed: which identity is demanded is decided from durable state before the
+report is read, both branches demand the ACTUAL resolved value rather than the field name, and a
+report supplying neither is refused either way. Nothing else in the Claim moved.
+
 THE ENTRY-POINT LIST IS DERIVED, NOT HAND-LISTED. Every public callable on the loaded adapter,
 plus every public module-level callable in the adapter package, PLUS the generated Tier-B cron
 driver, is invoked once against a RESPONSIVE fake host; whichever ones the fake recorded are,
@@ -53,6 +76,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+from typing import Callable
 
 import pytest
 
@@ -87,11 +111,99 @@ TIMEOUT_REPORT = re.compile(
     r"did not answer within|timed out|timeout|TimeoutExpired|DispatchTimeout", re.I
 )
 
+#: The run identity the driver fixture makes resolvable, written as the durable name every run
+#: is created with (``<project>/.conductor/run_branch``, the fallback ``resume_script
+#: .fire_watchdog`` reads when the registry has nothing). Seeded rather than assumed, so the
+#: RUN-SCOPED branch of the identity clause below is measured against a real resolved run: in a
+#: fixture with no run at all the worker launch would answer the PRE-RUN branch and never be
+#: asked for a run identity again, which is the weakening this amendment must not become.
+FIXTURE_RUN_BRANCH = "conductor/run-a-dh-4-0000000f"
+
+
+def resolved_run_identity(project: str) -> str | None:
+    """WHICH RUN a failure under ``project`` occurs within, or ``None`` when it occurs within no
+    run at all — asked of the PRODUCT's own resolvers in the driver's own order (the registry
+    first, then the durable run-branch name), so this reads the same durable state the report is
+    required to name rather than forming a second opinion about it.
+
+    The ambient ``$CONDUCTOR_*`` of whatever shell ran the gate is stripped: with
+    ``CONDUCTOR_HOME`` still pointing at the real checkout, ``run resolve`` would answer about
+    THAT project's live run, and every scratch directory in this sweep would come back
+    run-scoped against a run it has nothing to do with.
+    """
+    environ = {k: v for k, v in os.environ.items() if not k.startswith("CONDUCTOR_")}
+    environ["CONDUCTOR_HOME"] = project
+    try:
+        proc = subprocess.run(
+            [str(ROOT / "bin" / "conductor"), "run", "resolve", "--project", project],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+            check=False,
+            env=environ,
+        )
+    except (OSError, subprocess.SubprocessError):
+        proc = None
+    if proc is not None and proc.returncode == 0 and proc.stdout.strip():
+        return proc.stdout.strip()
+    try:
+        with open(
+            os.path.join(project, ".conductor", "run_branch"), encoding="utf-8"
+        ) as handle:
+            recorded = handle.readline().strip()
+    except OSError:
+        return None
+    return recorded or None
+
+
+def _labelled(fields: str, value: str) -> re.Pattern[str]:
+    """``<field>=<value>`` for one of ``fields``, carrying the ACTUAL value.
+
+    The value, never the label alone. A recogniser satisfied by the field name accepts
+    ``run_key=unknown`` and a bare ``state=``, which name nothing and are exactly the report a
+    stuck run produces when somebody made the clause go green. The trailing guard stops a value
+    matching a prefix of a longer path or key.
+    """
+    return re.compile(rf"\b(?:{fields})\s*[=:]\s*{re.escape(value)}(?![\w./-])", re.I)
+
+
+def _reports_its_identity(result: Result) -> bool:
+    """§"Failure handling" bullet 1, AS AMENDED 2026-08-22 — see this module's docstring.
+
+    CONDITIONAL, NOT RELAXED. Which identity is required is decided from the scope the failure
+    occurred in, resolved from durable state BEFORE the report is read, so neither branch can be
+    chosen by the report itself:
+
+    * inside a resolved run — the run key or run branch, and the one this fixture actually
+      resolved, so a report that drops it or substitutes a constant fails;
+    * a pre-run capability probe, which by construction has no run to name — the host id AND
+      the project root, both of them, each as a labelled field carrying its real value. Either
+      one alone is not an identity, and ``codex`` appearing inside ``codex plugin list`` is not
+      the host being named.
+
+    A report that supplies neither is refused on both branches.
+    """
+    if result.run_identity is not None:
+        return bool(
+            _labelled(
+                r"run[ _-]?key|run[ _-]?branch|current state|state", result.run_identity
+            ).search(result.output)
+        )
+    return bool(
+        _labelled(r"host(?:[ _-]?id)?", result.host_id).search(result.output)
+    ) and bool(
+        _labelled(r"project(?:[ _-]?root)?", result.project_root).search(result.output)
+    )
+
+
 #: The four things §"Failure handling" requires of an actionable failure, as recognisers over
-#: the report text. The run key and the state are one clause; the rest are their own.
-ACTIONABLE_CLAUSES = {
-    "the run key or current state": re.compile(
-        r"run[ _-]?key|current state|state=", re.I
+#: the report text. The identity is one clause — a predicate rather than a regex, because after
+#: the 2026-08-22 amendment WHICH identity it requires depends on the scope of the failure and
+#: not on the words in the report; the rest are their own, and are unchanged.
+ACTIONABLE_CLAUSES: dict[str, re.Pattern[str] | Callable[[Result], bool]] = {
+    "the run key or current state, or a pre-run probe's host id and project root": (
+        _reports_its_identity
     ),
     "the failed operation": re.compile(
         r"--version|plugin list|exec|dispatch|probe", re.I
@@ -151,6 +263,11 @@ from conductor.hosts import base
 adapter = base.load(HOST)
 project = SCRATCH / "project"
 project.mkdir(parents=True, exist_ok=True)
+# The project this child declares and the directory it is standing in are the same one, so an
+# entry point that takes a project root and one that falls back to the process's own cwd report
+# the same path. Checked rather than assumed: if these ever drift, the pre-run identity clause
+# would be looking for a project root no entry point was ever given.
+assert str(project) == os.getcwd(), (str(project), os.getcwd())
 
 BANK = {
     "adapter": adapter,
@@ -237,6 +354,26 @@ class Result:
         self.wall = 0.0
         self.expired = False
         self.spawned = False
+        #: The SCOPE this entry point ran in, which decides which identity §"Failure handling"
+        #: requires of its report. Both are facts about the fixture, set by whichever `run`
+        #: built it, and neither is read out of the report they are used to judge.
+        self.host_id = ""
+        self.project_root = ""
+        self._run_identity: str | None = None
+        self._run_identity_resolved = False
+
+    @property
+    def run_identity(self) -> str | None:
+        """The run this entry point's failure occurred within, or ``None`` for a pre-run probe.
+
+        Resolved lazily and once: only the hanging sweep's reports are judged, so resolving it
+        eagerly would run the product's resolver against every candidate the enumeration merely
+        considered.
+        """
+        if not self._run_identity_resolved:
+            self._run_identity = resolved_run_identity(self.project_root)
+            self._run_identity_resolved = True
+        return self._run_identity
 
 
 def _configured_bound() -> float:
@@ -378,6 +515,18 @@ class Harness:
             os.environ.clear()
             os.environ.update(previous)
 
+        # A RUN for the fire to be firing for. The driver resolves which run it stalled on
+        # (`conductor run resolve`, else this file — `resume_script.fire_watchdog`), and
+        # §"Failure handling" requires the report to name it; without one seeded here the
+        # worker launch would occur inside no resolved run, take the PRE-RUN branch of the
+        # identity clause, and never be asked for a run identity again. Written as the durable
+        # branch name because the registry leg needs a git repository and this fixture is a
+        # temporary directory — the same reason the product keeps that fallback at all.
+        (project / ".conductor").mkdir(parents=True, exist_ok=True)
+        (project / ".conductor" / "run_branch").write_text(
+            f"{FIXTURE_RUN_BRANCH}\n", encoding="utf-8"
+        )
+
         script = pathlib.Path(resume_script.driver_script_path(str(project)))
         render = subprocess.run(
             [
@@ -414,6 +563,8 @@ class Harness:
         log = self.logs[f"{kind}-{host_id}"]
         before = log.stat().st_size
         project, script, environ = self._seed_driver_fixture(kind, host_id)
+        result.host_id = host_id
+        result.project_root = str(project)
         started = os.times().elapsed
         try:
             proc = subprocess.run(
@@ -449,6 +600,15 @@ class Harness:
         before = log.stat().st_size
         scratch = self.workdir / f"scratch-{kind}-{host_id}-{abs(hash(entry))}"
         scratch.mkdir(parents=True, exist_ok=True)
+        # ONE project root per invocation, and the child's working directory IS it. The child
+        # declares `SCRATCH/project` as the project it is asking about, so an entry point that
+        # takes a `project_root` and one that falls back to the process's own cwd must not name
+        # two different directories — a report naming either would otherwise be right about a
+        # project this sweep never asked about.
+        project = scratch / "project"
+        project.mkdir(parents=True, exist_ok=True)
+        result.host_id = host_id
+        result.project_root = str(project)
         environ = dict(os.environ)
         environ["PATH"] = f"{self.sets[kind]}{os.pathsep}{environ['PATH']}"
         environ["HOME"] = str(scratch)
@@ -475,7 +635,7 @@ class Harness:
                 check=False,
                 start_new_session=True,
                 env=environ,
-                cwd=str(scratch),
+                cwd=str(project),
             )
             result.rc = proc.returncode
             result.output = (proc.stdout or "") + (proc.stderr or "")
@@ -649,17 +809,32 @@ def test_every_entry_point_fails_non_zero_against_a_hanging_host(host_id: str) -
 
 @pytest.mark.parametrize("host_id", base.HOST_IDS)
 def test_every_expiry_reports_actionably(host_id: str) -> None:
-    """Must-contain: a failure report naming the run key and current state, the failed
+    """Must-contain: a failure report naming its identity — the run key or state inside a
+    resolved run, the host id and project root for a pre-run capability probe — the failed
     operation, whether any write occurred, and an exact recovery command."""
     missing: dict[str, list[str]] = {}
     for entry, result in hanging_results(host_id).items():
         absent = [
             clause
-            for clause, pattern in ACTIONABLE_CLAUSES.items()
-            if not pattern.search(result.output)
+            for clause, recogniser in ACTIONABLE_CLAUSES.items()
+            if not (
+                recogniser.search(result.output)
+                if isinstance(recogniser, re.Pattern)
+                else recogniser(result)
+            )
         ]
         if absent:
             missing[entry] = absent
+    # ANTI-STUB for the amendment, and the reason it is a narrowing rather than a relaxation.
+    # The pre-run branch of the identity clause is the weaker of the two, and every entry point
+    # falls into it the moment nothing resolves a run — a broken resolver, an unseeded fixture,
+    # a renamed state file. That would leave this clause green with the run-scoped requirement
+    # deleted, so the sweep is required to have exercised it.
+    if not any(result.run_identity for result in hanging_results(host_id).values()):
+        missing["<the sweep itself>"] = [
+            "no entry point ran inside a resolved run, so the run-scoped branch of the "
+            "identity clause was never exercised and only its pre-run branch was measured"
+        ]
     report = "\n".join(f"  {entry}: missing {gaps}" for entry, gaps in missing.items())
     assert not missing, f"unactionable expiry reports from {host_id}:\n{report}"
 

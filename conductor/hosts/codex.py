@@ -26,6 +26,12 @@ from conductor.hosts import base, discovery
 #: truth §"Session and config isolation"), so this is the Codex config root unconditionally.
 CONFIG_DIR_ENV = "CODEX_HOME"
 
+#: This module's host id, declared once. The module-level probe below reports it in its failure
+#: report (design §"Failure handling": a pre-run capability probe names the host id and the
+#: project root in place of a run identity it cannot have), and ``CodexAdapter.id`` is the same
+#: fact — so they are the same declaration rather than two literals that can drift apart.
+HOST_ID = "codex"
+
 #: Seconds ``codex plugin list --json`` gets before it is killed. A healthy 0.147.0 answers it
 #: from local config and cache in well under a second, so this is generous by two orders of
 #: magnitude; what it exists to bound is the pathological case. One constant for both callers —
@@ -222,7 +228,9 @@ def _claims_from_json(text: str) -> dict[str, set[str]]:
     return claims
 
 
-def installed_plugins() -> tuple[dict[str, str], list[str], frozenset[str]]:
+def installed_plugins(
+    project_root: str | None = None,
+) -> tuple[dict[str, str], list[str], frozenset[str]]:
     """``({attributable name: root}, [contested roots], {unverifiable names})``, three empties
     when Codex answers nothing, or ``HostProbeTimeout`` when Codex never answers at all.
 
@@ -246,8 +254,18 @@ def installed_plugins() -> tuple[dict[str, str], list[str], frozenset[str]]:
     ambiguous, unlocatable — so splitting them into separate functions would mean shelling out
     to the CLI once per part and, worse, letting the parts come from different moments: a plugin
     installed in between would be attributable to one and absent from another.
+
+    ``project_root`` names WHICH PROJECT is being probed for, and exists for the expiry report
+    rather than for the lookup: design §"Failure handling" requires a pre-run capability probe
+    to report the host id and the project root in place of a run key, because it runs BEFORE any
+    run exists to have one — ``skills/start/SKILL.md`` fires preflight as step 0, ahead of the
+    gate, ``.conductor/run_branch`` and ``conductor run new``. It is threaded from the caller
+    rather than re-derived here so a report cannot name a different project from the one the
+    caller asked about; a caller with none of its own falls back to this process's own working
+    directory, which is the same default ``host_skills`` and ``preflight.check`` already use.
     """
-    exe = shutil.which("codex")
+    project = project_root or os.getcwd()
+    exe = shutil.which(HOST_ID)
     if not exe:
         return {}, [], frozenset()
     try:
@@ -263,7 +281,10 @@ def installed_plugins() -> tuple[dict[str, str], list[str], frozenset[str]]:
         # order is what keeps "never answered" out of the "answered nothing" bucket.
         raise base.HostProbeTimeout(
             f"`codex plugin list --json` did not answer within {PLUGIN_LIST_TIMEOUT_S}s and was "
-            f"killed; no write occurred. Codex could not be asked which plugins are installed, "
+            f"killed; no write occurred. host={HOST_ID} project_root={project} — this is a "
+            f"pre-run capability probe, so it names the host it could not ask and the project "
+            f"it was asked about in place of a run key, which no probe that decides whether a "
+            f"run may start can have. Codex could not be asked which plugins are installed, "
             f"so plugin attribution is unknown rather than empty. Reproduce with: "
             f"codex plugin list --json </dev/null"
         ) from expiry
@@ -279,7 +300,7 @@ def installed_plugins() -> tuple[dict[str, str], list[str], frozenset[str]]:
 
 
 class CodexAdapter:
-    id: str = "codex"
+    id: str = HOST_ID
 
     # ------------------------------------------------------------------ generated cron driver
     #
@@ -628,7 +649,9 @@ class CodexAdapter:
         # LAST, so everything above is established before the host is asked and can travel with
         # the expiry. Union order is otherwise irrelevant — these are sets.
         try:
-            attributed, contested, unverifiable = installed_plugins()
+            attributed, contested, unverifiable = installed_plugins(
+                project_root=project
+            )
         except base.HostProbeTimeout as expiry:
             raise base.HostProbeTimeout(
                 str(expiry), partial=discovery.HostSkills(cmds, frozenset())
