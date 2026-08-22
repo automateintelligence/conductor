@@ -33,6 +33,51 @@ POSTURES = ("supervised", "scoped", "full-bypass")
 # subcommand being probed (`codex.installed_plugins`, `CodexAdapter.plugin_list_lookup`); this
 # module carries no shared probe helper, because the only one it ever had had no callers.
 
+# --- how long a WORKER LAUNCH may be silent -------------------------------------------------
+#
+# The generated cron driver holds `.conductor/resume.lock` for the whole fire, so a host that
+# never answers holds it forever: every later twenty-minute tick fails `flock -n` and exits 0,
+# and a permanently blocked run becomes indistinguishable from a healthy idle one.
+#
+# The bound below is deliberately NOT elapsed time, and that is the whole design decision. A
+# legitimate phase runs for HOURS — one live fire in this project's own history ran 2h58m and
+# wrote nothing at all to the driver log until its final second — so a wall-clock ceiling short
+# enough for an operator to act on would kill working phases, and one long enough to be safe
+# would bound nothing. What is bounded is SILENCE: the fire's own progress, sampled as the
+# whole seconds of CPU consumed by every process in its process group plus the bytes it has
+# appended to the driver log. Either one moving is progress and resets the clock; elapsed time
+# never expires anything on its own.
+#
+# Two windows, because "has not started" and "has stopped" are different claims about a fire
+# and deserve different patience. They live HERE, beside `PLUGIN_LIST_TIMEOUT_S`, because this
+# package is where the host layer declares every bound it puts on a host process; the driver's
+# shell is where one of them is enforced.
+
+#: How long the fire may show NO progress at all before it is killed. A host launch is a
+#: runtime start plus config/plugin load — seconds of CPU for a node-based Claude, streamed
+#: events for `codex exec` — so a launch still at zero after two minutes has not begun doing
+#: work; it is blocked before it. That is the known instance (a host subcommand blocking on an
+#: unredirected stdin, ground truth §"Codex help hangs") and the shape the hanging-host probe
+#: in A-DH-4 reproduces.
+FIRE_STARTUP_TIMEOUT_S = 120
+
+#: How long a fire that HAS shown progress may then go silent. Much longer, because it has
+#: proven it is doing work and the cost of killing a real phase is an hour of lost work against
+#: a stall an operator sees one tick later. Longer than the twenty-minute tick on purpose: a
+#: fire quiet for longer than a full tick and a half, having produced neither CPU nor output,
+#: is not working.
+FIRE_IDLE_TIMEOUT_S = 1800
+
+#: Seconds between the TERM that asks the fire to stop and the KILL that makes it. Same reason
+#: as `PLUGIN_LIST_KILL_GRACE_S`: a bound expressed only as a TERM is not a bound, because a
+#: child that traps or ignores the signal keeps running and its supervisor keeps waiting.
+FIRE_KILL_GRACE_S = 5
+
+#: How often the supervisor samples progress. Deliberately not named `*_TIMEOUT_S`/`*_GRACE_S`:
+#: it is a sampling interval, not a bound, and it is the resolution of the two above rather
+#: than a third ceiling.
+FIRE_POLL_S = 5
+
 
 class UnknownHost(ValueError):
     """A host id outside ``HOST_IDS``."""

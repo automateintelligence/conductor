@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import time
@@ -1937,3 +1938,365 @@ def test_a_driver_documents_only_the_variables_its_own_fire_reads(
     assert foreign not in vars_for
     assert "CONDUCTOR_SPEC_ROOTS" in vars_for
     assert set(vars_for) < set(rs.OWNER_ENV_VARS)
+
+
+# ---- fire supervision: the fire is bounded on SILENCE, never on elapsed time ----------------
+#
+# The defect these close: the fire holds `.conductor/resume.lock` for its whole life, so a host
+# that never answers holds it forever — every later twenty-minute tick fails `flock -n` and
+# exits 0, and a permanently blocked run writes exactly the log a healthy idle one writes.
+#
+# What makes this different from the plugin lookup's `timeout -k G T` is the workload: a real
+# phase runs for HOURS (a live fire in this project's own history ran 2h58m and wrote nothing to
+# the driver log until its final second), so no wall-clock T tells a LONG fire from a DEAD one.
+# The bound is on silence instead, and `test_a_working_fire_outlives_the_startup_window` is the
+# anti-stub that a wall-clock ceiling cannot pass.
+
+_HANGING_FIRE = """#!/usr/bin/env python3
+import os, signal, sys
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+with open({pids!r}, "a", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()) + "\\n")
+while True:
+    signal.pause()
+"""
+
+#: Burns CPU for ``busy_s`` — the ONLY way past a startup window bounded on progress — and then
+#: either exits or blocks forever without ever making another sound.
+_WORKING_FIRE = """#!/usr/bin/env python3
+import os, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open({pids!r}, "a", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()) + "\\n")
+end = time.time() + {busy_s}
+spin = 0
+while time.time() < end:
+    spin += 1
+if {then_hang}:
+    while True:
+        signal.pause()
+sys.exit({rc})
+"""
+
+
+def _mk_fire_harness(tmp, fire_text, *, ps=True):
+    """A project whose `claude` is ``fire_text``, wired the way `_mk_env_harness` wires one.
+
+    ``ps=False`` is a machine with no `ps` binary. It cannot be produced by hiding one from
+    ``PATH`` — the driver re-adds `/usr/bin:/bin` before resolving anything, which is exactly
+    how the plugin lookup's no-`timeout` branch came to be the one that ran with no ceiling —
+    so the PATH-repair line itself is repointed at a directory holding everything BUT `ps`.
+    """
+    project = tmp / "proj"
+    worktree = tmp / "wt"
+    home = tmp / "home"
+    bindir = home / ".local" / "bin"
+    for d in (project / ".conductor", worktree, bindir):
+        d.mkdir(parents=True)
+    pids = tmp / "fire.pids"
+    pids.write_text("")
+    fire = bindir / "claude"
+    fire.write_text(fire_text)
+    os.chmod(fire, 0o755)
+    stub_conductor = bindir / "conductor"
+    stub_conductor.write_text(
+        "#!/bin/sh\nexit 1\n"
+    )  # gate not green -> proceed to the fire
+    os.chmod(stub_conductor, 0o755)
+    text = rs.render(str(project), str(worktree))
+    if not ps:
+        toolbox = tmp / "no-ps"
+        toolbox.mkdir()
+        for tool in (
+            # everything the generated driver (and this harness's fake host) reaches for,
+            # named one by one so the ONLY thing missing from this PATH is `ps`
+            "awk",
+            "bash",
+            "cat",
+            "cut",
+            "date",
+            "dirname",
+            "env",
+            "flock",
+            "grep",
+            "kill",
+            "ls",
+            "mkdir",
+            "pgrep",
+            "printf",
+            "python3",
+            "readlink",
+            "rm",
+            "sed",
+            "sh",
+            "sleep",
+            "sort",
+            "stat",
+            "tail",
+            "tr",
+            "wc",
+        ):
+            found = shutil.which(tool)
+            if found:
+                os.symlink(found, toolbox / tool)
+        assert shutil.which("ps"), (
+            "this machine has no ps at all; the harness is meaningless"
+        )
+        text = text.replace(
+            'export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"',
+            f'export PATH="$HOME/.local/bin:{toolbox}"',
+        )
+        assert (
+            "/usr/bin" not in text.split("fire_progress()")[0].split("export PATH=")[1]
+        )
+    driver = project / ".conductor" / "resume-autodev.sh"
+    driver.write_text(text)
+    os.chmod(driver, 0o755)
+    return project, driver, home, pids
+
+
+def _survivors(pids_file):
+    alive = []
+    for line in pids_file.read_text().split():
+        try:
+            os.kill(int(line), 0)
+        except OSError:
+            continue
+        alive.append(int(line))
+    return alive
+
+
+def _reap(pids_file):
+    for pid in _survivors(pids_file):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def _fire_supervised(driver, home, pids, timeout):
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            ["bash", str(driver)],
+            env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+            cwd=str(home),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return proc, time.monotonic() - started
+    except subprocess.TimeoutExpired:
+        _reap(pids)
+        raise
+
+
+@pytest.fixture
+def short_fire_bounds(monkeypatch):
+    """The same bounds, small enough to observe. Patched on `conductor.hosts.base`, which is
+    where the driver's generator reads them, so the production values stay the ones shipped."""
+    from conductor.hosts import base as host_base
+
+    monkeypatch.setattr(host_base, "FIRE_STARTUP_TIMEOUT_S", 6)
+    monkeypatch.setattr(host_base, "FIRE_IDLE_TIMEOUT_S", 12)
+    monkeypatch.setattr(host_base, "FIRE_KILL_GRACE_S", 2)
+    monkeypatch.setattr(host_base, "FIRE_POLL_S", 2)
+    return host_base
+
+
+def test_a_fire_that_never_starts_is_killed_and_names_itself_in_the_log(
+    tmp_path, short_fire_bounds
+):
+    """A host that never answers used to hold the flock forever behind no log line at all.
+
+    The fake IGNORES SIGTERM, so a bound expressed only as a TERM is not a bound here: only the
+    escalation to KILL ends it, and `alive == []` is what proves the escalation happened rather
+    than the fake having exited on its own."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path, _HANGING_FIRE.format(pids=str(tmp_path / "fire.pids"))
+    )
+    proc, elapsed = _fire_supervised(driver, home, pids, timeout=60)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    alive = _survivors(pids)
+    _reap(pids)
+
+    assert [int(x) for x in pids.read_text().split()], (
+        "the fake never ran; nothing was measured"
+    )
+    assert alive == [], f"the fire survived its bound: {alive}"
+    assert elapsed < 30, (elapsed, log)  # 6s window + 2s grace, generously bounded
+    # 124 is an expiry a TERM settled, 137 one that needed the KILL — `timeout`'s own
+    # vocabulary, which the plugin lookup above already logs.
+    assert proc.returncode in (124, 137), (proc.returncode, log)
+    assert "fire-timeout" in log, log
+    assert f"fire-end rc={proc.returncode}" in log, log
+    # ...and the report is actionable: the operation, the executable, which window expired,
+    # what was written, and an exact recovery command.
+    assert "op=worker-dispatch" in log
+    assert "silent=6s" in log, log
+    assert "wrote:" in log
+    assert "driver status --project" in log
+
+
+def test_a_working_fire_outlives_the_startup_window(tmp_path, short_fire_bounds):
+    """THE ANTI-STUB. A phase runs for hours; a wall-clock ceiling short enough to be useful
+    kills working ones. This fake makes no sound at all — no output, no exit — for three times
+    the startup window, and only burns CPU. Any elapsed-time bound fails here, and so does a
+    watchdog whose only progress signal is output."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _WORKING_FIRE.format(
+            pids=str(tmp_path / "fire.pids"), busy_s=18, then_hang=False, rc=0
+        ),
+    )
+    proc, elapsed = _fire_supervised(driver, home, pids, timeout=90)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    _reap(pids)
+
+    assert elapsed > 18, (elapsed, log)  # it really did outlive three startup windows
+    assert "fire-timeout" not in log, log
+    assert proc.returncode == 0, (proc.returncode, log)
+    assert "fire-end rc=0" in log, log
+
+
+#: Streams a line every second and burns essentially no CPU doing it — `time.sleep` is not
+#: work. The OTHER half of the progress token, and the shape `codex exec` has: it reports its
+#: events to the driver log from the first seconds while a headless Claude says nothing for
+#: hours and burns node CPU throughout. Neither signal alone covers both hosts.
+_STREAMING_FIRE = """#!/usr/bin/env python3
+import sys, time
+for _ in range({ticks}):
+    sys.stdout.write("thinking\\n")
+    sys.stdout.flush()
+    time.sleep(1)
+"""
+
+
+def test_a_streaming_but_idle_fire_is_kept_alive_by_its_output(
+    tmp_path, short_fire_bounds
+):
+    """The output half of the progress token, alone. This fake consumes no measurable CPU at
+    all — `time.sleep` is not work — so a watchdog reading only CPU kills it at the startup
+    window, and `codex exec`, which streams its events and then waits on the model, is exactly
+    that shape."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path, _STREAMING_FIRE.format(ticks=18)
+    )
+    proc, elapsed = _fire_supervised(driver, home, pids, timeout=90)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    _reap(pids)
+
+    assert elapsed > 18, (elapsed, log)
+    assert "fire-timeout" not in log, log
+    assert proc.returncode == 0, (proc.returncode, log)
+
+
+def test_a_fire_that_stops_working_expires_on_the_idle_window_not_the_startup_one(
+    tmp_path, short_fire_bounds
+):
+    """The two windows are different claims about a fire and must not collapse into one. This
+    fake works past the startup window and then stops dead, so it can only be caught by the
+    idle window — and the log has to say which one expired, or an operator cannot tell "it
+    never started" from "it stopped"."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _WORKING_FIRE.format(
+            pids=str(tmp_path / "fire.pids"), busy_s=8, then_hang=True, rc=0
+        ),
+    )
+    proc, elapsed = _fire_supervised(driver, home, pids, timeout=90)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    alive = _survivors(pids)
+    _reap(pids)
+
+    assert alive == [], f"the fire survived its bound: {alive}"
+    assert "fire-timeout" in log, log
+    assert "silent=12s" in log, log  # the IDLE window, not the 6s startup one
+    assert elapsed > 6 + 2, (elapsed, log)  # it was NOT killed at the startup window
+    assert proc.returncode in (124, 137), (proc.returncode, log)
+
+
+def test_a_machine_with_no_ps_reports_an_unsupervised_fire_instead_of_killing_it(
+    tmp_path, short_fire_bounds
+):
+    """`ps` is how CPU is attributed, and CPU is the only progress a headless Claude makes for
+    hours. Falling back to output-only progress on a machine without it would kill every
+    working phase there, so this degrades to the pre-fix behaviour AND says so — a marker
+    `conductor driver status` reads, rather than a silence of a different colour."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _WORKING_FIRE.format(
+            pids=str(tmp_path / "fire.pids"), busy_s=1, then_hang=False, rc=0
+        ),
+        ps=False,
+    )
+    proc, _elapsed = _fire_supervised(driver, home, pids, timeout=60)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    _reap(pids)
+
+    assert "fire-unsupervised reason=no-ps" in log, log
+    assert "fire-timeout" not in log, log
+    assert proc.returncode == 0, (proc.returncode, log)
+
+
+def test_the_supervisor_returns_the_workers_own_status_untouched(
+    tmp_path, short_fire_bounds
+):
+    """`exit "$rc"` propagates the worker's status verbatim, and supervising the fire must not
+    start laundering it: a phase that failed 3 has to still read 3 in the log and at the exit."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _WORKING_FIRE.format(
+            pids=str(tmp_path / "fire.pids"), busy_s=1, then_hang=False, rc=3
+        ),
+    )
+    proc, _elapsed = _fire_supervised(driver, home, pids, timeout=60)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    _reap(pids)
+
+    assert proc.returncode == 3, (proc.returncode, log)
+    assert "fire-end rc=3" in log, log
+
+
+def test_the_fire_runs_in_its_own_process_group(tmp_path, short_fire_bounds):
+    """Load-bearing twice: the sampler must not read THIS DRIVER's own polling as the worker's
+    progress — it would stamp the fire alive forever, which is the bound deleted — and the kill
+    must reach the worker's descendants, not just its top process."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    reported = tmp_path / "pgid"
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        f"open({str(reported)!r}, 'w').write('%d %d %d' % "
+        "(os.getpid(), os.getpgrp(), os.getpgid(os.getppid())))\n",
+    )
+    proc, _elapsed = _fire_supervised(driver, home, pids, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    pid, pgid, driver_pgid = (int(x) for x in reported.read_text().split())
+    assert pid == pgid, (pid, pgid)
+    # ...and the DRIVER is not in it. This is the half the kill-path tests cannot prove: they
+    # run with short bounds, and over six seconds the supervisor's own `ps`/`awk`/`wc` forks
+    # accrue less than the one whole second of CPU the sampler can see. Over the production
+    # windows they accrue plenty, so a fire sharing this group would be stamped alive by its
+    # own supervisor forever — the bound deleted, silently, on exactly the long fires it exists
+    # for. The exclusion is structural: the sampler sums one process group and the fire has
+    # its own.
+    assert driver_pgid != pgid, (driver_pgid, pgid)

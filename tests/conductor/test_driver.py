@@ -245,6 +245,36 @@ def test_status_recent_plugin_root_unverified_flips_nonzero_and_is_named(
     assert bad in capsys.readouterr().out
 
 
+def test_status_recent_fire_timeout_flips_nonzero_and_is_named(
+    tmp_path, monkeypatch, capsys
+):
+    """The fire's own silence bound expiring. `fire-end rc=` non-zero is written too, so status
+    would flip on that alone — but only this line says WHICH failure it was and which of the two
+    windows expired, and a driver killed before it could write its `fire-end` at all leaves this
+    line as the only evidence there ever was a fire."""
+    proj = _durable(tmp_path, monkeypatch)
+    bad = (
+        f"{_now()} fire-timeout op=worker-dispatch bin=/usr/bin/claude silent=1800s "
+        "elapsed=4021s wrote: log=+0B"
+    )
+    (proj / ".conductor" / "resume-autodev.log").write_text(f"{bad}\n")
+    assert driver.status(str(proj)) == 1
+    assert bad in capsys.readouterr().out
+
+
+def test_status_recent_fire_unsupervised_flips_nonzero_and_is_named(
+    tmp_path, monkeypatch, capsys
+):
+    """A machine with no `ps` runs the fire with nothing bounding it — the pre-fix behaviour,
+    degraded to deliberately because the alternative there is killing every working phase. It
+    is a stall waiting to happen, so it cannot also be invisible."""
+    proj = _durable(tmp_path, monkeypatch)
+    bad = f"{_now()} fire-unsupervised reason=no-ps bin=/usr/bin/claude"
+    (proj / ".conductor" / "resume-autodev.log").write_text(f"{bad}\n")
+    assert driver.status(str(proj)) == 1
+    assert bad in capsys.readouterr().out
+
+
 def test_status_clean_recent_log_stays_zero(tmp_path, monkeypatch, capsys):
     proj = _durable(tmp_path, monkeypatch)
     (proj / ".conductor" / "resume-autodev.log").write_text(
