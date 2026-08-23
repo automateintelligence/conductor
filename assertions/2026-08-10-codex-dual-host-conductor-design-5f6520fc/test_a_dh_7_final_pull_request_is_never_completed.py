@@ -5,14 +5,6 @@ Source: docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.asser
 Claim: no Conductor code path performs, requests, or enables any action that could cause the
 final integration-to-default pull request to complete.
 
-RED ON PURPOSE, AND FOR A NAMED REASON. The spec's sweep names six verbs — `merge`, `resume`,
-`finish`, `heartbeat`, `status`, `gate`. `bin/conductor` registers `merge` and `gate`; it
-registers no `resume`, `finish`, `heartbeat` or `status`. Roadmap Plan 05 produces
-`conductor heartbeat|resume|finish`, and Plan 06 produces the final-PR protection this
-assertion measures. Until those land, `test_every_verb_the_spec_names_is_registered` and
-`test_finish_refuses_the_unmerged_final_pull_request` fail naming the absent verbs. Do not make
-them pass by adding a stub verb outside those plans.
-
 THE VERB LIST IS PARSED FROM `bin/conductor`, NOT HAND-LISTED. The CLI is a bash `case`
 statement, so its top-level arm labels ARE its registered verb list; `_registered_verbs` reads
 them (tracking `case`/`esac` nesting so the `goal` sub-case's arms are not mistaken for verbs).
@@ -23,6 +15,30 @@ bash `case` statement declares a verb's arguments, so they cannot be derived. `_
 carries one or more argv per verb, and `test_every_registered_verb_is_swept` FAILS when the
 parsed verb list contains a verb with no entry — a new verb stops the sweep loudly instead of
 being silently skipped. The verbs themselves are enumerated; their arguments are not.
+
+"SWEPT" MEANS THE VERB RAN, NOT THAT AN ATTEMPT WAS RECORDED. Because the argument table is
+hand-written it can be WRONG, and a wrong vector is the quietest way to hollow this assertion
+out: `conductor ledger` with no subcommand, `conductor authority preview` with no plan and
+`conductor plan-lint` with no plan all exited in argparse before reaching a line of the verb's
+own code, and every prohibition below was satisfied by a verb that did nothing at all. A
+prohibition that never executes the prohibited path is not a prohibition. So every invocation
+is checked for having reached its own logic — `test_no_swept_invocation_died_in_argument_parsing`
+fails on any argument-parsing death — and a table entry that stops parsing now fails LOUDLY
+instead of counting as a sweep.
+
+THE FLAG SURFACE IS SWEPT TOO, AND IT IS DERIVED. A verb's prohibited path can sit behind an
+OPTION rather than behind the verb, and a hand-written base vector never reaches it. So after
+every base vector has run, each invocation is asked for its own usage line (`--help`) and every
+VALUELESS long option it declares is swept on top of the base vector — the option surface comes
+from the verb, exactly as the verb list comes from the dispatcher. Two passes, in that order,
+because a flag may legitimately change the run's state (`resume --reactivate` does) and the
+must-contain clauses below are read off the base pass.
+
+KNOWN RESIDUAL OF THE FLAG SWEEP (`_FLAG_OPAQUE`, and options that take a value). A verb that
+hand-rolls its arguments publishes no machine-readable option surface, and an option whose value
+cannot be synthesised is swept only as far as the base vector carries it. Both are recorded
+rather than assumed: `test_the_flag_surface_probe_answered_for_every_verb_that_can_answer` pins
+the opaque set, so a verb that stops answering joins it loudly.
 
 FORCE-PUSH IS CHECKED THROUGH GIT REFS, NOT THE GH LOG. Seven of the spec's eight prohibited
 actions are `gh` invocations and are read out of the recorded `gh` log. A force-push is a git
@@ -68,6 +84,10 @@ PHASE_PR = 101
 #: Conductor does may complete it.
 FINAL_PR = 202
 
+#: The phase issue the phase pull request closes. `conductor ledger` reconciles an ISSUE, so
+#: this is the argument that gets that verb past its own argument parser and into its logic.
+PHASE_ISSUE = 5
+
 #: The verbs the assertion spec names for the sweep. Absent ones are a finding, not a skip.
 SPEC_NAMED_VERBS = ("merge", "resume", "finish", "heartbeat", "status", "gate")
 
@@ -78,6 +98,34 @@ VERB_OWNER = {
     "heartbeat": "roadmap Plan 05 (conductor heartbeat|resume|finish)",
     "status": "roadmap Plan 05 (per-run status reporting)",
 }
+
+#: A verb died in ARGUMENT PARSING rather than reaching its own logic. argparse writes its usage
+#: block plus an `error:` line to stderr and exits 2; `bin/conductor`'s hand-rolled arms echo
+#: `usage: ...` and exit 64. Either shape means the verb did nothing, so it must not count as
+#: swept. Anchored to a LINE START so a verb that merely prints the word in prose while doing
+#: real work is not mistaken for one that refused to parse.
+_USAGE_BLOCK = re.compile(r"^usage:", re.MULTILINE | re.IGNORECASE)
+
+#: One VALUELESS long option, as a verb's own usage line declares it. `[--strict]` matches;
+#: `[--run RUN]` deliberately does not — a value this test would have to invent is not derived
+#: from anything, and inventing one is how a sweep starts measuring its own fixture.
+_VALUELESS_OPTION = re.compile(r"\[(--[A-Za-z0-9][A-Za-z0-9-]*)\]")
+
+#: Verbs that hand-roll their argument handling and therefore publish no machine-readable option
+#: surface: asked for `--help`, they print a one-line usage with no bracketed options, or run
+#: anyway. Their flags are unswept and this is the honest record of it. Pinned by
+#: `test_the_flag_surface_probe_answered_for_every_verb_that_can_answer` so a verb that stops
+#: answering joins this list deliberately rather than silently losing its flag sweep.
+_FLAG_OPAQUE = frozenset(
+    {
+        "default-branch",
+        "gate",
+        "gate-dir",
+        "goal",
+        "merge-gate",
+        "preflight",
+    }
+)
 
 _GH_FAKE = r'''#!/usr/bin/env python3
 """Recording `gh` fake: logs EVERY invocation, answers the ones the merge path makes."""
@@ -211,11 +259,24 @@ class Sweep:
         self.run_branch = ""
         self.run_key = ""
         self.spec_relpath = "docs/fixture-spec.md"
+        self.plan_relpath = "docs/fixture-plan.md"
         self.results: dict[str, list[dict]] = {}
+        self.flag_results: dict[str, list[dict]] = {}
+        self.flag_opaque: list[str] = []
         self.refs_before = ""
         self.refs_after = ""
         self.missing_verbs: list[str] = []
         self.unswept_verbs: list[str] = []
+
+    @property
+    def every_result(self) -> list[tuple[str, dict]]:
+        """Both passes, base first, as (verb, result) pairs."""
+        return [
+            (verb, result)
+            for table in (self.results, self.flag_results)
+            for verb, results in table.items()
+            for result in results
+        ]
 
     @property
     def gh_calls(self) -> list[dict]:
@@ -240,11 +301,14 @@ def _invocations(sweep: Sweep) -> dict[str, list[list[str]]]:
     driver = str(sweep.work / ".conductor" / "resume-autodev.sh")
     return {
         "assert": [["run", "--level", "spec"]],
-        "ledger": [[]],
+        # Each of these three carries the argument its verb REQUIRES. Without it the verb dies
+        # in argparse and sweeps nothing, which is what
+        # `test_no_swept_invocation_died_in_argument_parsing` now refuses.
+        "ledger": [["reconcile", str(PHASE_ISSUE)]],
         "goal": [["get"]],
-        "authority": [["preview"]],
+        "authority": [["preview", sweep.plan_relpath]],
         "preflight": [[]],
-        "plan-lint": [[]],
+        "plan-lint": [[sweep.plan_relpath]],
         # Both pull requests: the phase merge is the PERMITTED action, the final one is the
         # prohibited target. Ordering matters only in that both must be attempted.
         "merge": [[str(PHASE_PR)], [str(FINAL_PR)]],
@@ -265,15 +329,55 @@ def _invocations(sweep: Sweep) -> dict[str, list[list[str]]]:
         # a verb nobody sweeps is a hole whatever its intent. `--checkout` is the sweep's
         # own work tree, so the scan never reads the real one.
         "doctor": [["relocation", "--checkout", work]],
-        # The four verbs the assertion spec names that `bin/conductor` does not register yet.
-        # Their argument shape is the design spec's own (`conductor finish --run <run-key>`,
-        # `conductor resume --run <run-key>`), so they join the sweep the moment Plan 05
-        # registers them. Until then `table.get(verb, [])` never reaches these entries.
+        # The four verbs the assertion spec names by name. Their argument shape is the design
+        # spec's own (`conductor finish --run <run-key>`, `conductor resume --run <run-key>`).
+        # Their OPTIONS are not listed here: pass two derives those from each verb's own usage
+        # line, which is what reaches a prohibited action parked behind a flag.
         "resume": [["--run", sweep.run_key]],
         "finish": [["--run", sweep.run_key]],
         "heartbeat": [["--run", sweep.run_key]],
         "status": [["--run", sweep.run_key]],
     }
+
+
+def _invoke(sweep: Sweep, verb: str, argv: list[str]) -> dict:
+    """One CLI invocation against the fixture run, recorded."""
+    proc = subprocess.run(
+        [str(CONDUCTOR_BIN), verb, *argv],
+        cwd=str(sweep.work),
+        env=sweep.env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    return {
+        "argv": argv,
+        "rc": proc.returncode,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+    }
+
+
+def _flag_surface(sweep: Sweep, verb: str, argv: list[str]) -> tuple[list[str], bool]:
+    """``(valueless long options this invocation declares, did it declare anything)``.
+
+    DERIVED, like the verb list: the invocation is asked for its own usage line, so an option
+    added to a verb joins the sweep with no edit here. `--help` is appended to the FULL base
+    vector rather than to the bare verb, because a verb with subcommands answers for whichever
+    subcommand the vector names — `conductor run show --help` and `conductor run list --help`
+    have different option surfaces and only the vector says which one is being swept.
+    """
+    probe = _invoke(sweep, verb, [*argv, "--help"])
+    text = f"{probe['stdout']}\n{probe['stderr']}"
+    if not _USAGE_BLOCK.search(text):
+        return [], False
+    # Whitespace-normalized first: argparse WRAPS its usage line, and an option split across two
+    # lines would otherwise be silently dropped from the sweep. Normalizing cannot turn a
+    # value-taking option into a valueless one — `[--run RUN]` still carries its metavar.
+    flat = " ".join(text.split())
+    return sorted(set(_VALUELESS_OPTION.findall(flat)) - {"--help"}), True
 
 
 def _build() -> Sweep:
@@ -315,7 +419,13 @@ def _build() -> Sweep:
     spec = sweep.work / sweep.spec_relpath
     spec.parent.mkdir(parents=True)
     spec.write_text("# fixture spec\n", encoding="utf-8")
-    _git(sweep.work, "add", sweep.spec_relpath, env=git_env)
+    # The plan `authority preview` and `plan-lint` each REQUIRE as their positional argument.
+    # Without it both verbs stop in argparse and sweep nothing.
+    plan = sweep.work / sweep.plan_relpath
+    plan.write_text(
+        "# fixture plan\n\n## Phase 1 — seed\n\n- [ ] do the thing\n", encoding="utf-8"
+    )
+    _git(sweep.work, "add", sweep.spec_relpath, sweep.plan_relpath, env=git_env)
     _git(sweep.work, "commit", "-m", "seed", env=git_env)
     _git(sweep.work, "remote", "add", "origin", str(sweep.bare), env=git_env)
     _git(sweep.work, "push", "-u", "origin", DEFAULT_BRANCH, env=git_env)
@@ -497,26 +607,29 @@ def _build() -> Sweep:
     table = _invocations(sweep)
     sweep.unswept_verbs = [verb for verb in verbs if verb not in table]
     sweep.missing_verbs = [verb for verb in SPEC_NAMED_VERBS if verb not in verbs]
+
+    # Pass one: the hand-written base vector for every registered verb.
     for verb in verbs:
         for argv in table.get(verb, []):
-            proc = subprocess.run(
-                [str(CONDUCTOR_BIN), verb, *argv],
-                cwd=str(sweep.work),
-                env=sweep.env,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=600,
-                check=False,
-            )
-            sweep.results.setdefault(verb, []).append(
-                {
-                    "argv": argv,
-                    "rc": proc.returncode,
-                    "stdout": proc.stdout,
-                    "stderr": proc.stderr,
-                }
-            )
+            sweep.results.setdefault(verb, []).append(_invoke(sweep, verb, argv))
+
+    # Pass two: every VALUELESS option each of those invocations declares about itself. After
+    # pass one, because an option may legitimately change the run's state and the must-contain
+    # clauses are read off the base pass.
+    opaque: set[str] = set()
+    for verb in verbs:
+        for argv in table.get(verb, []):
+            flags, answered = _flag_surface(sweep, verb, argv)
+            if not answered:
+                opaque.add(verb)
+                continue
+            for flag in flags:
+                if flag in argv:
+                    continue
+                sweep.flag_results.setdefault(verb, []).append(
+                    _invoke(sweep, verb, [*argv, flag])
+                )
+    sweep.flag_opaque = sorted(opaque)
     sweep.refs_after = _git(sweep.bare, "for-each-ref", env=git_env)
     return sweep
 
@@ -580,6 +693,60 @@ def test_the_sweep_actually_ran_every_registered_verb() -> None:
     assert verbs, "no verbs parsed out of bin/conductor — the sweep would be vacuous"
     not_run = [verb for verb in verbs if verb not in done.results]
     assert not not_run, f"registered verbs that were never invoked: {not_run}"
+
+
+def test_no_swept_invocation_died_in_argument_parsing() -> None:
+    """ "Swept" must mean the verb RAN. An invocation that stopped in argparse — a missing
+    subcommand, a missing positional, an option the verb does not have — executed none of the
+    verb's own code, so every prohibition below is satisfied by a verb that did nothing.
+
+    The argument table is hand-written and can therefore be wrong; this is what makes a wrong
+    entry fail LOUDLY instead of counting as a sweep. A verb legitimately REFUSING (non-zero
+    with a reason) is not this: it reached its logic and decided."""
+    done = sweep()
+    unrun = [
+        f"conductor {verb} {' '.join(result['argv'])} -> rc={result['rc']}\n"
+        f"    {(result['stderr'] or result['stdout']).strip().splitlines()[-1]}"
+        for verb, result in done.every_result
+        if result["rc"] != 0 and _USAGE_BLOCK.search(result["stderr"])
+    ]
+    assert not unrun, (
+        "these invocations died in argument parsing and never reached the verb's own logic, so "
+        "the prohibitions below were satisfied by verbs that did nothing:\n  "
+        + "\n  ".join(unrun)
+    )
+
+
+def test_the_flag_surface_probe_answered_for_every_verb_that_can_answer() -> None:
+    """Anti-vacuity for pass two: a verb whose flags are unswept must be a DECLARED residual.
+
+    A verb that hand-rolls its arguments answers `--help` with no option surface, and its flags
+    genuinely cannot be derived. That is a real hole in this assertion and it is recorded rather
+    than assumed — a verb that stops answering joins `_FLAG_OPAQUE` deliberately, and a verb that
+    starts answering leaves it, either way by an edit someone had to make."""
+    done = sweep()
+    assert set(done.flag_opaque) == set(_FLAG_OPAQUE), (
+        "the set of verbs publishing no machine-readable option surface changed.\n"
+        f"  measured: {sorted(done.flag_opaque)}\n"
+        f"  declared: {sorted(_FLAG_OPAQUE)}\n"
+        "A verb that newly stopped answering has lost its flag sweep; a verb that newly answers "
+        "has gained one. Neither may happen silently."
+    )
+
+
+def test_at_least_one_derived_flag_was_actually_swept() -> None:
+    """Anti-vacuity for pass two: a derivation that yields nothing for every verb would make the
+    flag sweep a no-op that still reports green."""
+    done = sweep()
+    swept = {
+        f"{verb} {' '.join(result['argv'])}"
+        for verb, results in done.flag_results.items()
+        for result in results
+    }
+    assert swept, (
+        "pass two derived no option for any verb, so a prohibited action parked behind a flag "
+        f"is unreachable by this sweep. opaque verbs: {done.flag_opaque}"
+    )
 
 
 def test_every_registered_verb_is_swept() -> None:
