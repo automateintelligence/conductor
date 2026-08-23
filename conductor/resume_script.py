@@ -41,7 +41,7 @@ from conductor.hosts import base, runhost
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and the
 # `conductor:start` skill's reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 9
+TEMPLATE_VERSION = 10
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
@@ -324,6 +324,42 @@ def fire_supervision_prologue() -> str:
         "    printf '%s/%s' \"${fire_cpu:-0}\" "
         '"$(wc -c < "$LOG" 2>/dev/null || printf 0)"\n'
         "}\n"
+        "fire_alive() {\n"
+        "    # ANY member of the fire's process group, never just its leader. `kill -0 -<pgid>`\n"
+        "    # is killpg: it succeeds while the group still holds one process. A descendant that\n"
+        "    # outlives the leader inherited fd 9 when the fire was forked, so it holds\n"
+        "    # `.conductor/resume.lock` — and a check that stops at the leader calls such an\n"
+        "    # expiry SETTLED, skips the KILL, and leaves the run permanently blocked behind a\n"
+        "    # lock nothing is watching. The leader is asked too, so a shell that could not give\n"
+        "    # the fire its own group degrades to the narrower answer rather than to none.\n"
+        '    kill -0 -"$FIRE_PID" 2>/dev/null || kill -0 "$FIRE_PID" 2>/dev/null\n'
+        "}\n"
+        "fire_drain() {\n"
+        "    # Up to FIRE_GRACE seconds of waiting for that group to empty, and not one more: a\n"
+        "    # fire that dies at once must not cost the grace, and one that never dies must not\n"
+        "    # cost more than it.\n"
+        "    fire_waited=0\n"
+        '    while [ "$fire_waited" -lt "$FIRE_GRACE" ] && fire_alive; do\n'
+        "        sleep 1\n"
+        "        fire_waited=$(( fire_waited + 1 ))\n"
+        "    done\n"
+        "}\n"
+        "fire_shutdown() {\n"
+        "    # TERM the group, wait out the grace, KILL what ignored it, then wait again — this\n"
+        "    # driver exiting releases nothing while one of the fire's descendants still holds\n"
+        "    # fd 9. Sets `fire_rc` in `timeout`'s vocabulary: 124 = the TERM settled it, 137 =\n"
+        "    # the KILL had to. ONE definition, used by the expiry path AND by the signal trap,\n"
+        "    # because a trap that only asks politely orphans exactly what the expiry path kills.\n"
+        '    kill -TERM -"$FIRE_PID" 2>/dev/null || kill -TERM "$FIRE_PID" 2>/dev/null || true\n'
+        "    fire_drain\n"
+        "    if fire_alive; then\n"
+        '        kill -KILL -"$FIRE_PID" 2>/dev/null || kill -KILL "$FIRE_PID" 2>/dev/null || true\n'
+        "        fire_drain\n"
+        "        fire_rc=137\n"
+        "    else\n"
+        "        fire_rc=124\n"
+        "    fi\n"
+        "}\n"
         "# The fire gets its OWN process group: the sampler must not read this driver's polling as\n"
         "# the worker's progress, and the kill must reach the worker's whole tree.\n"
         "set -m"
@@ -363,8 +399,12 @@ def fire_watchdog(h: base.HostAdapter) -> str:
     bin_var = f'"${h.BIN_VAR}"'
     return (
         "# If this DRIVER is signalled, take the worker down with it: `set -m` moved the fire out\n"
-        "# of this process group, so it would otherwise outlive the driver holding the lock.\n"
-        "trap 'kill -TERM -\"$FIRE_PID\" 2>/dev/null || true; exit 143' TERM INT HUP\n"
+        "# of this process group, so it would otherwise outlive the driver holding the lock. The\n"
+        "# SAME grace-then-KILL discipline as the expiry path, never a bare TERM: a descendant\n"
+        "# that ignores the signal survives a polite trap, keeps fd 9, and holds\n"
+        "# `.conductor/resume.lock` after the driver that took it is gone. 143 stays the DRIVER's\n"
+        "# own signalled status; what `fire_shutdown` decides is only how the fire died.\n"
+        "trap 'fire_shutdown; exit 143' TERM INT HUP\n"
         'if [ -z "$FIRE_PS" ]; then\n'
         "    printf '%s fire-unsupervised reason=no-ps bin=%s\\n' \"$(ts)\" "
         f"{bin_var}"
@@ -419,9 +459,10 @@ def fire_watchdog(h: base.HostAdapter) -> str:
         '                case "$fire_branch" in ""|*[!a-z0-9./_-]*) fire_branch="" ;; esac\n'
         '                [ -z "$fire_branch" ] || fire_run=" run_branch=$fire_branch"\n'
         "            fi\n"
-        "            # TERM first, then KILL: a bound expressed only as a TERM is not a bound,\n"
-        "            # because a child that traps or ignores it keeps running and its supervisor\n"
-        "            # keeps waiting. 124 = the TERM settled it, 137 = the KILL had to.\n"
+        "            # `fire_shutdown` below is TERM, grace, then KILL over the fire's WHOLE\n"
+        "            # process group: a bound expressed only as a TERM is not a bound, because a\n"
+        "            # child that traps or ignores it keeps running and its supervisor keeps\n"
+        "            # waiting. 124 = the TERM settled it, 137 = the KILL had to.\n"
         "            printf '%s fire-timeout%s op=worker-dispatch bin=%s silent=%ss elapsed=%ss "
         "wrote: log=+%sB worktree=unknown inspect: git -C %s status --short "
         "recover: %s driver status --project %s\\n' \\\n"
@@ -429,14 +470,7 @@ def fire_watchdog(h: base.HostAdapter) -> str:
         '"$fire_limit" "$(( SECONDS - fire_started ))" \\\n'
         '                "$(( $(wc -c < "$LOG" 2>/dev/null || printf 0) - FIRE_LOG0 ))" \\\n'
         '                "$WORKTREE" "$CONDUCTOR" "$PROJECT" >> "$LOG"\n'
-        '            kill -TERM -"$FIRE_PID" 2>/dev/null || kill -TERM "$FIRE_PID" 2>/dev/null || true\n'
-        '            sleep "$FIRE_GRACE"\n'
-        '            if kill -0 "$FIRE_PID" 2>/dev/null; then\n'
-        '                kill -KILL -"$FIRE_PID" 2>/dev/null || kill -KILL "$FIRE_PID" 2>/dev/null || true\n'
-        "                fire_rc=137\n"
-        "            else\n"
-        "                fire_rc=124\n"
-        "            fi\n"
+        "            fire_shutdown\n"
         '            wait "$FIRE_PID" 2>/dev/null || true\n'
         "            break\n"
         "        fi\n"

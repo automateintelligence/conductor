@@ -1,6 +1,7 @@
 """Tier-B resume-driver generator: the runtime-resolution contract that fixes the 2026-07-05
 silent-stall (generation-time-pinned bins that rot on upgrade)."""
 
+import fcntl
 import json
 import os
 import re
@@ -2308,6 +2309,158 @@ def test_the_fire_runs_in_its_own_process_group(tmp_path, short_fire_bounds):
     # for. The exclusion is structural: the sampler sums one process group and the fire has
     # its own.
     assert driver_pgid != pgid, (driver_pgid, pgid)
+
+
+# ---- the escalation covers the fire's whole process group, on every exit path ---------------
+#
+# The defect these close (H1): the supervisor asked `kill -0 "$FIRE_PID"` after the TERM, which
+# is the group LEADER and nothing else. A leader that dies politely while a descendant ignores
+# the signal therefore read as "the TERM settled it": no KILL was sent, only the leader was
+# waited for, and the descendant — which inherited fd 9 when the fire was forked — went on
+# holding `.conductor/resume.lock` with nothing watching it. Every later twenty-minute tick then
+# failed `flock -n` and exited 0, which is the permanently-blocked run this whole supervisor
+# exists to eliminate. The signal trap had the same hole and a worse one: a bare TERM to the
+# group and an immediate `exit 143`, with no grace and no KILL at all.
+
+#: A fire whose LEADER dies politely and whose DESCENDANT does not. Both are in the fire's own
+#: process group (`set -m`) and both inherited the driver's fd 9. Neither writes a byte nor burns
+#: a whole second of CPU, so the STARTUP window is what expires.
+_ORPHANING_FIRE = """#!/usr/bin/env python3
+import os, signal, subprocess, sys
+
+PIDS = {pids!r}
+# Joined with chr(10) rather than written with escapes: this whole program is a Python
+# string literal inside the test module, and an escape here would be consumed there.
+CHILD = chr(10).join([
+    "import os, signal",
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+    "signal.signal(signal.SIGINT, signal.SIG_IGN)",
+    "signal.signal(signal.SIGHUP, signal.SIG_IGN)",
+    "open(%r, 'a').write(str(os.getpid()) + chr(10))" % (PIDS,),
+    "while True:",
+    "    signal.pause()",
+])
+
+subprocess.Popen([sys.executable, "-c", CHILD])
+with open(PIDS, "a") as handle:
+    handle.write(str(os.getpid()) + chr(10))
+while True:
+    signal.pause()
+"""
+
+
+def _lock_is_free(project):
+    """Can `.conductor/resume.lock` be taken right now?
+
+    The lock itself, not a proxy for it. `flock -n` on that file is exactly what the next
+    twenty-minute tick does, so asking the same question the same way is the only check that
+    cannot pass while the run is in fact blocked. A descendant that inherited fd 9 keeps this
+    False for as long as it lives, whatever the driver's own exit status said.
+    """
+    path = str(project / ".conductor" / "resume.lock")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return True
+    finally:
+        os.close(fd)
+
+
+def _wait_for_pids(pids_file, count, timeout=30):
+    """Block until `count` processes have recorded themselves, so a test that goes on to signal
+    the driver cannot race the fire it is supervising into existence."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        recorded = pids_file.read_text().split()
+        if len(recorded) >= count:
+            return [int(x) for x in recorded]
+        time.sleep(0.1)
+    raise AssertionError(
+        f"only {pids_file.read_text().split()} recorded; expected {count}"
+    )
+
+
+def test_an_expiry_kills_the_whole_group_not_only_the_leader(
+    tmp_path, short_fire_bounds
+):
+    """H1, the timeout path. The leader dies on the TERM and the descendant ignores it, which is
+    precisely the case a leader-only `kill -0` calls settled — reporting 124, skipping the KILL,
+    and leaving the lock held by an orphan nothing is watching."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path, _ORPHANING_FIRE.format(pids=str(tmp_path / "fire.pids"))
+    )
+    proc, elapsed = _fire_supervised(driver, home, pids, timeout=90)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    alive = _survivors(pids)
+    free = _lock_is_free(project)
+    _reap(pids)
+
+    assert len(pids.read_text().split()) == 2, (
+        f"the fixture never produced a leader AND a descendant, so nothing was measured: "
+        f"{pids.read_text().split()}"
+    )
+    assert "fire-timeout" in log, log
+    assert alive == [], (
+        f"the fire's process group survived the escalation: {alive}. The leader exited on the "
+        f"TERM, so a supervisor that checks only the leader never sends the KILL."
+    )
+    assert free, (
+        "`.conductor/resume.lock` is still held after the driver exited — an orphaned "
+        "descendant inherited fd 9, so every later tick fails `flock -n` and exits 0"
+    )
+    assert proc.returncode in (124, 137), (proc.returncode, log)
+    assert elapsed < 45, (elapsed, log)
+
+
+def test_a_signalled_driver_takes_the_whole_group_down_with_it(
+    tmp_path, short_fire_bounds
+):
+    """H1, the trap path. `trap '<TERM the group>; exit 143'` has no grace and no KILL, so a
+    descendant that ignores the signal outlives the driver that was holding the lock. The trap
+    needs the same discipline as the expiry path — proved by signalling a real fired driver."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path, _ORPHANING_FIRE.format(pids=str(tmp_path / "fire.pids"))
+    )
+    proc = subprocess.Popen(
+        ["bash", str(driver)],
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        cwd=str(home),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        _wait_for_pids(pids, 2)
+        os.kill(proc.pid, signal.SIGTERM)
+        rc = proc.wait(timeout=60)
+    except BaseException:
+        proc.kill()
+        _reap(pids)
+        raise
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    alive = _survivors(pids)
+    free = _lock_is_free(project)
+    _reap(pids)
+
+    assert rc == 143, (rc, log)  # the driver's own signalled status, unchanged
+    assert alive == [], (
+        f"a signalled driver left its fire's process group behind: {alive}. The trap asked "
+        f"politely once and exited; nothing escalated."
+    )
+    assert free, (
+        "`.conductor/resume.lock` is still held after the signalled driver exited — the "
+        "orphaned descendant inherited fd 9"
+    )
 
 
 # ---- the expiry report names WHICH RUN stalled -----------------------------------------------
