@@ -139,3 +139,28 @@ trap this spec exists to kill. Every assertion below is written to fail if the i
 - **Setup:** two assertion test files — one whose body is `assert True` (or a bare non-empty literal / `assert 1`), one that asserts against real behavior.
 - **Observation:** the trivially-true file → flagged (non-zero / named); the real-behavior file → not flagged for this reason. An unparseable test → flagged (fail-closed), never silently passed.
 - **Kind:** property.
+
+---
+
+## Frozen-baseline provenance
+
+`assertions/.frozen` records one digest per assertion id. A digest diff is meaningless without
+the base it is measured against, so state the base whenever a re-freeze is reported — "exactly
+one digest moved" is true or false depending on what you diff.
+
+Two ids differ between this branch and `main`, and they came from different places:
+
+| id | base `d04a66f` (this branch's fork point) | base `main` | moved in | why |
+| --- | --- | --- | --- | --- |
+| `a10-default-branch-never-empty` | **moved** | **moved** | `0653cb2` | A10 re-derived under A-DH-6 — see the A10 note above: one half preserved, one tightened, one INVERTED. Reviewed as part of that change. |
+| `a13-driver-status-nonzero-without-driver` | unchanged | **moved** | `8505b84` (PR #87) | A13 re-derived host-neutrally. Already in this branch's ancestry; not yet on `main`. Separately reviewed and confirmed strengthened. |
+
+So: against `d04a66f`, exactly one id moved (`a10`). Against `main`, two do (`a10` + `a13`),
+because `main` predates PR #87. Neither was laundered through the other's change; diffing
+against `main` alone cannot tell them apart, which is why the base belongs in the report.
+
+The baseline also carries `sources` / `sources_via` — a digest of THIS document, so the prose
+done-definition is tamper-evident alongside the manifest and the test files (A9). That coverage
+was absent from the baseline on `main` and from every baseline before it; the commit that adds
+it re-freezes the whole file, which rewrites the JSON but changes no `ids` digest. To check a
+re-freeze for laundering, diff the `ids` object specifically, against a named base.
