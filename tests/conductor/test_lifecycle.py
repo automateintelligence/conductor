@@ -720,6 +720,46 @@ def test_finish_removes_the_runs_registered_worktree(project, git, capsys) -> No
     assert not worktree.exists()
 
 
+def test_finish_refuses_when_git_cannot_list_the_runs_worktrees(
+    project, git, capsys, monkeypatch
+) -> None:
+    """FAIL CLOSED. ``_run_worktrees`` used to return ``[]`` on a nonzero ``git worktree list``,
+    which the caller read as "this run has none" — so one transient git failure produced a
+    successful finish that removed nothing and marked the run TERMINAL. Every later call then
+    short-circuits on "already terminal", leaving the worktree with no verb that would clean it
+    up. The failure has to become a refusal that keeps the run resumable."""
+    worktree = (
+        project.root / ".worktrees" / "conductor" / project.run_key / "integration"
+    )
+    git(project.root, "worktree", "add", "-q", "-b", "wt-branch", str(worktree))
+    runstate.update(
+        project.state_root,
+        project.run_key,
+        lambda doc: {**doc, "integration_worktree": str(worktree)},
+    )
+    _awaiting(project, git, state="MERGED")
+    real_git = lifecycle._git
+
+    def flaky(repo_root: str, *args: str):
+        if args[:2] == ("worktree", "list"):
+            return subprocess.CompletedProcess(
+                args=["git"], returncode=128, stdout="", stderr="fatal: transient"
+            )
+        return real_git(repo_root, *args)
+
+    monkeypatch.setattr(lifecycle, "_git", flaky)
+    assert project.verb("finish", "--run", project.run_key) == 1
+    err = capsys.readouterr().err
+    assert "could not list the worktrees" in err, err
+    assert project.run["status"] == "awaiting-team-merge"
+    assert worktree.exists()
+    # And the run is still finishable once git answers, rather than stuck at terminal.
+    monkeypatch.setattr(lifecycle, "_git", real_git)
+    assert project.verb("finish", "--run", project.run_key) == 0
+    assert project.run["status"] == "terminal"
+    assert not worktree.exists()
+
+
 def test_finish_is_idempotent_on_a_terminal_run(project, git, capsys) -> None:
     _awaiting(project, git, state="MERGED")
     assert project.verb("finish", "--run", project.run_key) == 0

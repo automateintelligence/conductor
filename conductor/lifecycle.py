@@ -554,11 +554,24 @@ def _audited_head(repo_root: str, remote: str, run: dict) -> tuple[str | None, s
     return None, "nothing"
 
 
+class WorktreeListUnavailable(RuntimeError):
+    """git could not say which worktrees this run has, so cleanup cannot be called complete."""
+
+
 def _run_worktrees(repo_root: str, run: dict) -> list[str]:
-    """Registered linked worktrees belonging to this run, from git's own registration list."""
+    """Registered linked worktrees belonging to this run, from git's own registration list.
+
+    FAILS CLOSED. Returning ``[]`` on a nonzero ``git worktree list`` read "this run has no
+    worktrees", and the caller went on to delete branches and mark the run TERMINAL — so one
+    transient git failure produced a successful ``finish`` that removed nothing, after which
+    every later call short-circuits on ``already terminal`` and the worktrees are stranded with
+    no verb left that would clean them up. An empty list must mean git ANSWERED and said none."""
     out = _git(repo_root, "worktree", "list", "--porcelain")
     if out.returncode != 0:
-        return []
+        raise WorktreeListUnavailable(
+            f"git could not list the worktrees of {repo_root} (exit {out.returncode}): "
+            f"{(out.stderr or '').strip() or 'no output'}"
+        )
     registered = [
         line.split(" ", 1)[1].strip()
         for line in (out.stdout or "").splitlines()
@@ -748,9 +761,18 @@ def _finish_reserved(
         )
         return EXIT_FAIL
 
-    removed, refused = _remove_worktrees(
-        resolution.repo_root, _run_worktrees(resolution.repo_root, run)
-    )
+    try:
+        owned = _run_worktrees(resolution.repo_root, run)
+    except WorktreeListUnavailable as exc:
+        print(
+            f"finish refused for run {key}: {pull.url} is {pull.state} but {exc}\n"
+            f"  Nothing was removed and the run stays {status} — marking it terminal on an "
+            "unanswered question would strand any worktree this run still has, since finish "
+            "then short-circuits on 'already terminal'. Retry once git answers.",
+            file=sys.stderr,
+        )
+        return EXIT_FAIL
+    removed, refused = _remove_worktrees(resolution.repo_root, owned)
     if refused:
         print(
             f"finish refused for run {key}: {pull.url} is {pull.state} but these worktrees "

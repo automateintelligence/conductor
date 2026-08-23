@@ -47,7 +47,12 @@ case "${1:-}" in
   resume-script) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.resume_script "$@" ;;
   driver) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.driver "$@" ;;
   remote) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.remote "$@" ;;
-  doctor) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.doctor "$@" ;;
+  # -B / PYTHONDONTWRITEBYTECODE: `doctor relocation` promises it "moves nothing, renames nothing,
+  # and writes nothing anywhere", and every git call inside it carries --no-optional-locks to keep
+  # that promise. Python broke it one level up: importing conductor.doctor wrote __pycache__/ into
+  # the very checkout being judged, so the scan created untracked-and-ignored content and then
+  # `--strict` refused on the files it had just made, under a report saying nothing was written.
+  doctor) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" PYTHONDONTWRITEBYTECODE=1 exec python3 -B -m conductor.doctor "$@" ;;
   status) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.lifecycle status "$@" ;;
   resume) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.lifecycle resume "$@" ;;
   heartbeat) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.lifecycle heartbeat "$@" ;;
