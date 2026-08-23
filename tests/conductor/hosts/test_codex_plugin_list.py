@@ -323,6 +323,129 @@ def test_neither_parser_treats_an_unexpected_top_level_shape_as_an_installed_plu
         assert codex.plugin_roots_from_json(payload) == {}
 
 
+# --------------------------------------- an identity from the host is not a path from the host
+
+
+def _entry(**overrides):
+    """One `installed[]` element with the recorded shape, overridable field by field."""
+    entry = {
+        "pluginId": "conductor@trusted-market",
+        "name": "conductor",
+        "marketplaceName": "trusted-market",
+        "version": "1.0.0",
+        "installed": True,
+        "enabled": True,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _hostile_segments(tmp_path):
+    """Values for ONE component of `$CODEX_HOME/plugins/cache/<market>/<name>/<version>` that do
+    not stay in that component.
+
+    `os.path.join` drops everything before an absolute component outright, `..` climbs out, and a
+    value carrying a separator spends two levels of the layout at once. The derived path was then
+    handed to `isdir()`, which blesses whatever is really there — so a marketplace that controls
+    these three strings controls which `bin/conductor` the generated Codex driver execs.
+    """
+    return (
+        str(tmp_path / "escaped"),
+        "..",
+        "../escaped",
+        "sub/dir",
+        "",
+        ".",
+    )
+
+
+@pytest.mark.parametrize("field", ["marketplaceName", "name", "version"])
+def test_an_identity_field_that_leaves_its_path_component_is_refused(
+    codex_home, tmp_path, field
+):
+    """Codex validates these segments itself (`plugin/src/plugin_id.rs` at rust-v0.147.0), and
+    Conductor must not depend on an upstream check it cannot enforce: the JSON arrives over a
+    pipe from a binary this machine merely happens to have. Both parsers refuse — the Python one
+    and the driver's standalone mirror — and they are asked the same question here for the same
+    reason every other state in this module is."""
+    for hostile in _hostile_segments(tmp_path):
+        entry = _entry(**{field: hostile})
+        payload = json.dumps({"installed": [entry]})
+        target = os.path.normpath(
+            os.path.join(
+                str(codex_home),
+                "plugins",
+                "cache",
+                entry["marketplaceName"],
+                entry["name"],
+                entry["version"],
+            )
+        )
+        os.makedirs(os.path.join(target, "bin"), exist_ok=True)
+        with open(os.path.join(target, "bin", "conductor"), "w") as handle:
+            handle.write("#!/bin/sh\nexit 0\n")
+        assert os.path.isdir(target), (
+            f"the escaped root was never materialised, so `isdir` would refuse it for the wrong "
+            f"reason: {target}"
+        )
+
+        assert codex.plugin_roots_from_json(payload) == {}, (field, hostile, target)
+        assert codex.unverifiable_plugins_from_json(payload) == frozenset(), (
+            field,
+            hostile,
+        )
+        assert _snippet_state(payload, entry["name"], codex_home) == ("none", ""), (
+            field,
+            hostile,
+        )
+
+
+def test_a_hostile_entry_does_not_cost_the_valid_one_beside_it(codex_home, tmp_path):
+    """ANTI-STUB. "Refuse everything" satisfies the clause above and breaks every real install,
+    so the refusal has to be per-entry: a well-formed neighbour of a rejected identity still
+    resolves, through both parsers."""
+    good = _entry(
+        pluginId="superpowers@trusted-market", name="superpowers", version="2.3.1"
+    )
+    bad = _entry(marketplaceName=str(tmp_path / "escaped"))
+    payload = json.dumps({"installed": [bad, good]})
+    root = codex_home / "plugins" / "cache" / "trusted-market" / "superpowers" / "2.3.1"
+    root.mkdir(parents=True)
+    os.makedirs(str(tmp_path / "escaped" / "conductor" / "1.0.0"), exist_ok=True)
+
+    assert codex.plugin_roots_from_json(payload) == {"superpowers": str(root)}
+    assert _snippet_state(payload, "superpowers", codex_home) == ("root", str(root))
+    assert _snippet_state(payload, "conductor", codex_home) == ("none", "")
+
+
+def test_the_two_parsers_agree_on_every_identity_shape_either_could_meet(
+    codex_home, tmp_path
+):
+    """The anti-drift check, over identity SHAPES rather than over document shapes. The recorded
+    matrix above can only pose well-formed identities, so a validator added to one parser and not
+    the other would be invisible there — which is how the two came to disagree the last time."""
+    shapes = [
+        *[{"marketplaceName": v} for v in _hostile_segments(tmp_path)],
+        *[{"name": v} for v in _hostile_segments(tmp_path)],
+        *[{"version": v} for v in _hostile_segments(tmp_path)],
+        {"marketplaceName": None},
+        {"version": 1.0},
+        {"name": ["conductor"]},
+        {"marketplaceName": "Trusted-Market"},
+        {"version": "1.0.0-rc.1"},
+        {},  # the well-formed control
+    ]
+    root = codex_home / "plugins" / "cache" / "trusted-market" / "conductor" / "1.0.0"
+    root.mkdir(parents=True)
+    for overrides in shapes:
+        entry = _entry(**overrides)
+        payload = json.dumps({"installed": [entry]})
+        name = entry["name"] if isinstance(entry["name"], str) else "conductor"
+        assert _snippet_state(payload, name, codex_home) == _python_state(
+            payload, name
+        ), overrides
+
+
 # --------------------------------------------- a probe that never answers is its own answer
 
 #: `sleep`, resolved off the DEFAULT path rather than the ambient one. The fixtures below run
