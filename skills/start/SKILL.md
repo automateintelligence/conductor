@@ -136,10 +136,19 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    reviewed ONCE, by the owner, at the end.
    - **Reconcile-first, EXACT name:** `RB="$(conductor run-branch name <spec>)"` — the
      single-sourced resolver; never derive the slug in prose — then
-     `git ls-remote "$(conductor remote)" "refs/heads/$RB"` — exists → reuse; absent → create off
-     `D="$(conductor default-branch)" || HALT` and push. That resolver FAILS CLOSED — it prints
-     nothing and exits non-zero when the repo's default cannot be resolved from remote metadata;
-     HALT and tell the owner to fix the remote metadata rather than branching off a guess.
+     `git ls-remote "$(conductor remote)" "refs/heads/$RB"` — exists → reuse; absent → create it
+     off the resolved default and push, as ONE `&&` chain so an unresolved default cannot fall
+     through into a branch created off a guess:
+
+     ```bash
+     R="$(conductor remote)" && D="$(conductor default-branch)" \
+       && git fetch "$R" "$D" && git branch "$RB" "$R/$D" && git push "$R" "$RB"
+     ```
+
+     `conductor default-branch` FAILS CLOSED — it prints nothing and exits non-zero when the
+     repo's default cannot be resolved from remote metadata. The `&&` is the enforcement: on a
+     non-zero exit no branch is created. STOP setup there and tell the owner to fix the remote
+     metadata rather than branching off a guess.
      NEVER bind by wildcard scan
      (`conductor/run-*`): with two active runs a scan grabs the wrong spec's branch.
    - **Stale-run cleanup first:** if `.conductor/run_branch` names a branch that no longer exists

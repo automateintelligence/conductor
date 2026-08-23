@@ -532,3 +532,60 @@ def test_adr_backfill_lives_in_prepares_plan_evaluation_step():
     assert "backfill" in evaluation
     assert "**adrs:** none" in evaluation
     assert "dry-run" in evaluation
+
+
+# A skill is prose a worker READS AND EXECUTES. Text shaped like shell but not executable is a
+# live defect, not a stylistic one: `D="$(conductor default-branch)" || HALT` reads as
+# fail-closed, but `HALT` is neither a shell keyword nor a binary, so a worker gets
+# `HALT: command not found`, CONTINUES, and runs the next line with an empty `$D` — the exact
+# hazard the fail-closed resolver exists to prevent. Guard the shape, not the one word.
+_NOT_COMMANDS = frozenset(
+    {
+        "HALT",
+        "ESCALATE",
+        "STOP",
+        "ABORT",
+        "FAIL",
+        "SKIP",
+        "RETRY",
+        "BLOCK",
+        "PAUSE",
+        "WARN",
+        "CONTINUE",
+        "REFUSE",
+        "ERROR",
+    }
+)
+
+# `||`, `&&`, `;`, `|`, and the `$(`/`)` of a substitution all start a fresh command position.
+_COMMAND_POSITION = re.compile(r"\|\||&&|;|\||\$\(|\)")
+
+
+def _command_positions(text: str):
+    """Every (line_no, segment) where a shell command must begin, over the executable spans of
+    a SKILL.md: inline `code` spans and fenced blocks."""
+    fenced = False
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        spans = [line] if fenced else re.findall(r"`([^`]+)`", line)
+        for span in spans:
+            for segment in _COMMAND_POSITION.split(span):
+                segment = segment.strip()
+                if segment:
+                    yield lineno, segment
+
+
+@pytest.mark.parametrize("path", sorted(_REGIONS) + ["skills/issue-sync/SKILL.md"])
+def test_no_skill_puts_an_instruction_word_where_a_command_must_be(path):
+    raw = open(os.path.join(ROOT, path), encoding="utf-8").read()
+    offenders = [
+        f"{path}:{lineno}: {segment}"
+        for lineno, segment in _command_positions(raw)
+        if segment.split()[0] in _NOT_COMMANDS
+    ]
+    assert offenders == [], (
+        "instruction word standing in a shell command position; a worker executing this gets "
+        "'command not found' and CONTINUES past the failure:\n" + "\n".join(offenders)
+    )
