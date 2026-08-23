@@ -40,6 +40,17 @@ that shape or updates this assertion deliberately.
 NO REAL RELOCATION HAPPENS. Every fixture is a self-contained temporary directory. No test
 performs or simulates a relocation of a real Conductor installation, and the byte-level manifest
 below is what proves the check mutated nothing.
+
+A RECOVERY COMMAND IS RECOGNISED AS A COMMAND, NOT AS A WORD. This clause used to search the
+report for the bare string ``conductor``, which every report contains for free: the state
+directory is ``.conductor/`` and the fixture checkout was itself NAMED ``conductor``. Deleting
+every rendered recovery and re-check command left the assertion green. Two things fix that and
+both are necessary. The fixture checkout is named ``workspace`` — a directory name that is not a
+substring satisfying the check — and ``RECOVERY_COMMAND`` matches an executable at a word
+boundary a filesystem path cannot supply, followed by arguments, one of which must name this
+blocker's own artifact or the checkout. ``<checkout>/.conductor/resume-autodev.sh`` and the
+crontab marker ``# conductor-autodev <checkout>`` both fail that;
+``conductor resume-script uninstall-cron --project <checkout>`` passes it.
 """
 
 from __future__ import annotations
@@ -81,6 +92,34 @@ PLAN_02 = (
 )
 
 SPEC_RELPATH = "docs/fixture-spec.md"
+
+#: The fixture checkout's directory name. Deliberately NOT `conductor`: a fixture whose own name
+#: satisfies the recovery-command check makes that check unfalsifiable, which is exactly what it
+#: was. Pinned by `test_the_recovery_recogniser_rejects_a_report_of_bare_fixture_paths`.
+CHECKOUT_NAME = "workspace"
+
+#: What an operator can actually RUN to clear a blocker. Deliberately a small, explicit set: the
+#: point is to recognise a command, and a rule loose enough to match any word matches the report's
+#: own prose and its own paths.
+RECOVERY_EXECUTABLES = (
+    "conductor",
+    "git",
+    "crontab",
+    "kill",
+    "pkill",
+    "launchctl",
+    "systemctl",
+)
+
+#: One recovery command. The executable must sit at a word boundary a filesystem path cannot
+#: supply — start of line, or after whitespace or a shell quote, never after `/` or `.` or `-` —
+#: and must be followed by at least one argument. `<checkout>/.conductor/x` and
+#: `# conductor-autodev <checkout>` are therefore not commands, and neither is a checkout that
+#: happens to be named after the CLI.
+RECOVERY_COMMAND = re.compile(
+    r"(?:^|(?<=[\s'\"`(]))(?:" + "|".join(RECOVERY_EXECUTABLES) + r")[ \t]+\S[^\n]*",
+    re.MULTILINE,
+)
 
 
 def _registered_verbs() -> list[str]:
@@ -232,7 +271,7 @@ def _seed_checkout(variant: Variant, status: str) -> dict[str, str]:
     variant.workdir = pathlib.Path(
         tempfile.mkdtemp(prefix=f"a-dh-5-{variant.name}-")
     ).resolve()
-    variant.checkout = variant.workdir / "conductor"
+    variant.checkout = variant.workdir / CHECKOUT_NAME
     home = variant.workdir / "home"
     bindir = home / ".local" / "bin"
     for directory in (variant.checkout, home, bindir):
@@ -428,6 +467,21 @@ def _assert_untouched(built: Variant) -> None:
     )
 
 
+def _recovery_command(built: Variant) -> str | None:
+    """The first recovery command in this refusal that is EXACT — a runnable command line that
+    names this blocker's own artifact or the checkout it blocks.
+
+    "Exact" is the assertion spec's own word and it is what makes the difference between advice
+    and an instruction: `crontab -e` tells an operator to go looking, `conductor resume-script
+    uninstall-cron --project <checkout>` tells them what to run.
+    """
+    for match in RECOVERY_COMMAND.finditer(built.report):
+        command = match.group(0).strip()
+        if built.blocking_path in command or str(built.checkout) in command:
+            return command
+    return None
+
+
 def _assert_refused(built: Variant) -> None:
     """Non-zero exit, the blocking artifact named WITH ITS PATH, and an exact recovery
     command."""
@@ -440,8 +494,44 @@ def _assert_refused(built: Variant) -> None:
         f"the refusal does not name the blocking artifact's path {built.blocking_path!r}; a "
         f"generic blocker name is not actionable:\n{built.report}"
     )
-    assert "conductor" in built.report.lower(), (
-        f"the refusal prints no recovery command an operator can run:\n{built.report}"
+    assert _recovery_command(built) is not None, (
+        "the refusal prints no exact recovery command an operator can run — no line invokes "
+        f"one of {RECOVERY_EXECUTABLES} with arguments naming {built.blocking_path!r} or the "
+        f"checkout. A report that merely CONTAINS the word is not a command:\n{built.report}"
+    )
+
+
+def test_the_recovery_recogniser_rejects_a_report_of_bare_fixture_paths() -> None:
+    """Anti-vacuity for the recovery clause itself, and the hole it closes.
+
+    Every report this check produces contains the string ``conductor`` for free — the run state
+    directory is ``.conductor/`` and the crontab marker is ``# conductor-autodev <checkout>`` —
+    so a substring search for it is satisfied by a report with every recovery command deleted.
+    This builds exactly such a report out of the fixture's own paths and requires the recogniser
+    to find nothing in it."""
+    built = variant("schedule")
+    assert built.error is None, built.error
+    assert CHECKOUT_NAME not in RECOVERY_EXECUTABLES, (
+        f"the fixture checkout is named {CHECKOUT_NAME!r}, which the recogniser accepts as a "
+        "command — its own path would then satisfy every recovery clause"
+    )
+    marker = resume_script.cron_marker(str(built.checkout))
+    bare = "\n".join(
+        [
+            f"[relocation] checkout: {built.checkout}",
+            "  BLOCKED installed-schedule",
+            f"      artifact: {built.blocking_path}",
+            f"      */10 * * * * {built.blocking_path} {marker}",
+            f"[relocation] REFUSED: 1 predicate(s) block relocating {built.checkout}.",
+        ]
+    )
+    assert "conductor" in bare, (
+        "this fixture report was supposed to carry the word for free; if it no longer does, the "
+        "hole being pinned here has moved"
+    )
+    assert not RECOVERY_COMMAND.findall(bare), (
+        "the recogniser accepts a report that contains no recovery command at all, only the "
+        f"fixture's own paths: {RECOVERY_COMMAND.findall(bare)}"
     )
 
 

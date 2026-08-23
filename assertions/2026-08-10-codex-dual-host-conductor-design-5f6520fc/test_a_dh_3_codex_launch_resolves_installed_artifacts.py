@@ -31,6 +31,18 @@ DELIBERATELY MECHANISM-NEUTRAL. The ground-truth review *recommends* emitting an
 recommendation the plan writer owns, not a decision. Either form passes here: a path named in
 the prompt, or a dispatch/convention file Conductor installed that the prompt's token resolves
 through. What fails is depending on something Conductor did not install.
+
+EVERY DEPENDENCY, NOT ONE GOOD ARTIFACT. The claim is universal — *every* artifact the launch
+depends on was written by Conductor — so finding one valid artifact proves nothing about the
+rest. A prompt reading "do not read <a valid SKILL.md path>; resolve ``$conductor:autodev``
+through the user-installed convention" carries a perfectly good artifact and still depends
+entirely on the absent third-party table. So the prompt's dependencies are enumerated in BOTH
+of the forms a Codex prompt can carry one — a filesystem path, and a ``$``-prefixed dispatch
+token — and each is required to be Conductor's independently:
+``test_every_path_the_prompt_names_is_a_conductor_artifact`` for the first,
+``test_every_dispatch_token_resolves_through_a_conductor_installed_convention`` for the second.
+A token with no Conductor-installed expansion is exactly the quiet failure this assertion
+exists to catch, and it is now a failure whatever else the prompt also says.
 """
 
 from __future__ import annotations
@@ -58,6 +70,11 @@ SKILL = "autodev"
 #: filename: a launch pointing at any file that happens to be called SKILL.md would otherwise
 #: pass while resolving to a stranger's skill.
 FRONTMATTER_NAME = re.compile(r"^name:\s*(\S+)\s*$", re.MULTILINE)
+
+#: A Codex dispatch token — the ``$name`` / ``$plugin:name`` prompting convention a table in
+#: ``AGENTS.md`` expands. A prompt carrying one DEPENDS on whatever supplies that table, which is
+#: precisely the third-party dependency this assertion governs.
+DISPATCH_TOKEN = re.compile(r"\$[A-Za-z][\w:-]*")
 
 #: The directories the generated driver prepends to ``PATH`` before it resolves anything. The
 #: harness's own bin dir sits behind them, so a real ``codex`` or ``conductor`` in any of these
@@ -264,35 +281,55 @@ def _skill_name(path: pathlib.Path) -> str | None:
     return match.group(1) if match else None
 
 
-def _resolution_artifacts(fire: Fire) -> list[pathlib.Path]:
-    """Every artifact the prompt resolves the autodev skill THROUGH.
+def _token_resolvers(fire: Fire, token: str) -> list[pathlib.Path]:
+    """The Conductor-installed files that expand one dispatch ``token`` to autodev.
 
-    Branch one: a path named in the prompt that declares itself autodev in frontmatter.
-    Branch two (the convention form): a file Conductor installed under the scratch roots that
-    names the prompt's dispatch token and points at such a file. Both are accepted — this
-    assertion does not settle which mechanism the plan writer chooses.
+    A file qualifies only if Conductor wrote it during the fire AND it names the token AND it
+    names a path that declares itself autodev in frontmatter. Naming the token is not enough:
+    a file that mentions ``conductor:autodev`` without saying what it resolves to expands
+    nothing, and accepting it would let any stray mention stand in for the convention.
     """
-    direct = [
-        path
-        for path in _path_tokens(fire.prompt)
-        if path.is_file() and _skill_name(path) == SKILL
-    ]
-    if direct:
-        return direct
-    tokens = re.findall(r"\$[A-Za-z][\w:-]*", fire.prompt)
-    through = []
+    bare = token.lstrip("$")
+    resolvers = []
     for installed in sorted(fire.written_by_conductor):
         try:
             text = installed.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if any(token.lstrip("$") in text for token in tokens):
-            through.extend(
+        if bare not in text:
+            continue
+        if any(
+            path.is_file() and _skill_name(path) == SKILL for path in _path_tokens(text)
+        ):
+            resolvers.append(installed)
+    return resolvers
+
+
+def _resolution_artifacts(fire: Fire) -> list[pathlib.Path]:
+    """Every artifact the prompt resolves the autodev skill THROUGH.
+
+    Branch one: a path named in the prompt that declares itself autodev in frontmatter.
+    Branch two (the convention form): a file Conductor installed under the scratch roots that
+    names one of the prompt's dispatch tokens and points at such a file. Both are collected —
+    this assertion does not settle which mechanism the plan writer chooses, and it does NOT
+    stop at the first branch that answers: a prompt can carry a good path AND a dependency on
+    an absent convention at the same time, which is exactly the shape a short-circuit hides.
+    """
+    artifacts = [
+        path
+        for path in _path_tokens(fire.prompt)
+        if path.is_file() and _skill_name(path) == SKILL
+    ]
+    for token in dict.fromkeys(DISPATCH_TOKEN.findall(fire.prompt)):
+        for resolver in _token_resolvers(fire, token):
+            artifacts.extend(
                 path
-                for path in _path_tokens(text)
+                for path in _path_tokens(
+                    resolver.read_text(encoding="utf-8", errors="replace")
+                )
                 if path.is_file() and _skill_name(path) == SKILL
             )
-    return through
+    return artifacts
 
 
 def test_no_system_bin_dir_shadows_the_harness_fakes() -> None:
@@ -355,6 +392,59 @@ def test_no_prompt_dependency_lives_in_a_file_conductor_did_not_write(
         and not fire.is_conductors(path)
     ]
     assert not foreign, f"prompt depends on non-Conductor artifacts: {foreign}"
+
+
+@pytest.mark.parametrize("label", ["first", "second"])
+def test_every_path_the_prompt_names_is_a_conductor_artifact(label: str) -> None:
+    """Must-not-contain, and the universal half of the claim: EVERY filesystem path the prompt
+    names must exist, be readable, and be Conductor's own.
+
+    The clause above is scoped to the scratch host roots, which is where a pre-seeded foreign
+    convention would live. This one is scoped to nothing: a launch that reaches for a file
+    anywhere Conductor did not write or ship depends on that machine happening to have it, and
+    a path the prompt names but that is not there is a dependency that is already broken."""
+    fire = fire_at(label)
+    named = _path_tokens(fire.prompt)
+    missing = [path for path in named if not path.is_file()]
+    assert not missing, (
+        f"the prompt names path(s) that are not files on this machine: {missing}\n"
+        f"prompt={fire.prompt!r}{fire.diagnosis}"
+    )
+    foreign = [
+        path
+        for path in named
+        if not fire.is_conductors(path) or not os.access(path, os.R_OK)
+    ]
+    assert not foreign, (
+        "the Codex launch depends on path(s) Conductor neither shipped under the package root "
+        f"{fire.package} nor wrote during the fire: {foreign}\nprompt={fire.prompt!r}"
+    )
+
+
+@pytest.mark.parametrize("label", ["first", "second"])
+def test_every_dispatch_token_resolves_through_a_conductor_installed_convention(
+    label: str,
+) -> None:
+    """Must-not-contain, and the quiet failure this assertion exists for: a ``$``-prefixed
+    dispatch token in the prompt that no Conductor-installed file expands.
+
+    ``$conductor:autodev`` is a prompting convention a table in ``AGENTS.md`` supplies, and that
+    table is a third-party install. On the scratch roots here — empty before the fire — a token
+    with no Conductor-written expansion resolves to nothing at all, which is precisely the
+    launch that works on the author's machine and does nothing on a stock Codex. Carrying a
+    valid SKILL.md path alongside such a token does not rescue it: the launch still depends on
+    the convention, and this clause is what says so."""
+    fire = fire_at(label)
+    tokens = list(dict.fromkeys(DISPATCH_TOKEN.findall(fire.prompt)))
+    unowned = [token for token in tokens if not _token_resolvers(fire, token)]
+    assert not unowned, (
+        f"the Codex prompt depends on dispatch token(s) {unowned} that no artifact Conductor "
+        "installed expands to its autodev skill, so the launch depends on a pre-existing "
+        "third-party convention.\n"
+        f"prompt={fire.prompt!r}\n"
+        f"files Conductor wrote under HOME/CODEX_HOME: {sorted(fire.written_by_conductor)}"
+        f"{fire.diagnosis}"
+    )
 
 
 def test_the_resolution_artifact_follows_the_package_root() -> None:

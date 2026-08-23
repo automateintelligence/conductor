@@ -28,14 +28,29 @@ shell-hostile bytes — a ``$``-prefixed token, a backtick pair, a semicolon, an
 quote and a newline. It is the DIRECTORY name and not the prompt because the A1 driver carries a
 FIXED prompt for each host: Claude's is the literal ``/conductor:autodev`` and Codex's is a
 sentence with the skill path interpolated into it. The bytes therefore have to be planted where
-the driver actually interpolates — the worktree path and the Conductor source root — which is
-also where a shell string would do its damage. Those bytes must arrive intact in a SINGLE
-recorded field: a shell would expand the ``$`` token, consume the backticks, and split on the
-semicolon and the newline. For Codex the interpolation lands INSIDE the prompt argv element, so
-the prompt itself is checked byte-for-byte; for Claude it lands in the working directory and in
-``CONDUCTOR_HOME``, and the fixed prompt is checked only for being one discrete element. No
-separate check for ``/bin/sh`` in the spawn chain is made, and none is specified — inspecting
-the spawn chain is platform-specific and brittle where this is neither.
+the driver actually interpolates — and the fixture plants them at EVERY such place, because a
+byte-identity clause is only as strong as the interpolation site it watches. Those bytes must
+arrive intact in a SINGLE recorded field: a shell would expand the ``$`` token, consume the
+backticks, and split on the semicolon and the newline.
+
+THE HOST EXECUTABLE IS ONE OF THOSE SITES, AND IT IS THE ONE BOTH HOSTS SHARE. Every fire line
+begins with ``"$CLAUDE_BIN"`` or ``"$CODEX_BIN"``, a path the driver resolves at RUN time out of
+``PATH`` and then interpolates. So the fakes live under ``$HOME/.local/bin`` with ``HOME`` ITSELF
+under the fixture directory: the resolved executable path carries the hostile bytes, and
+``test_the_resolved_host_executable_is_one_whole_argv_element`` requires it to arrive as
+``argv[0]`` byte-identical. That is what makes the CLAUDE leg prove argument-vector semantics as
+strongly as the Codex leg — Claude's prompt is fixed, so a launch rebuilt as an interpolated
+shell string leaves the prompt untouched and can only be caught where the driver actually
+interpolates. Under such a launch the executable path word-splits and the fire spawns nothing at
+all. ``HOME`` remains the driver's PATH root (``$HOME/.local/bin`` is prepended before every
+system bin dir), which is what makes these fakes beat any real claude/codex on this machine
+deterministically rather than by luck; moving it under the fixture directory changes the bytes
+of that root, not its position.
+
+For Codex the source-root interpolation additionally lands INSIDE the prompt argv element, so
+the prompt itself is checked byte-for-byte; Claude's fixed prompt is checked only for being one
+discrete element. No separate check for ``/bin/sh`` in the spawn chain is made, and none is
+specified — inspecting the spawn chain is platform-specific and brittle where this is neither.
 """
 
 from __future__ import annotations
@@ -101,6 +116,7 @@ class Fire:
         self.project = pathlib.Path()
         self.worktree = pathlib.Path()
         self.package = pathlib.Path()
+        self.fake = pathlib.Path()
         self.driver_rc: int | None = None
         self.driver_log = ""
 
@@ -149,17 +165,22 @@ def _fire(host_id: str) -> Fire:
     fire.project = hostile / "project"
     fire.worktree = hostile / "worktree"
     fire.package = hostile / "package"
-    # HOME stays free of the fixture bytes on purpose: it is the driver's PATH root
-    # (`$HOME/.local/bin` is prepended before every system bin dir), so putting the fakes there
-    # is what makes them beat any real claude/codex installed on this machine — deterministically,
-    # rather than by this machine happening not to have one.
-    home = fire.workdir / "home"
+    # HOME sits UNDER the fixture bytes, and that placement is load-bearing twice over. It is
+    # the driver's PATH root (`$HOME/.local/bin` is prepended before every system bin dir), so
+    # putting the fakes there is what makes them beat any real claude/codex installed on this
+    # machine — deterministically, rather than by this machine happening not to have one. And
+    # because the driver RESOLVES the host executable out of that PATH and then interpolates it
+    # into the fire line, the resolved path is the interpolation site both hosts share: it is
+    # where Claude's launch — whose prompt is a fixed literal and therefore proves nothing —
+    # can be shown to be an argument vector rather than a shell string.
+    home = hostile / "home"
     bindir = home / ".local" / "bin"
     logdir = fire.workdir / "log"
     for directory in (fire.project, fire.worktree, bindir, logdir):
         directory.mkdir(parents=True)
     _seed_package_root(fire.package)
     logs = _write_fakes(bindir, logdir)
+    fire.fake = bindir / host_id
     # `conductor` resolves through PATH to a SYMLINK; the Codex driver derives its source root
     # from `readlink -f` of the bin it resolved, so the symlink is what proves the source root
     # tracks the package tree rather than the PATH entry.
@@ -297,6 +318,36 @@ def test_exactly_one_launch_of_the_recorded_host(host_id: str) -> None:
     argv = fire.records[host_id][0]["argv"]
     assert os.path.basename(argv[0]) == host_id, (
         f"the fire spawned {argv[0]!r}, not the recorded host's executable"
+    )
+
+
+@pytest.mark.parametrize("host_id", base.HOST_IDS)
+def test_the_resolved_host_executable_is_one_whole_argv_element(host_id: str) -> None:
+    """The interpolation site both hosts share, and the one that proves CLAUDE's launch is an
+    argument vector.
+
+    Every fire line begins with the host executable the driver resolved out of ``PATH`` at run
+    time and then interpolated. That path carries the fixture's shell-hostile bytes, so it must
+    arrive as ``argv[0]`` byte-identical to the fake this test planted. A launch rebuilt as an
+    interpolated shell string cannot reach here at all: the path word-splits on the semicolon
+    and the spaces, the ``$`` token expands away, the backtick pair runs, and nothing named
+    ``claude`` or ``codex`` is ever executed — so the fire records nothing and the count clause
+    above fails first. Claude's prompt is a fixed literal and survives any amount of shell
+    mangling untouched; this is what does not."""
+    fire = fire_for(host_id)
+    assert fire.records[host_id], (
+        f"the fire spawned {host_id} zero times, which is what an interpolated shell string "
+        f"produces here: the resolved executable path {str(fire.fake)!r} word-splits and nothing "
+        f"named {host_id} is ever executed.{fire.diagnosis}"
+    )
+    argv = fire.records[host_id][0]["argv"]
+    assert HOSTILE in str(fire.fake), (
+        "the fixture's own executable path lost the hostile bytes, so this clause would measure "
+        f"nothing: {str(fire.fake)!r}"
+    )
+    assert argv[0] == str(fire.fake), (
+        "the resolved host executable did not arrive as one whole argv element.\n"
+        f"argv[0]={argv[0]!r}\nexpected={str(fire.fake)!r}{fire.diagnosis}"
     )
 
 
