@@ -114,16 +114,47 @@ class MissingAssertionsSource(RuntimeError):
     closed: freezing without the done-definition reopens the integrity hole."""
 
 
-def _assertions_source(repo_root: str) -> tuple[dict, str]:
+#: Gate-local, TRACKED pointer naming the spec whose `.assertions.md` this gate's baseline
+#: covers. One line (`#` comments and blanks ignored), repo-relative, naming the spec `.md`
+#: or its `.assertions.md` directly. Lives next to `manifest.yaml` and `.frozen`.
+SOURCE_POINTER = ".assertions-source"
+
+
+def _read_pointer(gate_dir: str) -> str | None:
+    """The spec path declared in `<gate-dir>/.assertions-source`, else None."""
+    path = os.path.join(gate_dir, SOURCE_POINTER)
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    return line
+    except OSError:
+        return None
+    return None
+
+
+def _assertions_source(
+    repo_root: str, manifest_path: str | None = None
+) -> tuple[dict, str]:
     """({relpath: sha256}, via) for the human-authored `<spec>.assertions.md` —
     the done-DEFINITION, made tamper-evident alongside the manifest and test
-    files. `via` is "env", "goal", "glob", or "none" (how the source was discovered).
+    files. `via` is "env", "gate", "goal", "glob", or "none" (how it was discovered).
 
     Highest precedence: `$CONDUCTOR_ASSERTIONS_SOURCE` names THIS run's spec (its
     `.md` — the `.assertions.md` sibling is taken — or the `.assertions.md` itself).
     The `conductor:start` skill sets it for the step-3 freeze, which runs BEFORE the goal is
     recorded: in a multi-spec repo the glob below would otherwise fail closed
     (`ambiguous-assertions-source`) or a stale `goal.md` would bind the wrong spec.
+
+    Then the gate's OWN tracked pointer, `<gate-dir>/.assertions-source` (`gate`). The env
+    override and `goal.md` are both RUN state — the first lives for one command, the second
+    is git-ignored — so a baseline resolved through either is only reproducible inside that
+    run: a fresh clone re-resolves to something else (or to nothing) and `verify` reports
+    TAMPERED. The pointer is committed next to the manifest it describes, so the baseline
+    binds to the same document on every checkout, and stays unambiguous no matter how many
+    other specs the repo later grows.
+
     Else, precise path: parse `<project>/.conductor/goal.md` for a
     `docs/specs/<name>.md` path and take its `.assertions.md` sibling; a goal
     whose named spec has no `.assertions.md` sibling — or that names no spec at
@@ -144,6 +175,24 @@ def _assertions_source(repo_root: str) -> tuple[dict, str]:
                 f"{override} but {path} does not exist"
             )
         return {os.path.relpath(path, repo_root): _sha256_file(path)}, "env"
+    gate_dir = (
+        os.path.dirname(manifest_path)
+        if manifest_path
+        else os.path.join(repo_root, "assertions")
+    )
+    declared = _read_pointer(gate_dir)
+    if declared:
+        path = (
+            declared if os.path.isabs(declared) else os.path.join(repo_root, declared)
+        )
+        if not path.endswith(".assertions.md"):
+            path += ".assertions.md"
+        if not os.path.isfile(path):
+            raise MissingAssertionsSource(
+                f"missing-assertions-source: {os.path.join(gate_dir, SOURCE_POINTER)} "
+                f"names {declared} but {path} does not exist"
+            )
+        return {os.path.relpath(path, repo_root): _sha256_file(path)}, "gate"
     goal_path = os.path.join(repo_root, ".conductor", "goal.md")
     if os.path.isfile(goal_path):
         with open(goal_path, encoding="utf-8") as f:
@@ -197,7 +246,7 @@ def record(
     """Snapshot the current gate to the baseline file (called at `conductor:start`)."""
     state = gate_state(manifest_path, repo_root)
     doc: dict = {"version": 1, "ids": state}
-    sources, via = _assertions_source(repo_root)
+    sources, via = _assertions_source(repo_root, manifest_path)
     if sources:
         doc["sources"] = sources
         doc["sources_via"] = via
@@ -264,14 +313,25 @@ def verify(
         # single-file glob path. Old baselines without "sources" skip this.
         base_via = base_doc.get("sources_via")
         goal_file = os.path.join(repo_root, ".conductor", "goal.md")
+        pointer_file = os.path.join(
+            os.path.dirname(manifest_path) or ".", SOURCE_POINTER
+        )
         if base_via == "goal" and not os.path.isfile(goal_file):
             tampered.append(
                 "assertions-source-unresolvable: .conductor/goal.md (which "
                 "selected the frozen assertions source) was removed"
             )
+        elif base_via == "gate" and not os.path.isfile(pointer_file):
+            # Same rule for the gate-local pointer: deleting the file that SELECTED the
+            # frozen source must not fall through to the goal/glob tiers and re-resolve to
+            # something that happens to match.
+            tampered.append(
+                f"assertions-source-unresolvable: {SOURCE_POINTER} (which selected "
+                "the frozen assertions source) was removed"
+            )
         else:
             try:
-                current_sources, _via = _assertions_source(repo_root)
+                current_sources, _via = _assertions_source(repo_root, manifest_path)
                 current_set: set | None = set(current_sources)
             except Exception as exc:  # ambiguous/missing now -> fail closed
                 current_set = None

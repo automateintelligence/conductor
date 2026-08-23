@@ -109,5 +109,9 @@
       }
     }
   },
+  "sources": {
+    "docs/specs/2026-07-05-self-enforcement.md.assertions.md": "5358d88730c21e5766b89d13c73717903db2910247935d7f4410ce95bb6da4e1"
+  },
+  "sources_via": "gate",
   "version": 1
 }

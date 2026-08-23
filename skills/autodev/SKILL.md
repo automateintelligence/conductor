@@ -40,14 +40,22 @@ step 3b's terminal crontab removal.
    assume `origin`** — it derives the remote from the repo URL (many repos use `github`), matching
    what `merge-gate` uses; a hardcoded `origin` fails the fetch/merge on those repos.
 1b. **KEEP THE RUN BRANCH CURRENT (every fire, before anything else builds).** On the run
-   branch, with `R="$(conductor remote)"` and `D="$(conductor default-branch)" || HALT` (the
-   single-sourced default-branch resolver — it FAILS CLOSED: it prints nothing and exits
-   non-zero when the repo's default cannot be resolved from remote metadata, so you MUST check
-   the status and HALT/escalate rather than continue with an empty `$D`, which would make
-   `git fetch "$R" ""` operate on the wrong ref): `git fetch "$R" "$D" && git merge "$R/$D"`
-   (MERGE, never rebase — a
-   shared integration branch's history is load-bearing; phase branches may rebase, the run
-   branch never does). Conflicts get resolved NOW, by you, in this small increment — or
+   branch, run the resolution and the merge as ONE `&&` chain, so a failed resolve cannot fall
+   through into a git command:
+
+   ```bash
+   R="$(conductor remote)" && D="$(conductor default-branch)" \
+     && git fetch "$R" "$D" && git merge "$R/$D"
+   ```
+
+   `conductor default-branch` is the single-sourced resolver and it FAILS CLOSED: it prints
+   nothing and exits non-zero when the repo's default cannot be resolved from remote metadata.
+   The `&&` is the enforcement — nothing after it runs, so `git fetch "$R" ""` on an empty `$D`
+   is impossible. **A non-zero exit from that chain at the resolver is not a retry: STOP this
+   fire, write the handoff, and escalate to the owner to fix the remote metadata.** Never
+   substitute a guessed default.
+   MERGE, never rebase — a shared integration branch's history is load-bearing; phase branches
+   may rebase, the run branch never does. Conflicts get resolved NOW, by you, in this small increment — or
    escalated — never left to accumulate for the owner's final review. If the merge brought
    changes, re-run `conductor assert run --level spec` before proceeding: gate-green must mean
    green against CURRENT reality, not day-1 reality.
@@ -68,10 +76,16 @@ step 3b's terminal crontab removal.
    **All green AND no plans left** → the run is complete:
    **3a. OPEN THE FINAL OWNER PR (run topology only — skip when no run branch is configured).**
    Verify the run branch is not behind the default branch (step 1b just merged; re-check).
-   Generate the review packet — `conductor run-packet <run-branch> > /tmp/packet.md` — then,
-   with `D="$(conductor default-branch)" || HALT` (fail-closed — an unresolved default means
-   NO final PR is opened; never guess a base),
-   `gh pr create --base "$D" --head <run-branch> --body-file /tmp/packet.md`, title
+   Generate the review packet — `conductor run-packet <run-branch> > /tmp/packet.md` — then
+   resolve the base and open the PR as ONE `&&` chain, so an unresolved default means NO final
+   PR is opened rather than one opened against a guessed base:
+
+   ```bash
+   D="$(conductor default-branch)" \
+     && gh pr create --base "$D" --head <run-branch> --body-file /tmp/packet.md
+   ```
+
+   A non-zero exit at the resolver → STOP and escalate; do not open the PR by hand. Title
    "Conductor run complete: <spec-slug> — owner review", and assign the owner. **NEVER merge
    this PR — not with merge-gate ok, not with --admin, not at all.** It is the owner's single
    review point for the whole run; conductor's authority ends at opening it. (Where the repo

@@ -97,7 +97,12 @@ trap this spec exists to kill. Every assertion below is written to fail if the i
 - **Setup:** a repo whose real default is `trunk` (so a hard-coded literal cannot pass by luck), and the same repo with `gh` and the `origin/HEAD` symbolic ref both unable to answer.
 - **Observation:** resolvable → exit 0 and stdout exactly `trunk`; unresolvable → non-zero exit, stdout byte-empty, stderr naming default-branch resolution. Swept across both configurations, stdout has no third shape. It MUST NOT print an empty line, and MUST NOT print `main`/`master` as the answer on the failure path.
 - **Kind:** property.
-- **Re-derived 2026-08-21** (dual-host design §"Branch, worktree, and pull-request model" / A-DH-6: "If the default branch cannot be resolved, every automated merge is refused; there is no fallback default"). The original claim's fail-open half — "on resolution failure it prints `main`" — is exactly what A-DH-6 forbids; the never-empty half is retained and tightened (byte-empty, not a blank line), and the never-a-literal-fallback clause is added. Strictly stronger: every configuration the old form rejected, this one still rejects.
+- **Re-derived 2026-08-21 — one half PRESERVED, one TIGHTENED, one INVERTED** (dual-host design §"Branch, worktree, and pull-request model" / A-DH-6: "If the default branch cannot be resolved, every automated merge is refused; there is no fallback default"). This is a REPLACEMENT of a frozen contract, not a strengthening of it. What happened to each half:
+  - **PRESERVED — never empty.** The original hazard stands unchanged: stdout must never be an empty value that a caller substitutes into `git fetch "$R" "$D"`.
+  - **TIGHTENED — byte-empty, not a blank line.** The old form allowed the failure path to print *something* (it required `main`); the new form requires stdout to be byte-empty on that path, so there is no blank line for a caller to mistake for a value. Newly added alongside it: no configuration may emit `main`/`master` unless that genuinely IS the repository's resolved default.
+  - **INVERTED — the fallback contract.** Old A10 REQUIRED `rc=0` and stdout exactly `main` when resolution failed. New A10 FORBIDS that: it requires `rc=1` and byte-empty stdout. The configuration the old assertion demanded is now the configuration the new assertion rejects. A10 is therefore **not** monotonically stronger — a resolver that satisfied old A10 on the failure path fails new A10, and vice versa.
+  - **Why invert rather than extend.** A-DH-6 forbids a literal fallback outright, because the fallback is not a safe default: with the run-branch topology, a wrong default branch means an automated merge into the WRONG BRANCH — a silent, destructive success — whereas a refusal is a loud, recoverable stop. Fail-open was the correct reading of the hazard in 2026-07-05 (an empty ref) and the wrong reading once merges became automated.
+  - **Consequence for readers of the frozen baseline.** The A10 digest in `assertions/.frozen` moved for this reason and only this reason; see "Frozen-baseline provenance" at the end of this document for the base each recorded digest is measured against.
 
 ## A11 — run-branch-name-deterministic
 - **Claim:** `conductor run-branch name <spec>` is deterministic and canonical.
@@ -134,3 +139,28 @@ trap this spec exists to kill. Every assertion below is written to fail if the i
 - **Setup:** two assertion test files — one whose body is `assert True` (or a bare non-empty literal / `assert 1`), one that asserts against real behavior.
 - **Observation:** the trivially-true file → flagged (non-zero / named); the real-behavior file → not flagged for this reason. An unparseable test → flagged (fail-closed), never silently passed.
 - **Kind:** property.
+
+---
+
+## Frozen-baseline provenance
+
+`assertions/.frozen` records one digest per assertion id. A digest diff is meaningless without
+the base it is measured against, so state the base whenever a re-freeze is reported — "exactly
+one digest moved" is true or false depending on what you diff.
+
+Two ids differ between this branch and `main`, and they came from different places:
+
+| id | base `d04a66f` (this branch's fork point) | base `main` | moved in | why |
+| --- | --- | --- | --- | --- |
+| `a10-default-branch-never-empty` | **moved** | **moved** | `0653cb2` | A10 re-derived under A-DH-6 — see the A10 note above: one half preserved, one tightened, one INVERTED. Reviewed as part of that change. |
+| `a13-driver-status-nonzero-without-driver` | unchanged | **moved** | `8505b84` (PR #87) | A13 re-derived host-neutrally. Already in this branch's ancestry; not yet on `main`. Separately reviewed and confirmed strengthened. |
+
+So: against `d04a66f`, exactly one id moved (`a10`). Against `main`, two do (`a10` + `a13`),
+because `main` predates PR #87. Neither was laundered through the other's change; diffing
+against `main` alone cannot tell them apart, which is why the base belongs in the report.
+
+The baseline also carries `sources` / `sources_via` — a digest of THIS document, so the prose
+done-definition is tamper-evident alongside the manifest and the test files (A9). That coverage
+was absent from the baseline on `main` and from every baseline before it; the commit that adds
+it re-freezes the whole file, which rewrites the JSON but changes no `ids` digest. To check a
+re-freeze for laundering, diff the `ids` object specifically, against a named base.

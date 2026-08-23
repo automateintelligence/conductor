@@ -295,3 +295,144 @@ def test_glob_derived_baseline_still_verifies_clean_without_goal(tmp_path):
     freeze.record(manifest, baseline, str(tmp_path))
     res = freeze.verify(manifest, baseline, str(tmp_path))
     assert res["ok"] is True and res["tampered"] == []
+
+
+# ------------------------------------- gate-local tracked pointer (`.assertions-source`)
+#
+# The env override and `.conductor/goal.md` are both RUN state (one command; git-ignored), so
+# a baseline resolved through either is only reproducible inside that run. The pointer is
+# committed next to the manifest, so the baseline binds to the same document on every
+# checkout and stays unambiguous however many specs `docs/specs/` later holds.
+
+
+def _add_pointer(tmp_path, target, gate_dir=None):
+    d = gate_dir or tmp_path
+    (d / freeze.SOURCE_POINTER).write_text(
+        f"# which spec this gate covers\n\n{target}\n"
+    )
+
+
+def test_pointer_resolves_the_source_where_the_glob_is_ambiguous(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False, specs=("spec-a", "spec-b"))
+    _add_pointer(tmp_path, "docs/specs/spec-a.md")
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/spec-a.md.assertions.md"]
+    assert doc["sources_via"] == "gate"
+
+
+def test_pointer_baseline_verifies_clean_with_no_env_and_no_goal(tmp_path):
+    """The property the env override cannot provide: nothing outside the checkout is needed
+    to re-resolve the frozen source, so the baseline is not TAMPERED-by-default."""
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False, specs=("spec-a", "spec-b"))
+    _add_pointer(tmp_path, "docs/specs/spec-a.md")
+    freeze.record(manifest, baseline, str(tmp_path))
+    assert "CONDUCTOR_ASSERTIONS_SOURCE" not in os.environ
+    assert not (tmp_path / ".conductor" / "goal.md").exists()
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True and res["tampered"] == []
+
+
+def test_pointer_names_the_assertions_file_directly(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)
+    _add_pointer(tmp_path, "docs/specs/fixture-spec.md.assertions.md")
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/fixture-spec.md.assertions.md"]
+
+
+def test_pointer_wins_over_a_goal_naming_a_different_spec(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=True, specs=("spec-a", "spec-b"))  # goal names spec-a
+    _add_pointer(tmp_path, "docs/specs/spec-b.md")
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/spec-b.md.assertions.md"]
+    assert doc["sources_via"] == "gate"
+
+
+def test_env_override_still_wins_over_the_pointer(tmp_path, monkeypatch):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False, specs=("spec-a", "spec-b"))
+    _add_pointer(tmp_path, "docs/specs/spec-a.md")
+    monkeypatch.setenv("CONDUCTOR_ASSERTIONS_SOURCE", "docs/specs/spec-b.md")
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/spec-b.md.assertions.md"]
+    assert doc["sources_via"] == "env"
+
+
+def test_pointer_naming_a_missing_source_fails_closed(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)
+    _add_pointer(tmp_path, "docs/specs/no-such-spec.md")
+    with pytest.raises(Exception, match="missing-assertions-source"):
+        freeze.record(manifest, baseline, str(tmp_path))
+
+
+def test_verify_trips_when_the_pointed_at_source_changes(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False, specs=("spec-a", "spec-b"))
+    _add_pointer(tmp_path, "docs/specs/spec-a.md")
+    freeze.record(manifest, baseline, str(tmp_path))
+    src = tmp_path / "docs" / "specs" / "spec-a.md.assertions.md"
+    src.write_text(src.read_text() + "\n- **Claim:** weakened after freeze\n")
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("assertions-source-changed" in t for t in res["tampered"])
+
+
+def test_verify_trips_when_the_pointer_is_repointed(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False, specs=("spec-a", "spec-b"))
+    _add_pointer(tmp_path, "docs/specs/spec-a.md")
+    freeze.record(manifest, baseline, str(tmp_path))
+    _add_pointer(tmp_path, "docs/specs/spec-b.md")
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("assertions-source-set-changed" in t for t in res["tampered"])
+
+
+def test_verify_trips_when_the_pointer_is_deleted(tmp_path):
+    """Deleting the file that SELECTED the frozen source must not fall through to the
+    goal/glob tiers and re-resolve to something that happens to match."""
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)
+    _add_pointer(tmp_path, "docs/specs/fixture-spec.md")
+    freeze.record(manifest, baseline, str(tmp_path))
+    (tmp_path / freeze.SOURCE_POINTER).unlink()
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("assertions-source-unresolvable" in t for t in res["tampered"])
+
+
+def test_a_comment_only_pointer_is_no_pointer(tmp_path):
+    # must-not: a commented-out line is never read as a path
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=False)
+    (tmp_path / freeze.SOURCE_POINTER).write_text("# docs/specs/spec-a.md\n\n")
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert doc["sources_via"] == "glob"
+
+
+def test_pointer_is_read_from_the_namespaced_gate_dir(tmp_path):
+    """A per-spec gate carries its own pointer next to its own manifest — two gates in one
+    repo select two different sources."""
+    gate = tmp_path / "assertions" / "spec-b-gate"
+    gate.mkdir(parents=True)
+    (tmp_path / "sub").mkdir(exist_ok=True)
+    (tmp_path / "sub" / "test_a.py").write_text("def test_a():\n    assert True\n")
+    manifest = gate / "manifest.yaml"
+    manifest.write_text(_MANIFEST.format(cmd="python3 -m pytest -q sub/test_a.py"))
+    baseline = str(gate / ".frozen")
+    _add_source(tmp_path, goal=False, specs=("spec-a", "spec-b"))
+    _add_pointer(tmp_path, "docs/specs/spec-b.md", gate_dir=gate)
+    freeze.record(str(manifest), baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/spec-b.md.assertions.md"]
+    res = freeze.verify(str(manifest), baseline, str(tmp_path))
+    assert res["ok"] is True and res["tampered"] == []
