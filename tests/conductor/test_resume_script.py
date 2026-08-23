@@ -2311,6 +2311,87 @@ def test_the_fire_runs_in_its_own_process_group(tmp_path, short_fire_bounds):
     assert driver_pgid != pgid, (driver_pgid, pgid)
 
 
+# ---- progress made before the first sample is progress --------------------------------------
+#
+# The defect this closes (H2): the zero-progress baseline was a sample taken AFTER the fire was
+# launched, so anything the worker produced between the launch and that sample was folded into
+# the baseline and could never read as movement. A worker that prints a banner and then thinks
+# was therefore judged to have made no progress at all and was killed at the 120-second STARTUP
+# deadline, instead of being given the 1800-second IDLE window it had earned. The baseline is a
+# fact known before the fire exists — zero CPU, and the log at the size it had at launch — so it
+# is stated, not sampled.
+
+#: Writes one line, flushes it, drops the ordering marker below, and then makes no sound and no
+#: CPU at all for `quiet_s`. The shape of every real worker's first second.
+_BANNER_THEN_SILENT_FIRE = """#!/usr/bin/env python3
+import sys, time
+
+sys.stdout.write("banner" + chr(10))
+sys.stdout.flush()
+open({marker!r}, "w").close()
+time.sleep({quiet_s})
+"""
+
+#: A `ps` that does not answer until the fire's banner is in the log. NOT a delay: it is the
+#: ORDERING this assertion is about, made a case instead of a race. `fire_progress` forks `ps`,
+#: the fire is a fresh interpreter, and which of the two wins is decided by machine load — so a
+#: bare "print quickly and hope" fixture passes against the defect roughly as often as it fails.
+#: Once the marker exists this costs nothing, so every later sample is unaffected.
+_ORDERING_PS = """#!/bin/sh
+i=0
+while [ ! -f {marker} ] && [ "$i" -lt 20 ]; do
+    {sleep} 1
+    i=$((i + 1))
+done
+echo used >> {calls}
+exec {real_ps} "$@"
+"""
+
+
+def test_output_produced_before_the_first_sample_counts_as_the_first_sign_of_life(
+    tmp_path, short_fire_bounds
+):
+    """H2. The fire writes its banner BEFORE the sampler's first look, then goes silent for
+    longer than the startup window and shorter than the idle one. Folding that banner into the
+    baseline is what killed it at the startup deadline; counted as progress, it buys the idle
+    window the worker has earned."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    real_ps = shutil.which("ps", path=os.defpath)
+    real_sleep = shutil.which("sleep", path=os.defpath)
+    assert real_ps and real_sleep, (
+        "no `ps`/`sleep` on the default path; this fixture cannot be built"
+    )
+    marker = tmp_path / "banner.written"
+    calls = tmp_path / "ps.calls"
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _BANNER_THEN_SILENT_FIRE.format(marker=str(marker), quiet_s=9),
+    )
+    shim = home / ".local" / "bin" / "ps"
+    shim.write_text(
+        _ORDERING_PS.format(
+            marker=str(marker), sleep=real_sleep, calls=str(calls), real_ps=real_ps
+        )
+    )
+    os.chmod(shim, 0o755)
+
+    proc, elapsed = _fire_supervised(driver, home, pids, timeout=90)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+
+    assert marker.is_file(), f"the fire never ran; nothing was measured. log={log}"
+    assert calls.is_file(), (
+        "the driver never invoked this fixture's `ps`, so the ordering it exists to guarantee "
+        "was never in force"
+    )
+    assert "banner" in log, log
+    assert "fire-timeout" not in log, log
+    assert proc.returncode == 0, (proc.returncode, log)
+    # It outlived the STARTUP window and its grace, which is the whole claim: the banner bought
+    # the idle window. `short_fire_bounds` is 6s startup / 12s idle / 2s grace.
+    assert elapsed > 6 + 2, (elapsed, log)
+
+
 # ---- the escalation covers the fire's whole process group, on every exit path ---------------
 #
 # The defect these close (H1): the supervisor asked `kill -0 "$FIRE_PID"` after the TERM, which

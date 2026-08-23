@@ -304,6 +304,9 @@ def fire_supervision_prologue() -> str:
         "#                 instance). This is what catches a host that never answers.\n"
         "#   FIRE_IDLE     no progress this long AFTER some = it stopped. Much longer, because it\n"
         "#                 has proven it works and killing a live phase costs an hour of real work.\n"
+        "# The baseline both windows are measured from is NO progress -- zero CPU, and the log at\n"
+        "# the size it had at launch -- so output or CPU the fire produced before the sampler's\n"
+        "# first look counts as its first sign of life instead of vanishing into the baseline.\n"
         "# The values are `conductor.hosts.base`'s, beside the plugin-lookup bound: the host layer\n"
         "# declares what it will wait for a host process to do, this script enforces one of them.\n"
         f"FIRE_STARTUP={base.FIRE_STARTUP_TIMEOUT_S}\n"
@@ -414,7 +417,14 @@ def fire_watchdog(h: base.HostAdapter) -> str:
         "else\n"
         "    fire_started=$SECONDS\n"
         "    fire_sampled=$SECONDS\n"
-        '    fire_mark="$(fire_progress "$FIRE_PID")"\n'
+        "    # The zero-progress baseline is STATED, never sampled. Sampling it after the launch\n"
+        "    # folded everything the worker produced between the two into the baseline, where it\n"
+        "    # could never read as movement: a worker that prints a banner and then thinks was\n"
+        "    # judged to have made no progress at all and died on the STARTUP deadline instead of\n"
+        "    # earning the far longer idle window. Zero CPU and the log at its launch size is a\n"
+        "    # fact known before the fire exists, and it is `fire_progress`'s own `<cpu>/<bytes>`\n"
+        "    # spelling so the first sample is comparable with it.\n"
+        '    fire_mark="0/$FIRE_LOG0"\n'
         "    fire_deadline=$(( SECONDS + FIRE_STARTUP ))\n"
         "    fire_limit=$FIRE_STARTUP\n"
         '    fire_rc=""\n'
