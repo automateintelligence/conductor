@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -22,13 +24,15 @@ from conductor.core import ownership, registry, runstate, schema, transaction
 
 ROOT = Path(__file__).resolve().parents[2]
 
-#: A recording `gh` that answers like the real one in the two ways that make ambient resolution
-#: observable. `repo view` resolves the repository FROM ITS OWN cwd, so `by_cwd` maps a checkout
-#: onto the identity and default branch gh would report while standing in it. `pr view` answers
-#: for the repository `-R` names, so `by_repo` maps a repository onto its own pull requests. A
-#: config carrying neither key behaves exactly as the single-project fake always did.
+#: A recording `gh` that answers like the real one in the three ways these tests need.
+#: `repo view` resolves the repository FROM ITS OWN cwd, so `by_cwd` maps a checkout onto the
+#: identity and default branch gh would report while standing in it. `pr view` answers for the
+#: repository `-R` names, so `by_repo` maps a repository onto its own pull requests. `stall`
+#: makes the first `pr view` block until the test releases it, which is how a concurrency window
+#: inside a verb is opened WITHOUT patching the verb. A config carrying none of the three behaves
+#: exactly as the single-project fake always did.
 _GH_FAKE = r"""#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 CONFIG = json.load(open(os.environ["GH_FAKE_CONFIG"], encoding="utf-8"))
 argv = sys.argv[1:]
 with open(os.environ["GH_FAKE_LOG"], "a", encoding="utf-8") as h:
@@ -46,6 +50,15 @@ def here():
 def named_repo(args):
     return args[args.index("-R") + 1] if "-R" in args else here().get("repo")
 
+def stall():
+    spec = CONFIG.get("stall")
+    if not spec:
+        return
+    open(spec["ready"], "a").close()
+    deadline = time.time() + 120
+    while not os.path.exists(spec["go"]) and time.time() < deadline:
+        time.sleep(0.02)
+
 if argv[:2] == ["repo", "view"]:
     view = here()
     if "defaultBranchRef" in fields(argv):
@@ -55,6 +68,7 @@ if argv[:2] == ["repo", "view"]:
     if "nameWithOwner" in fields(argv):
         print(view["repo"]); raise SystemExit(0)
 if argv[:2] == ["pr", "view"]:
+    stall()
     prs = CONFIG.get("by_repo", {}).get(named_repo(argv), CONFIG["prs"])
     pr = prs.get(argv[2])
     if pr is None:
@@ -720,6 +734,84 @@ def test_finish_refuses_while_a_live_owner_holds_the_run(project, git, capsys) -
         assert project.verb("finish", "--run", project.run_key) == 1
     assert "is owned by" in capsys.readouterr().err
     assert project.run["status"] == "awaiting-team-merge"
+
+
+def test_finish_reserves_ownership_for_the_whole_verb(
+    project, git, git_env, tmp_path
+) -> None:
+    """No acquirer may take this run while ``finish`` is between its checks and its cleanup.
+
+    The old shape sampled ``ownership.read`` once and then spent seconds in ``gh pr view``,
+    ``git ls-remote`` and two journalled writes with nothing reserved. A heartbeat arriving in
+    that window acquired ownership and launched a fire, and ``finish`` went on to remove the
+    worktree underneath it and mark the run terminal — success reported, work destroyed.
+
+    Reproduced with the verb UNPATCHED. ``finish`` runs in its own process; the recording `gh`
+    stalls inside it on the first ``pr view``, which is exactly the window the finding names;
+    and this process then makes the acquisition a heartbeat makes — ``ownership.acquire`` — and
+    must be refused. Releasing the stall lets ``finish`` finish, so the reservation is proved not
+    to be a deadlock or a no-op.
+    """
+    worktree = (
+        project.root / ".worktrees" / "conductor" / project.run_key / "integration"
+    )
+    git(project.root, "worktree", "add", "-q", "-b", "wt-branch", str(worktree))
+    runstate.update(
+        project.state_root,
+        project.run_key,
+        lambda doc: {**doc, "integration_worktree": str(worktree)},
+    )
+    _awaiting(project, git, state="MERGED")
+    ready, go = tmp_path / "gh-stalled", tmp_path / "gh-released"
+    project.set_prs(
+        json.loads(project.config.read_text())["prs"],
+        stall={"ready": str(ready), "go": str(go)},
+    )
+
+    finishing = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "conductor.lifecycle",
+            "finish",
+            "--run",
+            project.run_key,
+            "--project",
+            str(project.root),
+        ],
+        cwd=str(project.root),
+        env={
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": git_env["GIT_CONFIG_GLOBAL"],
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "PYTHONPATH": str(ROOT),
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 120
+        while not ready.exists() and time.monotonic() < deadline:
+            assert finishing.poll() is None, (
+                f"finish exited before it reached the window: {finishing.communicate()}"
+            )
+            time.sleep(0.02)
+        assert ready.exists(), "the recording gh never stalled; no window was opened"
+        with pytest.raises(ownership.OwnerBusy):
+            with ownership.acquire(
+                project.state_root, project.run_key, host="claude", wrapper_identity="1"
+            ):
+                pass
+    finally:
+        go.touch()
+        out, err = finishing.communicate(timeout=180)
+    assert finishing.returncode == 0, f"{out}\n{err}"
+    assert f"removed worktree {worktree}" in out, out
+    assert not worktree.exists()
+    assert project.run["status"] == "terminal"
+    # And it let go: the record is gone, so the next verb is not locked out by a finished one.
+    assert ownership.read(project.state_root, project.run_key) is None
 
 
 # --- --project scopes AUTHORITY, not just state ----------------------------------------------

@@ -644,7 +644,42 @@ def cmd_finish(args: argparse.Namespace) -> int:
     if busy:
         print(busy, file=sys.stderr)
         return EXIT_FAIL
+    # RESERVE, DO NOT SAMPLE. The check above is a courtesy: it produces the better sentence,
+    # naming the record and its path, for the ordinary case where someone is already working.
+    # It cannot be the exclusion, because between it and the cleanup below sit `gh pr view`,
+    # `git ls-remote` and two journalled writes — seconds of wall clock in which a heartbeat can
+    # legitimately acquire ownership and launch a fire. Reproduced: finish returned success and
+    # removed the worktree while `identity_is_live()` was true for a heartbeat that had taken
+    # ownership inside that window. Holding the RECORD for the rest of the verb is what makes a
+    # concurrent `ownership.acquire` refuse, and it is the same mechanism a heartbeat uses, so
+    # whichever of the two arrives second is the one that backs off.
+    #
+    # Ownership is a record, not a held lock: `acquire` takes `owner.lock` only around the two
+    # record mutations and releases it before yielding, so `_commit`'s `project.lock` inside this
+    # block does not invert the global order (migration -> project -> owner -> state).
+    try:
+        with ownership.acquire(
+            state_root, key, host=runhost.resolve(resolution.repo_root)
+        ):
+            return _finish_reserved(args, resolution, run, status)
+    except ownership.OwnerBusy as exc:
+        print(
+            f"finish refused for run {key}: {exc} Nothing was removed and the run stays "
+            f"{status}. Wait for that fire to finish, then re-run finish.",
+            file=sys.stderr,
+        )
+        return EXIT_FAIL
 
+
+def _finish_reserved(
+    args: argparse.Namespace,
+    resolution: resolve.RunResolution,
+    run: dict,
+    status: str,
+) -> int:
+    """``finish``'s body, under this run's ownership record. Every write and every removal
+    below happens while a concurrent acquirer would be refused."""
+    state_root, key = resolution.state_root, resolution.run_key
     repo, remote, default = _repo_context(resolution.repo_root)
     if args.pr is not None:
         pull, recovered = (
