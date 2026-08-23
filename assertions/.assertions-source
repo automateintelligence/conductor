@@ -1,0 +1,9 @@
+# The spec whose `<spec>.assertions.md` this gate's `.frozen` baseline covers (A9).
+# Read by `conductor gate freeze|verify`; one repo-relative path, `#` comments ignored.
+#
+# TRACKED on purpose. The alternatives are run state: $CONDUCTOR_ASSERTIONS_SOURCE lives for
+# one command, and `.conductor/goal.md` is git-ignored — a baseline resolved through either
+# re-resolves to something else on a fresh clone and reads TAMPERED. This file also keeps the
+# selection unambiguous when `docs/specs/` holds more than one `*.assertions.md`, which is the
+# normal state of a repo that conducts more than one spec.
+docs/specs/2026-07-05-self-enforcement.md

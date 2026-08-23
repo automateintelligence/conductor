@@ -50,13 +50,24 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    point the user at `/spec-craft:expectations` then `/spec-craft:executable-assertions` (or, with
    `--auto-assert`, launch them — which writes `<spec>.assertions.md`).
 3. **Resolve the per-spec gate dir FIRST:** `GATE_DIR="$(conductor gate-dir <spec>)"` (→
-   `assertions/<slug>/`), then export both `CONDUCTOR_GATE_SLUG="$(basename "$GATE_DIR")"` AND
-   `CONDUCTOR_ASSERTIONS_SOURCE="<spec>"` for this whole step. The slug points the build, lint,
-   freeze, and probe at the run's own gate instead of the flat `assertions/` slot; the assertions
-   source **binds the freeze to THIS spec's `<spec>.assertions.md`** — freeze runs here, BEFORE the
-   goal/run_branch that carry the selection at run time are written (steps 5b/6), so without it a
-   repo holding another spec's `docs/specs/*.assertions.md` freezes ambiguously or against the wrong
-   source. **Implement assertions as runnable tests** via `/conductor:assertions-to-tests`
+   `assertions/<slug>/`), export `CONDUCTOR_GATE_SLUG="$(basename "$GATE_DIR")"` for this whole
+   step, and **write the gate's assertions-source pointer and COMMIT it**:
+
+   ```bash
+   mkdir -p "$GATE_DIR" && printf '%s\n' "<spec>" > "$GATE_DIR/.assertions-source"
+   ```
+
+   The slug points the build, lint, freeze, and probe at the run's own gate instead of the flat
+   `assertions/` slot. The pointer **binds the freeze to THIS spec's `<spec>.assertions.md`** —
+   freeze runs here, BEFORE the goal/run_branch that carry the selection at run time are written
+   (steps 5b/6), so without it a repo holding another spec's `docs/specs/*.assertions.md`
+   freezes ambiguously or against the wrong source. It is a TRACKED file for the same reason:
+   `$CONDUCTOR_ASSERTIONS_SOURCE` (still honored, higher precedence) lives for one command and
+   `.conductor/goal.md` is git-ignored, so a baseline resolved through either re-resolves to
+   something else on a fresh clone and `gate verify` reports TAMPERED. Do not export
+   `CONDUCTOR_ASSERTIONS_SOURCE` here — it would win over the pointer and stamp
+   `sources_via: env` into the baseline, which is exactly the run-local binding the pointer
+   exists to avoid. **Implement assertions as runnable tests** via `/conductor:assertions-to-tests`
    (it writes `$GATE_DIR/manifest.yaml` + `$GATE_DIR/tests/`). **SKIP only if
    `start_probe.assertions_ready(expected_ids, "$GATE_DIR/manifest.yaml", <assert-run --level spec
    exit>)` is True** — i.e. the manifest has one entry per `/spec-craft:executable-assertions` id
