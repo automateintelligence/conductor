@@ -9,8 +9,8 @@ claude/plugin upgrade and every headless fire died silently. Making the script m
 the root cause: one source of truth, resolved at RUN time, verifiable on reconcile.
 
 Split of concerns the render enforces:
-- MECHANICAL (this module owns, regenerable): bin resolution, PATH repair, fail-loud, the three
-  guards (no-double-drive, done-gate-green exit, flock), the fire.
+- MECHANICAL (this module owns, regenerable): bin resolution, PATH repair, fail-loud, the two
+  guards (the `.conductor/resume.lock` flock, the done-gate-green exit), the fire.
 - OWNER/MACHINE config (never baked here, sourced from `<project>/.conductor/resume-env.sh` so
   regeneration can never clobber it): every name in `OWNER_ENV_VARS`.
 
@@ -556,21 +556,28 @@ export CONDUCTOR_HOME="$WORKTREE"
 cd "$WORKTREE" || {{ printf '%s worktree-missing %s\\n' "$(ts)" "$WORKTREE" >> "$LOG"; exit 4; }}
 mkdir -p "$PROJECT/.conductor"
 
-# (c) one headless fire at a time — hold the lock in the main checkout for the whole fire.
-exec 9>"$PROJECT/.conductor/resume.lock"
-flock -n 9 || exit 0
+# (a)+(c) ONE thing drives this run at a time, and the thing that decides it is a
+# Conductor-owned lock — NEVER a process-name match. `.conductor/resume.lock` is that lock; this
+# fire holds it for its whole life, and `conductor.core.ownership` refuses on the same fact from
+# the Python side. The guard this replaced grepped `pgrep -f 'claude'` whatever host the run
+# recorded, and was wrong in both directions at once: on a Codex run it matched nothing, so the
+# guard was absent while looking present; on a Claude run it matched THIS SCRIPT, because a
+# driver's command line is the path of the driver, so a checkout whose path contains the host's
+# name exited 0 before firing and protected nothing.
+#
+# A SKIP IS LOGGED. Refusing to fire because something else is already driving is correct, but
+# `flock -n 9 || exit 0` wrote nothing at all — so a run blocked forever behind a stuck holder
+# produced byte-for-byte the log a healthy idle one produces. `fire-skipped` is deliberately not
+# one of `conductor.driver`'s failure markers: it is evidence, not a fault. What it makes
+# impossible is an exit 0 that could mean "permanently blocked" with nothing on the record.
+LOCK="$PROJECT/.conductor/resume.lock"
+exec 9>"$LOCK"
+flock -n 9 || {{ printf '%s fire-skipped reason=lock-held lock=%s\\n' "$(ts)" "$LOCK" >> "$LOG"; exit 0; }}
 
-# (a) never double-drive: exit if a claude process already holds the project OR worktree cwd (a
-#     live terminal session or a prior fire is then the sole driver).
-for pid in $(pgrep -f 'claude' 2>/dev/null); do
-    cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
-    case "$cwd" in
-        "$PROJECT"|"$PROJECT"/*|"$WORKTREE"|"$WORKTREE"/*) exit 0 ;;
-    esac
-done
-
-# (b) finished runs get no-op fires: exit once the spec done-gate is green.
-"$CONDUCTOR" assert run --level spec >/dev/null 2>&1 && exit 0
+# (b) finished runs get no-op fires: exit once the spec done-gate is green. Logged for the same
+# reason the skip above is — "this run is done" and "this run is stuck" must not look alike.
+"$CONDUCTOR" assert run --level spec >/dev/null 2>&1 && {{
+    printf '%s fire-skipped reason=gate-green\\n' "$(ts)" >> "$LOG"; exit 0; }}
 
 # One headless phase of progress, in the run worktree. Bracket the fire in the log so a stalled
 # or crash-looping driver is visible: `fire-start` with no matching `fire-end` = a hung fire

@@ -223,10 +223,12 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      hand-written generation-time-pinned path did (live-run silent stall 2026-07-05, see
      `docs/reviews/2026-07-05-conductor-tier-b-driver-robustness.md`). It fires `claude -p
      "/conductor:autodev"` from the RUN WORKTREE (never the owner's checkout; autodev, not start —
-     a headless one-shot must do a phase, not register a cron that dies with it), guarding: (a)
-     exit if a claude process already holds the worktree/project cwd (never double-drive); (b)
-     exit once `conductor assert run --level spec` is green; (c) `flock -n
-     <project>/.conductor/resume.lock` for the whole fire.
+     a headless one-shot must do a phase, not register a cron that dies with it), guarding: (a) one
+     driver at a time — `flock -n <project>/.conductor/resume.lock`, held for the whole fire, which
+     is the ONLY thing that decides it (never a `pgrep` for the host's name: that matched nothing
+     on Codex and matched the driver's own command line on Claude); (b) exit once `conductor assert
+     run --level spec` is green. Both skips log `fire-skipped reason=...`, so an exit 0 can never
+     mean "permanently blocked" with nothing on the record.
    - **Machine/run-specific env goes in `<main-root>/.conductor/resume-env.sh`** (gitignored),
      which the driver sources — NEVER inline in the driver, so regeneration can't clobber it. Put
      the owner-owned `CONDUCTOR_MERGE_VERIFY` there (plus any dev-mode `CONDUCTOR_PLUGIN_DIRS` or
