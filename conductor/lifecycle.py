@@ -205,19 +205,39 @@ def _live_owner(state_root: str, run_key: str) -> str | None:
 
 
 def _repo_context(repo_root: str) -> tuple[str, str, str]:
-    """``(repo, remote, default_branch)`` — all three fail closed.
+    """``(repo, remote, default_branch)`` for THE PROJECT AT ``repo_root`` — all three fail closed.
 
     ``branches.default_branch`` never substitutes a literal (A-DH-6), so an unresolvable default
-    branch propagates as a refusal here rather than becoming a guessed pull-request base."""
-    repo = _resolve_repo()
-    default = branches.default_branch()
+    branch propagates as a refusal here rather than becoming a guessed pull-request base.
+
+    EVERY REPOSITORY FACT COMES FROM ``repo_root``, NEVER FROM THE AMBIENT PROJECT. This function
+    used to ignore its argument: ``gh repo view`` resolved the repository from the process cwd,
+    and ``default_branch``/``remote`` resolved theirs from ``$CONDUCTOR_HOME`` — which
+    ``bin/conductor`` exports from the CALLER'S cwd, before ``--project`` has been parsed. So
+    ``conductor finish --project /repo/B`` run from inside repo A read A's repository name, asked
+    ``gh pr view -R <A>`` whether A's pull request was merged, and then removed B's worktrees,
+    deleted B's branches and marked B terminal on the strength of that answer. Forks sharing an
+    audited head SHA make that a realistic false positive rather than a theoretical one."""
+    repo = _resolve_repo(root=repo_root)
+    default = branches.default_branch(repo_root)
     try:
-        remote = remote_mod.resolve()
+        remote = remote_mod.resolve(repo_root)
     except (
         Exception
     ):  # discovery failure degrades to the historical default, never to empty
         remote = "origin"
     return repo, remote, default
+
+
+def _project_env(repo_root: str) -> dict[str, str]:
+    """This process's environment with ``CONDUCTOR_HOME`` re-anchored onto ``repo_root``.
+
+    ``bin/conductor`` exports ``CONDUCTOR_HOME`` from the caller's cwd before any verb has parsed
+    ``--project``, so a child launched from a ``--project``-scoped verb would otherwise inherit
+    the WRONG project as its ambient one — a driver fired for run B resolving B's state root from
+    the environment of repo A. The child's cwd is already ``repo_root``; this makes the variable
+    agree with it."""
+    return {**os.environ, "CONDUCTOR_HOME": repo_root}
 
 
 # --- status -------------------------------------------------------------------------------
@@ -456,7 +476,11 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
             # FIRE_STARTUP_TIMEOUT_S / FIRE_IDLE_TIMEOUT_S) because a legitimate phase runs for
             # hours; a ceiling here would kill working phases or bound nothing.
             fire = subprocess.run(
-                [script], cwd=resolution.repo_root, check=False, timeout=None
+                [script],
+                cwd=resolution.repo_root,
+                env=_project_env(resolution.repo_root),
+                check=False,
+                timeout=None,
             )
     except ownership.OwnerBusy as exc:
         # A skipped fire caused by a live owner is a SUCCESSFUL fire and must not create a
