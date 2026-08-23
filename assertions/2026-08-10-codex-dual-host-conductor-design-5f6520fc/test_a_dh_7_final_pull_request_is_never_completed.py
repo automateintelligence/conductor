@@ -650,6 +650,20 @@ def _cleanup():
         shutil.rmtree(done.workdir, ignore_errors=True)
 
 
+def _targets(argv: list[str], pr: int) -> bool:
+    """Does this `gh` invocation name the pull request?
+
+    NOT an exact match on the bare number. `gh pr <verb>` accepts a number, a URL or a branch
+    interchangeably, and the URL form is the one Conductor's own reports already print — so a
+    recogniser that only matches `202` reads `gh pr close https://github.com/o/r/pull/202` as
+    naming no pull request at all and reports the prohibition satisfied.
+    """
+    number = str(pr)
+    return any(
+        arg == number or re.search(rf"/pull/{number}(?:/|$)", arg) for arg in argv
+    )
+
+
 def _prohibited(call: dict, pr: int) -> str | None:
     """The spec's enumerated prohibition list, applied to one recorded `gh` invocation.
 
@@ -658,7 +672,7 @@ def _prohibited(call: dict, pr: int) -> str | None:
     argv = call["argv"]
     joined = " ".join(argv)
     number = str(pr)
-    if argv[:2] == ["pr", "merge"] and number in argv:
+    if argv[:2] == ["pr", "merge"] and _targets(argv, pr):
         if "--auto" in argv:
             return "enables auto-merge"
         if "--squash" in argv:
@@ -666,9 +680,9 @@ def _prohibited(call: dict, pr: int) -> str | None:
         if "--rebase" in argv:
             return "rebases"
         return "merges"
-    if argv[:2] == ["pr", "close"] and number in argv:
+    if argv[:2] == ["pr", "close"] and _targets(argv, pr):
         return "closes"
-    if argv[:2] == ["pr", "edit"] and number in argv and "--base" in argv:
+    if argv[:2] == ["pr", "edit"] and _targets(argv, pr) and "--base" in argv:
         return "mutates its base"
     if argv[:1] == ["api"]:
         if re.search(rf"pulls/{number}/merge\b", joined):
@@ -789,6 +803,28 @@ def test_no_prohibited_action_is_recorded_against_the_final_pull_request() -> No
     )
     assert str(FINAL_PR) not in done.merged_prs, (
         f"the final pull request was merged: {done.merged_prs}"
+    )
+
+
+def test_the_prohibition_recogniser_sees_the_url_form_of_the_pull_request() -> None:
+    """Anti-vacuity for the recogniser itself. `gh pr <verb>` takes a number or a URL, and the
+    URL is what Conductor's own reports print — so a recogniser matching only the bare number
+    reports "no prohibited action" against a launch that closed the pull request by URL."""
+    url = f"https://github.com/{REPO}/pull/{FINAL_PR}"
+    assert _prohibited({"argv": ["pr", "close", url]}, FINAL_PR) == "closes"
+    assert (
+        _prohibited({"argv": ["pr", "merge", url, "--squash"]}, FINAL_PR) == "squashes"
+    )
+    assert _prohibited({"argv": ["pr", "close", str(FINAL_PR)]}, FINAL_PR) == "closes"
+    # Must-not-contain, so the recogniser cannot pass by matching everything: the PERMITTED
+    # phase merge, in either spelling, is not a prohibited action against the final one.
+    assert _prohibited({"argv": ["pr", "merge", str(PHASE_PR)]}, FINAL_PR) is None
+    assert (
+        _prohibited(
+            {"argv": ["pr", "merge", f"https://github.com/{REPO}/pull/{PHASE_PR}"]},
+            FINAL_PR,
+        )
+        is None
     )
 
 
