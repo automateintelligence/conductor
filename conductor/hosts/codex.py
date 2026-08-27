@@ -680,6 +680,12 @@ class CodexAdapter:
         parentage plus a kernel fact — never a name — so it stays inside the ban the deleted
         ``pgrep`` guard is under.
 
+        VERIFIED against a real session on 2026-08-27, not merely reasoned about: a
+        ``codex exec`` was made to run this code with ``CODEX_THREAD_ID`` stripped from the
+        child's environment, and the ancestry walk returned
+        ``codex:01a044cf-a85d-7fa0-bda5-f0f43bdbc985:<boot>`` — byte-identical to what the
+        variable produces, and to the session id in the banner.
+
         ``None`` when nothing in the ancestry holds a thread lock, and also when an ancestor
         holds MORE THAN ONE. One Codex process owning several threads is real and was observed
         (one pid, two locks), and in that case parentage cannot say which thread this call
