@@ -79,6 +79,11 @@ _FAILURE_MARKERS = (
     # this is reported. Distinct from the marker above because the remedy differs — that one is
     # a record to clear, this one is a tool to fix.
     "owner-check-failed",
+    # The check could not run AND no record was on disk, so the fire proceeded with no
+    # ownership protection at all. Reported even though that fire succeeded: the protection is
+    # absent for the NEXT worker too, and an absence nobody is told about is the shape of every
+    # defect this marker list exists for.
+    "owner-check-unavailable",
 )
 # Only this many trailing log lines are considered "the recent tail" — the recency
 # window does the real filtering; this just bounds work on a long-lived log.

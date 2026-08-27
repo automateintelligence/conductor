@@ -49,6 +49,10 @@ ROOT = Path(__file__).resolve().parents[2]
 #: answering not-green and is what lets a fire happen at all.
 _SHIM = '#!/bin/sh\ncase "$1" in\n  run) exec {real} "$@" ;;\nesac\nexit 1\n'
 
+#: A `conductor` that cannot answer ANY verb — the shape a partial install, an unimportable
+#: package, or a CLI predating `run owner-busy` presents as.
+_BROKEN_SHIM = "#!/bin/sh\nexit 1\n"
+
 #: The fake host. It records that a fire happened, and when — enough to tell "did it fire" from
 #: "did it fire twice" without the test having to parse the driver's own log for it.
 _RECORDING_HOST = """#!/usr/bin/env python3
@@ -129,7 +133,9 @@ class Harness:
         return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def _harness(tmp_path, git_env, git, capsys, *, host_text: str) -> Harness:
+def _harness(
+    tmp_path, git_env, git, capsys, *, host_text: str, shim_text: str | None = None
+) -> Harness:
     root = tmp_path / "repo"
     (root / "docs").mkdir(parents=True)
     (root / "docs" / "alpha.md").write_text("# alpha\n")
@@ -153,7 +159,7 @@ def _harness(tmp_path, git_env, git, capsys, *, host_text: str) -> Harness:
     host.write_text(host_text)
     host.chmod(0o755)
     shim = bindir / "conductor"
-    shim.write_text(_SHIM.format(real=str(ROOT / "bin" / "conductor")))
+    shim.write_text(shim_text or _SHIM.format(real=str(ROOT / "bin" / "conductor")))
     shim.chmod(0o755)
 
     assert run_cmd.main(["new", "docs/alpha.md", "--project", str(root)]) == 0
@@ -641,3 +647,75 @@ def test_a_version_1_record_blocks_and_names_its_recovery(harness):
     assert ownership.read(harness.state_root, harness.run_key) is None
     assert harness.fire().returncode == 0
     assert harness.fire_count == 1, harness.log
+
+
+# --- the check that cannot run at all -------------------------------------------------------
+#
+# A CLI too old to know `run owner-busy`, an install whose Python package will not import, a
+# crash. Fail-safe would say "skip", and that was the first implementation — but it made an
+# unrelated CLI fault stop a run that nothing was claiming, which is a new outage in exchange
+# for no new safety. The driver instead asks the one question that needs no CLI: is there a
+# record to consult at all. Both directions are pinned here, because a fallback that fired past
+# a PRESENT record would silently undo gate 1.
+
+
+def test_an_unanswerable_check_fires_when_no_record_exists_and_says_it_was_unprotected(
+    tmp_path, git_env, git, capsys
+):
+    harness = _harness(
+        tmp_path,
+        git_env,
+        git,
+        capsys,
+        host_text=_RECORDING_HOST.format(fires=str(tmp_path / "fires.log")),
+        shim_text=_BROKEN_SHIM,
+    )
+    assert ownership.read(harness.state_root, harness.run_key) is None
+
+    result = harness.fire()
+
+    assert result.returncode == 0, (result.stdout, result.stderr, harness.log)
+    assert harness.fire_count == 1, (
+        f"a broken CLI stopped a run nothing was claiming: {harness.log}"
+    )
+    assert "owner-check-unavailable" in harness.log, harness.log
+    assert "no-record-on-disk" in harness.log, harness.log
+    # It fired UNPROTECTED, so `conductor driver status` has to see it. The fire succeeded and
+    # nothing else in the system would ever mention that the check is not working.
+    from conductor import driver as driver_mod
+
+    assert "owner-check-unavailable" in driver_mod._FAILURE_MARKERS
+
+
+def test_an_unanswerable_check_still_refuses_to_fire_past_a_record_that_exists(
+    tmp_path, git_env, git, capsys
+):
+    """The fallback's boundary. It may only fire past the ABSENCE of a record — never past one
+    it merely failed to read, which is the case gate 1 depends on."""
+    harness = _harness(
+        tmp_path,
+        git_env,
+        git,
+        capsys,
+        host_text=_RECORDING_HOST.format(fires=str(tmp_path / "fires.log")),
+        shim_text=_BROKEN_SHIM,
+    )
+    owner = _sleeper()
+    try:
+        harness.record(_identity(owner.pid))
+        assert os.path.isfile(
+            ownership.record_path(harness.state_root, harness.run_key)
+        )
+
+        result = harness.fire()
+
+        assert result.returncode == 0, (result.stdout, result.stderr, harness.log)
+        assert harness.fire_count == 0, (
+            f"the fallback fired past an ownership record on disk: {harness.log}"
+        )
+        assert "owner-check-failed" in harness.log, harness.log
+        assert "owner-check-unavailable" not in harness.log, harness.log
+        assert owner.poll() is None, "the owner exited; this proved nothing"
+    finally:
+        owner.kill()
+        owner.wait(timeout=30)

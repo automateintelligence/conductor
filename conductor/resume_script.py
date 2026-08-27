@@ -603,8 +603,32 @@ if [ "$OWNER_RC" -eq 0 ]; then
     printf '%s fire-skipped reason=owner-busy %s\\n' "$(ts)" "$OWNER_OUT" >> "$LOG"
     exit 0
 elif [ "$OWNER_RC" -ne 11 ]; then
-    printf '%s owner-check-failed rc=%s %s\\n' "$(ts)" "$OWNER_RC" "$OWNER_OUT" >> "$LOG"
-    exit 0
+    # THE VERB COULD NOT ANSWER — a CLI too old to know the subcommand, an install whose Python
+    # package is not importable, a crash. Before treating that as occupied, ask the one question
+    # that needs no CLI at all: IS THERE A RECORD TO CONSULT? This is a test for the file's
+    # existence and nothing more. It does not read the record, does not parse an identity and
+    # does not derive liveness — doing any of those in bash is how the two sides of this
+    # contract start disagreeing, and it is exactly what routing the check through `$CONDUCTOR`
+    # exists to avoid.
+    #
+    # No record anywhere means nobody has registered ownership, which is the state every
+    # project was in before this contract existed, so firing is not a new risk — refusing would
+    # instead make an unrelated CLI fault stop a run that nothing is claiming. A record that IS
+    # present and cannot be interpreted still skips: the fallback can never fire past a record,
+    # only past the absence of one.
+    OWNER_RECORDED=0
+    for owner_json in "$PROJECT"/.conductor/runs/*/owner.json; do
+        if [ -e "$owner_json" ]; then OWNER_RECORDED=1; break; fi
+    done
+    if [ "$OWNER_RECORDED" -eq 1 ]; then
+        printf '%s owner-check-failed rc=%s %s\\n' "$(ts)" "$OWNER_RC" "$OWNER_OUT" >> "$LOG"
+        exit 0
+    fi
+    # Firing UNPROTECTED is still a fault, even though this fire proceeds: the next worker to
+    # register will not be excluded either, so an operator has to see it now rather than after
+    # two sessions have edited one checkout.
+    printf '%s owner-check-unavailable rc=%s no-record-on-disk %s\\n' \\
+        "$(ts)" "$OWNER_RC" "$OWNER_OUT" >> "$LOG"
 fi
 
 # (b) finished runs get no-op fires: exit once the spec done-gate is green. Logged for the same
