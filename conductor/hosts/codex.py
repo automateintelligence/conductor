@@ -16,15 +16,56 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import textwrap
+from collections.abc import Mapping
 
-from conductor.hosts import base, discovery
+from conductor.hosts import base, discovery, proc
 
 #: ``--ignore-user-config`` skips ``config.toml`` but auth still uses ``CODEX_HOME`` (ground
 #: truth §"Session and config isolation"), so this is the Codex config root unconditionally.
 CONFIG_DIR_ENV = "CODEX_HOME"
+
+#: The live session's thread id, exported into the environment of every shell Codex runs.
+#:
+#: CONFIRMED FOR THE INTERACTIVE TUI, not merely for ``codex exec``. The identity probe could
+#: only establish the ``codex exec`` case — two pty attempts never reached a prompt — and left
+#: the TUI as an explicit unknown, which mattered because the scenario this whole contract
+#: exists for IS a human's interactive session. It was closed on 2026-08-27 by driving
+#: ``codex --dangerously-bypass-approvals-and-sandbox <prompt>`` under a pty that answers the
+#: terminal capability queries the TUI blocks on (DSR, primary DA, the kitty-keyboard query and
+#: the OSC 10/11 colour queries) and then the directory-trust modal. The captured tool-shell
+#: environment contained ``CODEX_THREAD_ID=01a0443d-186a-7902-800c-d7cebe222d2b``, and the lock
+#: file that session created was named for exactly that value. So the Codex half of the
+#: contract has an entry point on the host it needs one on, and the ancestry fallback below is
+#: a backstop rather than the primary path.
+#:
+#: UNDOCUMENTED, and more fragile than Claude's ``CLAUDE_PID``: one literal in the binary, on a
+#: 0.x CLI whose own documentation disclaims listing internal variables. Absence is a supported
+#: outcome, never a crash.
+SESSION_THREAD_ENV = "CODEX_THREAD_ID"
+
+#: Directory under the Codex config root holding one zero-byte file per thread, on which the
+#: live Codex process holds an exclusive ``flock`` for the session's lifetime.
+#:
+#: This is the strongest liveness primitive either host offers, and it is why the Codex identity
+#: is NOT forced into Claude's ``<host>:<pid>:<ticks>`` shape. It gives two POSITIVE exit proofs
+#: rather than one: a clean exit DELETES the file, and a ``SIGKILL`` leaves the file behind while
+#: the kernel drops the lock — both verified, the second by killing a live session and watching
+#: its ``/proc/locks`` entry disappear while the file remained.
+#:
+#: An implementation detail with no documentation whatsoever, hence
+#: ``THREAD_LOCK_DIR_MISSING`` below: an absent directory is "cannot tell", never "not running".
+THREAD_LOCK_DIR = "thread-writer-locks"
+
+#: Thread ids are UUID-shaped. The pattern is a SAFETY boundary, not validation politeness: the
+#: value becomes a path segment under ``THREAD_LOCK_DIR``, so anything containing a separator or
+#: a traversal component must be refused rather than joined. It also excludes the non-thread
+#: bookkeeping files that share the directory — a ``.coordination.lock`` sits beside the thread
+#: locks and would otherwise be read as a thread id by the ancestry walk.
+_THREAD_ID_RE = re.compile(r"\A[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
 
 #: This module's host id, declared once. The module-level probe below reports it in its failure
 #: report (design §"Failure handling": a pre-run capability probe names the host id and the
@@ -609,6 +650,139 @@ class CodexAdapter:
     def session_posture(self, mode: str) -> str:
         """A detected Codex sandbox mode -> this run's posture. Fail-closed."""
         return self._MODE_POSTURE.get(mode, "supervised")
+
+    # --------------------------------------------------------------------- session identity
+    #
+    # NO PROCESS NAME IS READ HERE, on either path. The chain is
+    # ``CODEX_THREAD_ID`` -> lock file path -> ``(device, inode)`` -> ``/proc/locks`` -> the
+    # holder pid, which never scans the process table and never compares a `comm` or an `exe`
+    # basename to anything. The fallback below substitutes PARENTAGE for the environment
+    # variable, not a name.
+    #
+    # THE LOCK IS ONLY EVER READ, NEVER TAKEN. Acquiring it would either block behind the live
+    # session or, worse, succeed against a session that had exited and leave Conductor holding
+    # a lock Codex expects to own.
+
+    def thread_lock_path(
+        self, thread_id: str, *, home: str | None = None
+    ) -> str | None:
+        """The lock file for ``thread_id``, or ``None`` if the id is not one this may join."""
+        if not _THREAD_ID_RE.match(thread_id):
+            return None
+        return os.path.join(home or config_root(), THREAD_LOCK_DIR, f"{thread_id}.lock")
+
+    def _thread_id_from_ancestry(self, home: str) -> str | None:
+        """The thread id of the Codex process this call is running under, via parentage.
+
+        The documented-nowhere fallback for a host build that stops exporting
+        ``SESSION_THREAD_ENV``. It walks this process's own ancestor pids and asks the kernel's
+        lock table which of them holds one of this ``CODEX_HOME``'s thread locks. That is
+        parentage plus a kernel fact — never a name — so it stays inside the ban the deleted
+        ``pgrep`` guard is under.
+
+        ``None`` when nothing in the ancestry holds a thread lock, and also when an ancestor
+        holds MORE THAN ONE. One Codex process owning several threads is real and was observed
+        (one pid, two locks), and in that case parentage cannot say which thread this call
+        belongs to. Answering anyway would register ownership under a thread id that can outlive
+        or predecease the session doing the work, so the honest answer is that there is none.
+        """
+        directory = os.path.join(home, THREAD_LOCK_DIR)
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            return None
+        table = proc.lock_holders()
+        if table is None:
+            return None
+        ancestry = set(proc.ancestor_pids(os.getpid()))
+        matched: set[str] = set()
+        for name in names:
+            if not name.endswith(".lock"):
+                continue
+            thread_id = name[: -len(".lock")]
+            if not _THREAD_ID_RE.match(thread_id):
+                continue
+            try:
+                st = os.stat(os.path.join(directory, name))
+            except OSError:
+                continue
+            key = (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
+            if ancestry.intersection(table.get(key, ())):
+                matched.add(thread_id)
+        if len(matched) != 1:
+            return None
+        return matched.pop()
+
+    def session_identity(self, env: Mapping[str, str]) -> str | None:
+        """``codex:<CODEX_THREAD_ID>:<boot-id>`` for the session that owns ``env``.
+
+        The thread id is the identity and a pid never is: one Codex process can hold several
+        thread locks, so keying ownership on the process would exclude threads that are not
+        working on this run.
+
+        ``None`` when no thread id can be established, when it is not a well-formed id, or when
+        the boot id is unreadable — all of which mean the caller must refuse to claim ownership
+        rather than write a record nothing can later verify.
+        """
+        home = env.get(CONFIG_DIR_ENV) or config_root()
+        thread_id = env.get(SESSION_THREAD_ENV) or ""
+        if not _THREAD_ID_RE.match(thread_id.strip()):
+            thread_id = self._thread_id_from_ancestry(home) or ""
+        else:
+            thread_id = thread_id.strip()
+        if not thread_id:
+            return None
+        boot = proc.boot_id()
+        if boot is None:
+            return None
+        return f"{self.id}:{thread_id}:{boot}"
+
+    def process_alive(self, identity: str) -> bool | None:
+        """Tri-state liveness for an identity recorded against this host.
+
+        ``codex:<thread>:<boot>`` resolves through the kernel's lock table. ``proc:<pid>:…`` is
+        the host-agnostic plain-process scheme a ``conductor heartbeat`` wrapper registers, and
+        it must be answerable on a Codex-recorded run exactly as on a Claude-recorded one. Any
+        other scheme, including Claude's, is ``None``.
+
+        The exit proofs, all positive and all kernel-backed:
+
+        * the recorded boot id differs — the machine restarted;
+        * the lock file is GONE — Codex deletes it on a clean exit;
+        * the lock file is present but the kernel holds no lock on it — the session was killed
+          and the kernel released the lock on its behalf.
+
+        A MISSING LOCK DIRECTORY IS ``None``, NOT ``False``. The directory is an undocumented
+        implementation detail of a 0.x CLI; if a future version moves or renames it, every
+        record would otherwise read as provably exited at once and every live session would stop
+        excluding anything. "The mechanism is not where I expect it" must present as "cannot
+        tell".
+        """
+        scheme = identity.split(":", 1)[0] if ":" in identity else ""
+        if scheme == proc.LOCAL_SCHEME:
+            return proc.pid_identity_liveness(identity, scheme=proc.LOCAL_SCHEME)
+        if scheme != self.id:
+            return None
+        parts = identity.split(":")
+        if len(parts) != 3 or not parts[2]:
+            return None
+        thread_id, recorded_boot = parts[1], parts[2]
+        current_boot = proc.boot_id()
+        if current_boot is None:
+            return None
+        if current_boot != recorded_boot:
+            return False
+        path = self.thread_lock_path(thread_id)
+        if path is None:
+            return None
+        if not os.path.isdir(os.path.dirname(path)):
+            return None
+        state, _ = proc.path_lock_state(path)
+        if state == "held":
+            return True
+        if state in ("absent", "unheld"):
+            return False
+        return None
 
     def scheduled_tasks_file(self) -> str | None:
         """Codex has no verified harness scheduled-task file, so it has no such leg.
