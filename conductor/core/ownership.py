@@ -39,7 +39,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import NamedTuple
 
 from conductor.core import atomic, locks, runstate
@@ -135,7 +135,7 @@ def record_path(state_root: str, run_key: str) -> str:
     return os.path.join(runstate.run_dir(state_root, run_key), "owner.json")
 
 
-def is_inherited(record: OwnerRecord, env) -> bool:
+def is_inherited(record: OwnerRecord, env: Mapping[str, str]) -> bool:
     """Does ``record`` name an ownership this caller was launched underneath?
 
     True only on an exact match against ``INHERITED_IDENTITY_ENV``. A descendant of the process

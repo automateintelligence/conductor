@@ -503,11 +503,43 @@ def cmd_owner_busy(args: argparse.Namespace) -> int:
 
 
 def cmd_disown(args: argparse.Namespace) -> int:
-    """Clear an ownership record whose owner is provably gone (``--force`` when it cannot be)."""
+    """Release this session's own ownership, or clear a record whose owner is provably gone.
+
+    RELEASING YOUR OWN IS THE COMMON CASE AND IT IS NOT THE SAME OPERATION. A worker that
+    finishes its phase is still running when it lets go, so it can never satisfy the exit proof
+    ``disown`` demands of a stranger — and an early version of this verb refused every worker
+    that tried to release itself, which would have left an ownership record behind after every
+    single fire and blocked the run until a human forced it. Ownership one holds is one's own to
+    drop; ``ownership.release`` is the same "only if it is still mine" write the wrapper tier
+    makes when its ``with`` block ends.
+
+    A DESCENDANT DOES NOT RELEASE ITS ANCESTOR. A worker launched by a wrapper that holds the
+    record must leave it alone: the wrapper is still supervising the fire and will release it
+    itself. Dropping it here would hand the run to the next cron tick while the fire is running.
+    """
     resolution = resolve.resolve(run_key=args.run, start=args.project)
-    outcome, detail = ownership.disown(
-        resolution.state_root, resolution.run_key, force=args.force
-    )
+    state_root, key = resolution.state_root, resolution.run_key
+    try:
+        current = ownership.read(state_root, key)
+    except ownership.OwnerAmbiguous:
+        current = None  # only --force can clear it; `disown` below says so.
+    if current is not None:
+        if ownership.is_inherited(current, os.environ):
+            print(
+                f"run {key} is owned by the wrapper that launched this session "
+                f"({current.wrapper_identity}); it releases its own ownership. Nothing was "
+                "removed."
+            )
+            return EXIT_OK
+        try:
+            _host, identity = _session_identity(resolution.repo_root, args.host)
+        except ownership.OwnerUnidentified:
+            identity = None
+        if identity is not None and identity == current.wrapper_identity:
+            ownership.release(state_root, key, wrapper_identity=identity)
+            print(f"run {key}: released this session's own ownership ({identity}).")
+            return EXIT_OK
+    outcome, detail = ownership.disown(state_root, key, force=args.force)
     if outcome == "refused":
         print(detail, file=sys.stderr)
         return EXIT_FAIL
@@ -600,6 +632,13 @@ def _parser() -> argparse.ArgumentParser:
         "disown", help="clear an ownership record whose owner is provably gone"
     )
     gone.add_argument("--run", default=None, help="run key (optional)")
+    gone.add_argument(
+        "--host",
+        default=None,
+        choices=hostbase.HOST_IDS,
+        help="the invoking skill's own host id, for releasing ownership this session holds "
+        "(default: the project's recorded host)",
+    )
     gone.add_argument(
         "--force",
         action="store_true",

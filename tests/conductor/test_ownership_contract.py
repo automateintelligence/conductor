@@ -128,6 +128,22 @@ class Harness:
             tier=tier,
         )
 
+    def claude_session_identity(self, monkeypatch) -> str:
+        """Make this test process look like a live Claude session, and return the identity the
+        adapter mints for it.
+
+        ``CLAUDE_PID`` is set to this process's own pid, so the identity names a process that
+        genuinely is alive for the duration of the test. Nothing is stubbed: the adapter still
+        reads ``/proc`` for the start ticks and the boot id.
+        """
+        monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
+        from conductor.hosts import base as hostbase
+
+        identity = hostbase.load("claude").session_identity(os.environ)
+        assert identity is not None
+        assert identity.startswith(f"claude:{os.getpid()}:")
+        return identity
+
     def owner_doc(self) -> dict:
         path = ownership.record_path(self.state_root, self.run_key)
         return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -716,6 +732,77 @@ def test_an_unanswerable_check_still_refuses_to_fire_past_a_record_that_exists(
         assert "owner-check-failed" in harness.log, harness.log
         assert "owner-check-unavailable" not in harness.log, harness.log
         assert owner.poll() is None, "the owner exited; this proved nothing"
+    finally:
+        owner.kill()
+        owner.wait(timeout=30)
+
+
+# --- releasing ownership one HOLDS ----------------------------------------------------------
+
+
+def test_a_live_worker_can_release_its_own_ownership(harness, monkeypatch):
+    """The bug that would have left a record behind after every single fire.
+
+    A worker is still RUNNING when it finishes its phase and lets go, so it can never satisfy
+    the exit proof ``disown`` demands of a stranger. The first version of the verb refused
+    exactly that — every worker following the skill's own instruction would have been told to
+    run ``--force``, and any that did not would have blocked the run until a human intervened.
+    Ownership one holds is one's own to drop.
+    """
+    identity = harness.claude_session_identity(monkeypatch)
+    harness.record(identity)
+    assert (
+        run_cmd.main(
+            ["disown", "--run", harness.run_key, "--project", str(harness.root)]
+        )
+        == 0
+    )
+    assert ownership.read(harness.state_root, harness.run_key) is None
+    # And the run is free again immediately — no waiting, no force.
+    result = harness.fire()
+    assert result.returncode == 0
+    assert harness.fire_count == 1, harness.log
+
+
+def test_a_descendant_does_not_release_its_ancestors_ownership(harness, monkeypatch):
+    """A worker launched BY the record's owner must leave it alone: the wrapper is still
+    supervising the fire. Dropping it here hands the run to the next cron tick mid-fire."""
+    owner = _sleeper()
+    try:
+        record = harness.record(_identity(owner.pid), tier="wrapper")
+        monkeypatch.setenv(ownership.INHERITED_IDENTITY_ENV, record.wrapper_identity)
+        assert (
+            run_cmd.main(
+                ["disown", "--run", harness.run_key, "--project", str(harness.root)]
+            )
+            == 0
+        )
+        survivor = ownership.read(harness.state_root, harness.run_key)
+        assert survivor is not None
+        assert survivor.wrapper_identity == record.wrapper_identity
+        assert owner.poll() is None
+    finally:
+        owner.kill()
+        owner.wait(timeout=30)
+
+
+def test_releasing_never_drops_someone_elses_record(harness, monkeypatch):
+    """The boundary. "My own" is an exact identity match, so a session that does not hold the
+    record cannot release it out from under the session that does."""
+    owner = _sleeper()
+    try:
+        harness.record(_identity(owner.pid))
+        # This session's identity is not the record's, so the release path must not engage and
+        # the ordinary exit-proof refusal must apply.
+        harness.claude_session_identity(monkeypatch)
+        assert (
+            run_cmd.main(
+                ["disown", "--run", harness.run_key, "--project", str(harness.root)]
+            )
+            == 1
+        )
+        assert ownership.read(harness.state_root, harness.run_key) is not None
+        assert owner.poll() is None
     finally:
         owner.kill()
         owner.wait(timeout=30)
