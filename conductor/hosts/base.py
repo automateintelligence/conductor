@@ -155,7 +155,13 @@ class DispatchResult:
 class HostAdapter(Protocol):
     """Everything that genuinely differs between Claude Code and Codex.
 
-    ``id`` is also the basename of the host's executable. Tasks 7 and 8 depend on that.
+    ``id`` is also the basename of the host's LAUNCHER PATH (``~/.local/bin/claude``,
+    ``codex``). That is a fact about the path Conductor INVOKES and never about a running
+    process: Claude's launcher is a symlink into a version directory, so a live session's
+    ``comm`` and ``exe`` basename are the version string (``2.1.227``) and never ``claude``.
+    Use it to build an argv; never to recognise a process. Recognising a process by its name
+    is the deleted ``pgrep`` guard, and it is banned on both hosts — ``session_identity`` and
+    ``process_alive`` below carry the whole liveness contract without it.
     """
 
     id: str
