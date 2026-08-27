@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -22,25 +24,53 @@ from conductor.core import ownership, registry, runstate, schema, transaction
 
 ROOT = Path(__file__).resolve().parents[2]
 
+#: A recording `gh` that answers like the real one in the three ways these tests need.
+#: `repo view` resolves the repository FROM ITS OWN cwd, so `by_cwd` maps a checkout onto the
+#: identity and default branch gh would report while standing in it. `pr view` answers for the
+#: repository `-R` names, so `by_repo` maps a repository onto its own pull requests. `stall`
+#: makes the first `pr view` block until the test releases it, which is how a concurrency window
+#: inside a verb is opened WITHOUT patching the verb. A config carrying none of the three behaves
+#: exactly as the single-project fake always did.
 _GH_FAKE = r"""#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 CONFIG = json.load(open(os.environ["GH_FAKE_CONFIG"], encoding="utf-8"))
 argv = sys.argv[1:]
 with open(os.environ["GH_FAKE_LOG"], "a", encoding="utf-8") as h:
-    h.write(json.dumps(argv) + "\n")
+    h.write(json.dumps({"argv": argv, "cwd": os.getcwd()}) + "\n")
 
 def fields(args):
     return args[args.index("--json") + 1].split(",") if "--json" in args else []
 
+def here():
+    for path, view in CONFIG.get("by_cwd", {}).items():
+        if os.path.realpath(os.getcwd()) == os.path.realpath(path):
+            return view
+    return CONFIG
+
+def named_repo(args):
+    return args[args.index("-R") + 1] if "-R" in args else here().get("repo")
+
+def stall():
+    spec = CONFIG.get("stall")
+    if not spec:
+        return
+    open(spec["ready"], "a").close()
+    deadline = time.time() + 120
+    while not os.path.exists(spec["go"]) and time.time() < deadline:
+        time.sleep(0.02)
+
 if argv[:2] == ["repo", "view"]:
+    view = here()
     if "defaultBranchRef" in fields(argv):
-        if CONFIG.get("default_branch") is None:
+        if view.get("default_branch") is None:
             sys.stderr.write("no default branch\n"); raise SystemExit(1)
-        print(CONFIG["default_branch"]); raise SystemExit(0)
+        print(view["default_branch"]); raise SystemExit(0)
     if "nameWithOwner" in fields(argv):
-        print(CONFIG["repo"]); raise SystemExit(0)
+        print(view["repo"]); raise SystemExit(0)
 if argv[:2] == ["pr", "view"]:
-    pr = CONFIG["prs"].get(argv[2])
+    stall()
+    prs = CONFIG.get("by_repo", {}).get(named_repo(argv), CONFIG["prs"])
+    pr = prs.get(argv[2])
     if pr is None:
         sys.stderr.write("no pull request %s\n" % argv[2]); raise SystemExit(1)
     print(json.dumps({f: pr[f] for f in fields(argv)})); raise SystemExit(0)
@@ -72,7 +102,8 @@ class Project:
         return doc
 
     @property
-    def gh_calls(self) -> list[list[str]]:
+    def gh_invocations(self) -> list[dict]:
+        """Every recorded `gh` call: its argv AND the cwd it was made from."""
         if not self.log.is_file():
             return []
         return [
@@ -81,11 +112,22 @@ class Project:
             if line.strip()
         ]
 
+    @property
+    def gh_calls(self) -> list[list[str]]:
+        return [call["argv"] for call in self.gh_invocations]
+
     def set_prs(
-        self, prs: dict, *, default_branch: str | None = DEFAULT_BRANCH
+        self, prs: dict, *, default_branch: str | None = DEFAULT_BRANCH, **extra
     ) -> None:
         self.config.write_text(
-            json.dumps({"repo": REPO, "default_branch": default_branch, "prs": prs}),
+            json.dumps(
+                {
+                    "repo": REPO,
+                    "default_branch": default_branch,
+                    "prs": prs,
+                    **extra,
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -678,6 +720,46 @@ def test_finish_removes_the_runs_registered_worktree(project, git, capsys) -> No
     assert not worktree.exists()
 
 
+def test_finish_refuses_when_git_cannot_list_the_runs_worktrees(
+    project, git, capsys, monkeypatch
+) -> None:
+    """FAIL CLOSED. ``_run_worktrees`` used to return ``[]`` on a nonzero ``git worktree list``,
+    which the caller read as "this run has none" — so one transient git failure produced a
+    successful finish that removed nothing and marked the run TERMINAL. Every later call then
+    short-circuits on "already terminal", leaving the worktree with no verb that would clean it
+    up. The failure has to become a refusal that keeps the run resumable."""
+    worktree = (
+        project.root / ".worktrees" / "conductor" / project.run_key / "integration"
+    )
+    git(project.root, "worktree", "add", "-q", "-b", "wt-branch", str(worktree))
+    runstate.update(
+        project.state_root,
+        project.run_key,
+        lambda doc: {**doc, "integration_worktree": str(worktree)},
+    )
+    _awaiting(project, git, state="MERGED")
+    real_git = lifecycle._git
+
+    def flaky(repo_root: str, *args: str):
+        if args[:2] == ("worktree", "list"):
+            return subprocess.CompletedProcess(
+                args=["git"], returncode=128, stdout="", stderr="fatal: transient"
+            )
+        return real_git(repo_root, *args)
+
+    monkeypatch.setattr(lifecycle, "_git", flaky)
+    assert project.verb("finish", "--run", project.run_key) == 1
+    err = capsys.readouterr().err
+    assert "could not list the worktrees" in err, err
+    assert project.run["status"] == "awaiting-team-merge"
+    assert worktree.exists()
+    # And the run is still finishable once git answers, rather than stuck at terminal.
+    monkeypatch.setattr(lifecycle, "_git", real_git)
+    assert project.verb("finish", "--run", project.run_key) == 0
+    assert project.run["status"] == "terminal"
+    assert not worktree.exists()
+
+
 def test_finish_is_idempotent_on_a_terminal_run(project, git, capsys) -> None:
     _awaiting(project, git, state="MERGED")
     assert project.verb("finish", "--run", project.run_key) == 0
@@ -692,6 +774,229 @@ def test_finish_refuses_while_a_live_owner_holds_the_run(project, git, capsys) -
         assert project.verb("finish", "--run", project.run_key) == 1
     assert "is owned by" in capsys.readouterr().err
     assert project.run["status"] == "awaiting-team-merge"
+
+
+def test_finish_reserves_ownership_for_the_whole_verb(
+    project, git, git_env, tmp_path
+) -> None:
+    """No acquirer may take this run while ``finish`` is between its checks and its cleanup.
+
+    The old shape sampled ``ownership.read`` once and then spent seconds in ``gh pr view``,
+    ``git ls-remote`` and two journalled writes with nothing reserved. A heartbeat arriving in
+    that window acquired ownership and launched a fire, and ``finish`` went on to remove the
+    worktree underneath it and mark the run terminal — success reported, work destroyed.
+
+    Reproduced with the verb UNPATCHED. ``finish`` runs in its own process; the recording `gh`
+    stalls inside it on the first ``pr view``, which is exactly the window the finding names;
+    and this process then makes the acquisition a heartbeat makes — ``ownership.acquire`` — and
+    must be refused. Releasing the stall lets ``finish`` finish, so the reservation is proved not
+    to be a deadlock or a no-op.
+    """
+    worktree = (
+        project.root / ".worktrees" / "conductor" / project.run_key / "integration"
+    )
+    git(project.root, "worktree", "add", "-q", "-b", "wt-branch", str(worktree))
+    runstate.update(
+        project.state_root,
+        project.run_key,
+        lambda doc: {**doc, "integration_worktree": str(worktree)},
+    )
+    _awaiting(project, git, state="MERGED")
+    ready, go = tmp_path / "gh-stalled", tmp_path / "gh-released"
+    project.set_prs(
+        json.loads(project.config.read_text())["prs"],
+        stall={"ready": str(ready), "go": str(go)},
+    )
+
+    finishing = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "conductor.lifecycle",
+            "finish",
+            "--run",
+            project.run_key,
+            "--project",
+            str(project.root),
+        ],
+        cwd=str(project.root),
+        env={
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": git_env["GIT_CONFIG_GLOBAL"],
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "PYTHONPATH": str(ROOT),
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 120
+        while not ready.exists() and time.monotonic() < deadline:
+            assert finishing.poll() is None, (
+                f"finish exited before it reached the window: {finishing.communicate()}"
+            )
+            time.sleep(0.02)
+        assert ready.exists(), "the recording gh never stalled; no window was opened"
+        with pytest.raises(ownership.OwnerBusy):
+            with ownership.acquire(
+                project.state_root, project.run_key, host="claude", wrapper_identity="1"
+            ):
+                pass
+    finally:
+        go.touch()
+        out, err = finishing.communicate(timeout=180)
+    assert finishing.returncode == 0, f"{out}\n{err}"
+    assert f"removed worktree {worktree}" in out, out
+    assert not worktree.exists()
+    assert project.run["status"] == "terminal"
+    # And it let go: the record is gone, so the next verb is not locked out by a finished one.
+    assert ownership.read(project.state_root, project.run_key) is None
+
+
+# --- --project scopes AUTHORITY, not just state ----------------------------------------------
+
+
+def _bystander_repo(tmp_path, git_env, git, name: str = "bystander") -> Path:
+    """A second, unrelated repository the operator happens to be standing in."""
+    root = tmp_path / name
+    root.mkdir()
+    subprocess.run(
+        ["git", "init", "-q", "-b", DEFAULT_BRANCH, str(root)],
+        check=True,
+        capture_output=True,
+        env=git_env,
+        timeout=30,
+    )
+    (root / "unrelated.md").write_text("# unrelated\n", encoding="utf-8")
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "init")
+    return root
+
+
+def test_finish_reads_no_repository_fact_from_the_directory_it_was_invoked_from(
+    project, git, tmp_path, git_env, monkeypatch, capsys
+) -> None:
+    """``finish --project B`` run from inside repo A must validate B's pull request, not A's.
+
+    The destructive shape, reproduced exactly. Repo A is a DIFFERENT GitHub repository whose
+    pull request #202 is MERGED at the very SHA run B audited — the coincidence two forks of one
+    project share for free. Repo B's #202 is OPEN. Everything ambient (the process cwd and the
+    ``$CONDUCTOR_HOME`` ``bin/conductor`` exports before ``--project`` is parsed) names A.
+
+    Ambient resolution answers "acme/bystander", asks ``gh pr view -R acme/bystander 202``, is
+    told MERGED, and then removes B's worktrees, deletes B's branches and marks B terminal — a
+    repository whose pull request was never looked at. Scoped resolution asks B and refuses.
+    """
+    head = _awaiting(project, git, state="OPEN")
+    bystander = _bystander_repo(tmp_path, git_env, git)
+    project.set_prs(
+        {"202": _pr(DEFAULT_BRANCH, head, "OPEN", 202)},
+        by_cwd={
+            str(bystander): {"repo": "acme/bystander", "default_branch": DEFAULT_BRANCH}
+        },
+        by_repo={
+            "acme/bystander": {
+                "202": {
+                    **_pr(DEFAULT_BRANCH, head, "MERGED", 202),
+                    "url": "https://github.com/acme/bystander/pull/202",
+                }
+            },
+            REPO: {"202": _pr(DEFAULT_BRANCH, head, "OPEN", 202)},
+        },
+    )
+    # CONDUCTOR_REPO would short-circuit discovery; the ambient answer has to come from `gh`,
+    # standing where the operator stands.
+    monkeypatch.delenv("CONDUCTOR_REPO", raising=False)
+    monkeypatch.setenv("CONDUCTOR_HOME", str(bystander))
+    monkeypatch.chdir(bystander)
+
+    branch = project.run["integration_branch"]
+    assert (
+        lifecycle.main(
+            ["finish", "--run", project.run_key, "--project", str(project.root)]
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert "not MERGED" in err, err
+    # B is intact: still awaiting, its branch still there, and nothing was cleaned up.
+    assert project.run["status"] == "awaiting-team-merge"
+    assert (
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(project.root),
+                "rev-parse",
+                "--verify",
+                f"refs/heads/{branch}",
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        ).returncode
+        == 0
+    )
+    # And the authority it used was B's, not the bystander's.
+    asked = [c for c in project.gh_invocations if c["argv"][:2] == ["pr", "view"]]
+    assert asked, "finish never read a pull request at all"
+    assert all(
+        "-R" in c["argv"] and c["argv"][c["argv"].index("-R") + 1] == REPO
+        for c in asked
+    ), f"finish read a pull request in the wrong repository: {asked}"
+
+
+def test_finish_resolves_the_default_branch_of_the_project_it_was_given(
+    project, git, tmp_path, git_env, monkeypatch, capsys
+) -> None:
+    """The second half of the same fact: the base a pull request is checked against.
+
+    Repo A's default branch is ``release/a``. Read ambiently, B's correctly-based pull request
+    would be refused for having "the wrong base" — the harmless direction of the same bug, and
+    the one that proves the fix is not simply an unconditional refusal."""
+    _awaiting(project, git, state="MERGED")
+    bystander = _bystander_repo(tmp_path, git_env, git, name="other-default")
+    project.set_prs(
+        json.loads(project.config.read_text())["prs"],
+        by_cwd={
+            str(bystander): {"repo": "acme/bystander", "default_branch": "release/a"}
+        },
+    )
+    monkeypatch.delenv("CONDUCTOR_REPO", raising=False)
+    monkeypatch.setenv("CONDUCTOR_REPO", REPO)  # isolate the DEFAULT-BRANCH fact alone
+    monkeypatch.setenv("CONDUCTOR_HOME", str(bystander))
+    monkeypatch.chdir(bystander)
+    assert (
+        lifecycle.main(
+            ["finish", "--run", project.run_key, "--project", str(project.root)]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert f"merged into {DEFAULT_BRANCH}" in out, out
+    assert project.run["status"] == "terminal"
+
+
+def test_heartbeat_hands_the_driver_the_project_it_resolved(
+    project, tmp_path, git_env, git, monkeypatch
+) -> None:
+    """A fire launched for run B must not inherit repo A as its ambient project.
+
+    The driver reads ``$CONDUCTOR_HOME`` to find the state root it writes; ``bin/conductor``
+    exported the CALLER's. cwd alone does not fix that — an explicit variable outranks it."""
+    seen = project.root / "driver-saw-home"
+    _install_driver(project, f'#!/bin/sh\nprintf %s "$CONDUCTOR_HOME" > {seen}\n')
+    bystander = _bystander_repo(tmp_path, git_env, git, name="elsewhere")
+    monkeypatch.setenv("CONDUCTOR_HOME", str(bystander))
+    monkeypatch.chdir(bystander)
+    assert (
+        lifecycle.main(
+            ["heartbeat", "--run", project.run_key, "--project", str(project.root)]
+        )
+        == 0
+    )
+    assert seen.read_text() == str(project.root)
 
 
 # --- CLI surface ----------------------------------------------------------------------------

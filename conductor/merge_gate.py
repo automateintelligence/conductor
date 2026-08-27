@@ -137,10 +137,21 @@ def _newest_commit_dates(repo: str, pr: int) -> Any:
     return json.loads(node)
 
 
-def _remote_for(repo: str, run: Any = subprocess.run) -> str:
-    """Pick the git remote whose URL points at <owner/repo>; fall back to 'origin'."""
+def _remote_for(
+    repo: str, run: Any = subprocess.run, *, root: str | None = None
+) -> str:
+    """Pick the git remote whose URL points at <owner/repo>; fall back to 'origin'.
+
+    ``root`` names the repository to ask. Omitted, `git remote -v` reads whatever repository the
+    process cwd happens to sit in — which is the caller's project only by coincidence. A verb
+    carrying an explicit ``--project`` must pass it: the remote it gets back is used to resolve
+    the OTHER project's branch tips, so an ambient answer names a remote that repository may not
+    have (or, worse, one it has under a different URL)."""
     out = run(
-        ["git", "remote", "-v"], capture_output=True, text=True, timeout=_GH_TIMEOUT
+        ["git", *(("-C", root) if root else ()), "remote", "-v"],
+        capture_output=True,
+        text=True,
+        timeout=_GH_TIMEOUT,
     )
     for line in (out.stdout or "").splitlines():
         parts = line.split()
@@ -289,9 +300,15 @@ def check(
     return {"ok": not blockers, "blockers": blockers}
 
 
-def _resolve_repo(run: Any = subprocess.run) -> str:
+def _resolve_repo(run: Any = subprocess.run, *, root: str | None = None) -> str:
     """The repo the gate runs against: CONDUCTOR_REPO if set, else `gh repo view` — time-bounded
-    and fail-closed (a hung or failed autodiscovery raises instead of stalling/crashing)."""
+    and fail-closed (a hung or failed autodiscovery raises instead of stalling/crashing).
+
+    ``root`` names the repository to ask about. `gh` resolves the repository from ITS OWN cwd, so
+    omitting it answers for whatever repository the caller happened to be standing in. That is
+    the ambient answer `conductor finish --project <other>` must never take: the name returned
+    here becomes `gh pr view -R <name>`, and a name from the wrong repository validates the wrong
+    pull request before the cleanup runs against the resolved one."""
     repo = os.environ.get("CONDUCTOR_REPO")
     if repo:
         return repo
@@ -300,6 +317,7 @@ def _resolve_repo(run: Any = subprocess.run) -> str:
         capture_output=True,
         text=True,
         timeout=_GH_TIMEOUT,
+        cwd=root,
     )
     if out.returncode != 0:
         raise RuntimeError(f"repo-discovery-failed: {(out.stderr or '').strip()}")

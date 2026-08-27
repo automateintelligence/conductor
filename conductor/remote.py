@@ -15,8 +15,14 @@ import sys
 from conductor.merge_gate import _remote_for, _resolve_repo
 
 
-def resolve() -> str:
-    return _remote_for(_resolve_repo())
+def resolve(root: str | None = None) -> str:
+    """The remote pointing at ``root``'s repository (default: the ambient one).
+
+    ``root`` exists because both probes underneath are cwd-sensitive — `gh repo view` resolves
+    the repository from its own cwd and `git remote -v` from the process's. A verb invoked with
+    an explicit `--project` must name the project it resolved, or it reads one repository's
+    remotes while acting on another's branches."""
+    return _remote_for(_resolve_repo(root=root), root=root)
 
 
 def main() -> int:

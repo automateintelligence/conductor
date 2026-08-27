@@ -4,6 +4,16 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # HERE = the plugin dir (tool code only). The PROJECT owns run state + the done-gate:
 # $CONDUCTOR_HOME, else the git repo of the current directory, else cwd. Resolve once and
 # export it so assertions/run.py and conductor.freeze agree with this and with each other.
+#
+# THIS EXPORT IS A DEFAULT, NOT AN AUTHORITY. It is computed from the CALLER'S cwd, before any
+# argument has been parsed — so for every verb that takes `--project` (status/resume/heartbeat/
+# finish) or `--checkout` (doctor relocation), $CONDUCTOR_HOME names the project the operator was
+# STANDING IN, which need not be the one they asked about. Those verbs must resolve every
+# repository fact from the path they were given and must not read this variable behind the
+# operator's back; `conductor.lifecycle._repo_context` and `_project_env` are where that is
+# enforced, and a child process a verb launches gets $CONDUCTOR_HOME re-anchored onto the
+# resolved project rather than this one. Bash cannot make that decision here: it would have to
+# know each verb's option grammar.
 PROJECT="${CONDUCTOR_HOME:-$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || pwd)}"
 export CONDUCTOR_HOME="$PROJECT"
 case "${1:-}" in
@@ -37,7 +47,12 @@ case "${1:-}" in
   resume-script) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.resume_script "$@" ;;
   driver) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.driver "$@" ;;
   remote) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.remote "$@" ;;
-  doctor) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.doctor "$@" ;;
+  # -B / PYTHONDONTWRITEBYTECODE: `doctor relocation` promises it "moves nothing, renames nothing,
+  # and writes nothing anywhere", and every git call inside it carries --no-optional-locks to keep
+  # that promise. Python broke it one level up: importing conductor.doctor wrote __pycache__/ into
+  # the very checkout being judged, so the scan created untracked-and-ignored content and then
+  # `--strict` refused on the files it had just made, under a report saying nothing was written.
+  doctor) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" PYTHONDONTWRITEBYTECODE=1 exec python3 -B -m conductor.doctor "$@" ;;
   status) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.lifecycle status "$@" ;;
   resume) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.lifecycle resume "$@" ;;
   heartbeat) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.lifecycle heartbeat "$@" ;;

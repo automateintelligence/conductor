@@ -205,19 +205,39 @@ def _live_owner(state_root: str, run_key: str) -> str | None:
 
 
 def _repo_context(repo_root: str) -> tuple[str, str, str]:
-    """``(repo, remote, default_branch)`` — all three fail closed.
+    """``(repo, remote, default_branch)`` for THE PROJECT AT ``repo_root`` — all three fail closed.
 
     ``branches.default_branch`` never substitutes a literal (A-DH-6), so an unresolvable default
-    branch propagates as a refusal here rather than becoming a guessed pull-request base."""
-    repo = _resolve_repo()
-    default = branches.default_branch()
+    branch propagates as a refusal here rather than becoming a guessed pull-request base.
+
+    EVERY REPOSITORY FACT COMES FROM ``repo_root``, NEVER FROM THE AMBIENT PROJECT. This function
+    used to ignore its argument: ``gh repo view`` resolved the repository from the process cwd,
+    and ``default_branch``/``remote`` resolved theirs from ``$CONDUCTOR_HOME`` — which
+    ``bin/conductor`` exports from the CALLER'S cwd, before ``--project`` has been parsed. So
+    ``conductor finish --project /repo/B`` run from inside repo A read A's repository name, asked
+    ``gh pr view -R <A>`` whether A's pull request was merged, and then removed B's worktrees,
+    deleted B's branches and marked B terminal on the strength of that answer. Forks sharing an
+    audited head SHA make that a realistic false positive rather than a theoretical one."""
+    repo = _resolve_repo(root=repo_root)
+    default = branches.default_branch(repo_root)
     try:
-        remote = remote_mod.resolve()
+        remote = remote_mod.resolve(repo_root)
     except (
         Exception
     ):  # discovery failure degrades to the historical default, never to empty
         remote = "origin"
     return repo, remote, default
+
+
+def _project_env(repo_root: str) -> dict[str, str]:
+    """This process's environment with ``CONDUCTOR_HOME`` re-anchored onto ``repo_root``.
+
+    ``bin/conductor`` exports ``CONDUCTOR_HOME`` from the caller's cwd before any verb has parsed
+    ``--project``, so a child launched from a ``--project``-scoped verb would otherwise inherit
+    the WRONG project as its ambient one — a driver fired for run B resolving B's state root from
+    the environment of repo A. The child's cwd is already ``repo_root``; this makes the variable
+    agree with it."""
+    return {**os.environ, "CONDUCTOR_HOME": repo_root}
 
 
 # --- status -------------------------------------------------------------------------------
@@ -456,7 +476,11 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
             # FIRE_STARTUP_TIMEOUT_S / FIRE_IDLE_TIMEOUT_S) because a legitimate phase runs for
             # hours; a ceiling here would kill working phases or bound nothing.
             fire = subprocess.run(
-                [script], cwd=resolution.repo_root, check=False, timeout=None
+                [script],
+                cwd=resolution.repo_root,
+                env=_project_env(resolution.repo_root),
+                check=False,
+                timeout=None,
             )
     except ownership.OwnerBusy as exc:
         # A skipped fire caused by a live owner is a SUCCESSFUL fire and must not create a
@@ -530,11 +554,24 @@ def _audited_head(repo_root: str, remote: str, run: dict) -> tuple[str | None, s
     return None, "nothing"
 
 
+class WorktreeListUnavailable(RuntimeError):
+    """git could not say which worktrees this run has, so cleanup cannot be called complete."""
+
+
 def _run_worktrees(repo_root: str, run: dict) -> list[str]:
-    """Registered linked worktrees belonging to this run, from git's own registration list."""
+    """Registered linked worktrees belonging to this run, from git's own registration list.
+
+    FAILS CLOSED. Returning ``[]`` on a nonzero ``git worktree list`` read "this run has no
+    worktrees", and the caller went on to delete branches and mark the run TERMINAL — so one
+    transient git failure produced a successful ``finish`` that removed nothing, after which
+    every later call short-circuits on ``already terminal`` and the worktrees are stranded with
+    no verb left that would clean them up. An empty list must mean git ANSWERED and said none."""
     out = _git(repo_root, "worktree", "list", "--porcelain")
     if out.returncode != 0:
-        return []
+        raise WorktreeListUnavailable(
+            f"git could not list the worktrees of {repo_root} (exit {out.returncode}): "
+            f"{(out.stderr or '').strip() or 'no output'}"
+        )
     registered = [
         line.split(" ", 1)[1].strip()
         for line in (out.stdout or "").splitlines()
@@ -620,7 +657,42 @@ def cmd_finish(args: argparse.Namespace) -> int:
     if busy:
         print(busy, file=sys.stderr)
         return EXIT_FAIL
+    # RESERVE, DO NOT SAMPLE. The check above is a courtesy: it produces the better sentence,
+    # naming the record and its path, for the ordinary case where someone is already working.
+    # It cannot be the exclusion, because between it and the cleanup below sit `gh pr view`,
+    # `git ls-remote` and two journalled writes — seconds of wall clock in which a heartbeat can
+    # legitimately acquire ownership and launch a fire. Reproduced: finish returned success and
+    # removed the worktree while `identity_is_live()` was true for a heartbeat that had taken
+    # ownership inside that window. Holding the RECORD for the rest of the verb is what makes a
+    # concurrent `ownership.acquire` refuse, and it is the same mechanism a heartbeat uses, so
+    # whichever of the two arrives second is the one that backs off.
+    #
+    # Ownership is a record, not a held lock: `acquire` takes `owner.lock` only around the two
+    # record mutations and releases it before yielding, so `_commit`'s `project.lock` inside this
+    # block does not invert the global order (migration -> project -> owner -> state).
+    try:
+        with ownership.acquire(
+            state_root, key, host=runhost.resolve(resolution.repo_root)
+        ):
+            return _finish_reserved(args, resolution, run, status)
+    except ownership.OwnerBusy as exc:
+        print(
+            f"finish refused for run {key}: {exc} Nothing was removed and the run stays "
+            f"{status}. Wait for that fire to finish, then re-run finish.",
+            file=sys.stderr,
+        )
+        return EXIT_FAIL
 
+
+def _finish_reserved(
+    args: argparse.Namespace,
+    resolution: resolve.RunResolution,
+    run: dict,
+    status: str,
+) -> int:
+    """``finish``'s body, under this run's ownership record. Every write and every removal
+    below happens while a concurrent acquirer would be refused."""
+    state_root, key = resolution.state_root, resolution.run_key
     repo, remote, default = _repo_context(resolution.repo_root)
     if args.pr is not None:
         pull, recovered = (
@@ -689,9 +761,18 @@ def cmd_finish(args: argparse.Namespace) -> int:
         )
         return EXIT_FAIL
 
-    removed, refused = _remove_worktrees(
-        resolution.repo_root, _run_worktrees(resolution.repo_root, run)
-    )
+    try:
+        owned = _run_worktrees(resolution.repo_root, run)
+    except WorktreeListUnavailable as exc:
+        print(
+            f"finish refused for run {key}: {pull.url} is {pull.state} but {exc}\n"
+            f"  Nothing was removed and the run stays {status} — marking it terminal on an "
+            "unanswered question would strand any worktree this run still has, since finish "
+            "then short-circuits on 'already terminal'. Retry once git answers.",
+            file=sys.stderr,
+        )
+        return EXIT_FAIL
+    removed, refused = _remove_worktrees(resolution.repo_root, owned)
     if refused:
         print(
             f"finish refused for run {key}: {pull.url} is {pull.state} but these worktrees "
