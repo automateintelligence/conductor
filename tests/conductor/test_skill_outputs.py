@@ -33,6 +33,10 @@ _REGIONS: dict[str, list[tuple[str, str]]] = {
     "skills/autodev/SKILL.md": [
         ("@frontmatter", "name: autodev"),
         ("@preamble", "# /conductor:autodev — one phase per fire (§8)"),
+        (
+            "0-register-ownership",
+            "0. **register ownership — before any product work, and before step 1.**",
+        ),
         ("1-reload-goal", "1. **re-load goal (fresh context).**"),
         (
             "1b-run-branch-current",
@@ -64,6 +68,10 @@ _REGIONS: dict[str, list[tuple[str, str]]] = {
         ),
         ("@preamble", "# /conductor:start — preflight + set up + launch"),
         ("0-preflight", "0. **preflight (`conductor preflight`).**"),
+        (
+            "0b-register-ownership",
+            "0b. **register ownership — only when this run already exists.**",
+        ),
         ("1-detect-spec", "1. **detect spec source**"),
         ("2-assertions-present", "2. **precondition — assertion specs present?**"),
         ("3-gate-dir", "3. **resolve the per-spec gate dir first:**"),
@@ -114,6 +122,25 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             # A1: see the same needle on start — a worker that cannot resolve the CLI path
             # cannot do anything else in this file.
             "the directory this `skill.md` lives in",
+        ],
+        "0-register-ownership": [
+            # The register/consult/recover contract, pinned by the three verbs that carry it.
+            # Prose alone would let the step survive as a paragraph while the command that
+            # actually excludes a cron fire was dropped.
+            "conductor run own",
+            "conductor run disown",
+            # A refusal is not something to work around. Both refusals must stay named, with
+            # the instruction to STOP attached: a worker that registered "something weaker"
+            # after a live-owner refusal is two workers in one checkout, and one that invented
+            # an identity after an identity refusal blocks the run permanently.
+            "(live)",
+            "**stop.**",
+            "stop and escalate",
+            # The wrapper case must NOT read as a refusal, or the driver's own fire would
+            # halt on the record the wrapper that launched it just wrote.
+            "already owned by the wrapper that launched this session",
+            # Recovery is a verb, not a filesystem operation.
+            "never delete `owner.json` by hand",
         ],
         "1-reload-goal": [
             "re-load goal",
@@ -213,6 +240,20 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             # produces, so it is the one that must not be walked past.
             "unverified",
             "unverified → stop",
+        ],
+        "0b-register-ownership": [
+            # Consult BEFORE claiming: start is owner-supervised and re-invoked on live runs,
+            # so the first question is whether anything else is already working here.
+            "conductor run owner-busy",
+            "conductor run own",
+            "conductor run disown",
+            # The exit-code contract is the whole check. A reader who treats any non-zero as
+            # "fine" has inverted it.
+            "exit 11 means nothing owns it",
+            # Why it is conditional, and why running it anyway is free. Without this the step
+            # reads as a first-run prerequisite and gets skipped exactly when it matters.
+            "reconcile-first and idempotent",
+            "state=free reason=no-run",
         ],
         "2-assertions-present": ["spec-craft:executable-assertions"],
         "3-gate-dir": [

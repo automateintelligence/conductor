@@ -22,6 +22,7 @@ import pytest
 
 from conductor import doctor
 from conductor.core import atomic, ownership, runstate
+from conductor.hosts import proc
 
 RUN = "alpha-0123456789ab"
 
@@ -150,8 +151,22 @@ def _record(root: pathlib.Path, identity: str) -> None:
             "tier": "wrapper",
             "wrapper_identity": identity,
             "acquired_at": "2026-08-10T12:00:00+00:00",
+            "schema_version": ownership.RECORD_SCHEMA_VERSION,
         },
     )
+
+
+def _identity(pid: int) -> str:
+    """A real, checkable identity for ``pid`` — never a bare pid string.
+
+    Minted while the process is still alive, because ``starttime`` has to be READ from
+    ``/proc`` before it goes away. A test that wrote ``str(pid)`` would be asserting against
+    an identity scheme this build refuses, and would pass or fail for reasons unrelated to
+    the scan it is exercising.
+    """
+    identity = proc.local_identity(pid)
+    assert identity is not None, f"could not mint an identity for pid {pid}"
+    return identity
 
 
 def _names(predicates, kind=None):
@@ -358,22 +373,76 @@ def test_the_holder_probe_never_takes_the_lock_it_reports_on(checkout):
 
 def test_a_live_owner_record_blocks_and_names_the_process(checkout, stub_crontab):
     stub_crontab([])
-    _record(checkout, str(os.getpid()))
+    identity = _identity(os.getpid())
+    _record(checkout, identity)
     predicates = doctor.scan(str(checkout))
     assert _names(predicates, doctor.QUIESCE) == {"live-owner"}
-    assert next(p for p in predicates if p.name == "live-owner").findings[
-        0
-    ].artifact == str(os.getpid())
+    assert (
+        next(p for p in predicates if p.name == "live-owner").findings[0].artifact
+        == identity
+    )
 
 
 def test_an_owner_record_whose_process_exited_does_not_block(checkout, stub_crontab):
     """Otherwise every crashed run would pin the checkout in place forever, and the scan would
     be routed around rather than fixed."""
     stub_crontab([])
-    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    identity = _identity(dead.pid)
+    dead.kill()
     dead.wait(timeout=30)
-    _record(checkout, str(dead.pid))
+    _record(checkout, identity)
     assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == set()
+
+
+def test_a_recycled_pid_does_not_resurrect_an_exited_owner(checkout, stub_crontab):
+    """The reuse defence, at the scan. A bare-pid record could not express this at all: the
+    identity would be a number some later process now legitimately holds, and the scan would
+    block a checkout on a run that ended. ``starttime`` is what tells the two apart."""
+    stub_crontab([])
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        scheme, pid, ticks, boot = _identity(live.pid).split(":")
+        forged = f"{scheme}:{pid}:{int(ticks) + 1}:{boot}"
+        _record(checkout, forged)
+        assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == set()
+        assert live.poll() is None, (
+            "the process died, so nothing was observed against it"
+        )
+    finally:
+        live.kill()
+        live.wait(timeout=30)
+
+
+def test_a_record_from_a_previous_boot_does_not_block(checkout, stub_crontab):
+    """``starttime`` is ticks since boot, so it is meaningless across a restart: without the
+    boot id a post-reboot process holding the same pid and tick count would read as the old
+    owner and pin the checkout forever."""
+    stub_crontab([])
+    scheme, pid, ticks, _ = _identity(os.getpid()).split(":")
+    _record(checkout, f"{scheme}:{pid}:{ticks}:00000000-0000-0000-0000-000000000000")
+    assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == set()
+
+
+def test_a_bare_pid_record_blocks_rather_than_being_believed(checkout, stub_crontab):
+    """A version 1 record names its owner as a bare pid with no reuse defence. Reading it as
+    though it had one is the direction that loses work, so it is refused — and a refused record
+    BLOCKS, because "I cannot interpret this" is not clearance to relocate the checkout."""
+    stub_crontab([])
+    state_root = str(checkout / ".conductor")
+    os.makedirs(runstate.run_dir(state_root, RUN), exist_ok=True)
+    atomic.write_json_atomic(
+        ownership.record_path(state_root, RUN),
+        {
+            "run_key": RUN,
+            "host": "claude",
+            "tier": "wrapper",
+            "wrapper_identity": str(os.getpid()),
+            "acquired_at": "2026-08-10T12:00:00+00:00",
+            "schema_version": 1,
+        },
+    )
+    assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == {"live-owner"}
 
 
 def test_an_uninterpretable_owner_record_blocks(checkout, stub_crontab):
@@ -519,7 +588,7 @@ def test_the_scan_writes_nothing_at_all(checkout, git, stub_crontab):
     stub_crontab([f"*/20 * * * * {checkout}/.conductor/resume-autodev.sh"])
     nested = checkout / ".worktrees" / "phase-1"
     git(checkout, "worktree", "add", "-q", "-b", "phase-1", str(nested))
-    _record(checkout, str(os.getpid()))
+    _record(checkout, _identity(os.getpid()))
     # Backdate a TRACKED file so its stat no longer matches what the index recorded. That is the
     # condition under which git refreshes the stat cache and writes .git/index — without it the
     # index is already accurate, git has nothing to update, and this test passes with

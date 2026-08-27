@@ -40,6 +40,22 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    and preflight prints the right one on that line. Pass it on verbatim. Only an `ok` result
    proceeds (fail-closed, amendment E). Do not launch a loop that dies at the first conducted
    call, and do not launch one whose conducted skills are not the ones they claim to be.
+0b. **REGISTER OWNERSHIP — only when this run ALREADY EXISTS.** `conductor run owner-busy`
+   first; exit 11 means nothing owns it and you may proceed, exit 0 means something does — read
+   the line it printed, **stop**, and tell the user rather than starting work in a checkout
+   another worker is writing to.
+
+   Then `conductor run own` and release with `conductor run disown` at the end of step 6.
+
+   **Skip both on a genuinely first run** — there is no run record to own yet, and no cron
+   driver either, so nothing can collide. The case this exists for is the RE-INVOCATION this
+   skill is designed to support: `/conductor:start` is reconcile-first and idempotent, so it is
+   normal to run it again on a live run — and by then step 6 has installed a crontab line that
+   fires every twenty minutes. Steps 4 and 5 dispatch subagents that write plans, gate tests and
+   issue state; a fire landing in the middle of that is two workers editing one checkout.
+   `owner-busy` printing `state=free reason=no-run` is the first-run case answering for itself,
+   so running the check unconditionally costs nothing.
+
 1. **Detect spec source**; load spec + Expectations. The **executable-assertion specs** live in
    `<spec>.assertions.md` — the sibling file `/spec-craft:executable-assertions` writes — **not**
    inline in the spec; load them from there if it exists.

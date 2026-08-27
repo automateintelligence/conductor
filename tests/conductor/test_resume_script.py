@@ -469,6 +469,30 @@ def test_render_guards_env_file_permissions_before_sourcing():
     assert '[ -f "$PROJECT/.conductor/resume-env.sh" ] && .' not in s
 
 
+#: The `conductor` this harness puts on the driver's PATH by default.
+#:
+#: Two verbs, and the driver consults them in that order. `run owner-busy` answers 11 — the ONE
+#: code meaning "proven free" — because these tests are about what a fire does once it is
+#: allowed to happen; a stub that answered anything else would make every one of them assert
+#: against a skipped fire. Everything else exits 1, which is the done-gate probe answering
+#: NOT-green and is what lets the fire happen at all.
+#:
+#: Written as a `case` rather than a bare `exit 1` because a blanket answer is how a stub stops
+#: representing anything: `exit 1` would have meant "the check crashed" to the new guard, and
+#: the fire tests would have gone green on `owner-check-failed` while proving nothing about the
+#: fire.
+_STUB_CONDUCTOR = (
+    '#!/bin/sh\ncase "$1 $2" in\n  "run owner-busy") exit 11 ;;\nesac\nexit 1\n'
+)
+
+#: Same shape, but the done-gate probe answers GREEN. The ownership check still has to answer
+#: free, or the driver would skip for the wrong reason and the gate-green line would never be
+#: written.
+_GATE_GREEN_CONDUCTOR = (
+    '#!/bin/sh\ncase "$1 $2" in\n  "run owner-busy") exit 11 ;;\nesac\nexit 0\n'
+)
+
+
 def _mk_env_harness(tmp):
     """Mirror of the frozen A4 harness: stub claude/conductor in a temp HOME's .local/bin
     (the driver's PATH repair puts it first, so the real bins can never fire)."""
@@ -483,7 +507,8 @@ def _mk_env_harness(tmp):
     claude.write_text(f"#!/bin/sh\ntouch {fired}\nexit 0\n")
     os.chmod(claude, 0o755)
     stub_conductor = bindir / "conductor"
-    stub_conductor.write_text("#!/bin/sh\nexit 1\n")  # gate not green -> proceed
+    # gate not green AND nothing owns the run -> proceed to the fire.
+    stub_conductor.write_text(_STUB_CONDUCTOR)
     os.chmod(stub_conductor, 0o755)
     driver = project / ".conductor" / "resume-autodev.sh"
     driver.write_text(rs.render(str(project), str(worktree)))
@@ -1322,7 +1347,11 @@ def _mk_codex_harness(
     )
     os.chmod(codex, 0o755)
     stub_conductor = (bindir if on_path else plugin_root / "bin") / "conductor"
-    stub_conductor.write_text("#!/bin/sh\nexit 1\n")  # gate not green -> proceed
+    # gate not green AND nothing owns the run -> proceed to the fire. The DECOY conductors
+    # above keep their blanket `exit 1`: one of those being resolved is the failure those
+    # fixtures exist to catch, and a blanket exit 1 now stops the fire at the ownership check
+    # rather than letting it run, which is the direction that fails loudly.
+    stub_conductor.write_text(_STUB_CONDUCTOR)
     os.chmod(stub_conductor, 0o755)
     if plugin_root_missing:
         # Codex still LISTS the plugin; only the tree its identity implies is gone — the
@@ -1984,11 +2013,6 @@ sys.exit({rc})
 """
 
 
-#: The `conductor` this harness puts on the driver's PATH by default. `exit 1` is the done-gate
-#: probe answering NOT-green, which is what lets the fire happen at all.
-_STUB_CONDUCTOR = "#!/bin/sh\nexit 1\n"
-
-
 def _mk_fire_harness(tmp, fire_text, *, ps=True, conductor_text=_STUB_CONDUCTOR):
     """A project whose `claude` is ``fire_text``, wired the way `_mk_env_harness` wires one.
 
@@ -2425,7 +2449,7 @@ def test_a_fire_skipped_because_the_gate_is_green_says_so_in_the_log(
         _WORKING_FIRE.format(
             pids=str(tmp_path / "fire.pids"), busy_s=1, then_hang=False, rc=0
         ),
-        conductor_text="#!/bin/sh\nexit 0\n",  # the done-gate probe answering GREEN
+        conductor_text=_GATE_GREEN_CONDUCTOR,  # the done-gate probe answering GREEN
     )
     proc, _elapsed = _fire_supervised(driver, home, pids, timeout=60)
     log = (project / ".conductor" / "resume-autodev.log").read_text()
@@ -2691,6 +2715,11 @@ _DELEGATING_CONDUCTOR = (
 #: records its pid so the escalation to KILL can be proved rather than assumed.
 _HANGING_CONDUCTOR = """#!/usr/bin/env python3
 import os, signal, sys
+# `run owner-busy` is consulted BEFORE the fire, so it must answer (free) rather than hang —
+# otherwise the driver never reaches the fire whose stall annotation this fixture exists to
+# exercise, and the test would pass on a driver that hung in the wrong place.
+if sys.argv[1:3] == ["run", "owner-busy"]:
+    sys.exit(11)
 if sys.argv[1:2] != ["run"]:
     sys.exit(1)
 signal.signal(signal.SIGTERM, signal.SIG_IGN)

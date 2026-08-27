@@ -21,8 +21,17 @@ import pytest
 
 from conductor import finalpr, lifecycle, run_cmd
 from conductor.core import ownership, registry, runstate, schema, transaction
+from conductor.hosts import proc
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _identity(pid: int) -> str:
+    """A real, checkable identity for ``pid`` — the scheme this build actually writes."""
+    identity = proc.local_identity(pid)
+    assert identity is not None, f"could not mint an identity for pid {pid}"
+    return identity
+
 
 #: A recording `gh` that answers like the real one in the three ways these tests need.
 #: `repo view` resolves the repository FROM ITS OWN cwd, so `by_cwd` maps a checkout onto the
@@ -354,7 +363,9 @@ def test_status_json_carries_the_owner_and_its_liveness(project, capsys) -> None
         assert project.verb("status", "--run", project.run_key, "--json") == 0
         report = json.loads(capsys.readouterr().out)
     assert report["owner"]["state"] == "live"
-    assert report["owner"]["identity"] == str(os.getpid())
+    # The wrapper tier's identity is a CHECKABLE tuple, not a bare pid: the pid alone has no
+    # defence against reuse, and `status` is where an operator reads what is holding the run.
+    assert report["owner"]["identity"].split(":")[:2] == ["proc", str(os.getpid())]
     assert report["status"] == "active"
 
 
@@ -540,7 +551,7 @@ def test_heartbeat_skips_successfully_while_another_owner_is_live(
             run_key=project.run_key,
             host="claude",
             tier="wrapper",
-            wrapper_identity=str(os.getppid()),
+            wrapper_identity=_identity(os.getppid()),
             acquired_at="2026-01-01T00:00:00+00:00",
         ),
     )

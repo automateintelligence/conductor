@@ -701,11 +701,26 @@ def main(argv: list[str] | None = None) -> int:
         # command then resolves to a different run and lands work on the wrong branch.
         # `recover_pending` returns [] cheaply when no journal is pending and creates nothing
         # when the project has no state root, so this is safe on a first-ever `run new`.
-        resolve.recover_pending(
-            os.path.join(
+        try:
+            state_root = os.path.join(
                 resolve.repo_root(getattr(args, "project", None)), ".conductor"
             )
-        )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            # NO REPOSITORY RESOLVES. For every other verb this is a failure and falls through
+            # to the handler below. For `owner-busy` it is an ANSWER: run state is anchored at
+            # the git common dir, so where there is no repository there is no
+            # `.conductor/runs/<key>/owner.json` and nothing can be claiming this checkout —
+            # the same fact `reason=no-run` reports one level in.
+            #
+            # Answering "cannot tell" here instead would be a REGRESSION dressed as caution: a
+            # driver installed against a directory that is not a git checkout fired before this
+            # contract existed and would now skip every tick forever, for a reason that has
+            # nothing to do with ownership.
+            if args.cmd != "owner-busy":
+                raise
+            print(f"owner-busy state=free reason=no-repository detail={exc}")
+            return EXIT_OWNER_FREE
+        resolve.recover_pending(state_root)
         return _HANDLERS[args.cmd](args)
     except resolve.RunAmbiguous as exc:
         print(str(exc), file=sys.stderr)
