@@ -9,8 +9,8 @@ claude/plugin upgrade and every headless fire died silently. Making the script m
 the root cause: one source of truth, resolved at RUN time, verifiable on reconcile.
 
 Split of concerns the render enforces:
-- MECHANICAL (this module owns, regenerable): bin resolution, PATH repair, fail-loud, the three
-  guards (no-double-drive, done-gate-green exit, flock), the fire.
+- MECHANICAL (this module owns, regenerable): bin resolution, PATH repair, fail-loud, the two
+  guards (the `.conductor/resume.lock` flock, the done-gate-green exit), the fire.
 - OWNER/MACHINE config (never baked here, sourced from `<project>/.conductor/resume-env.sh` so
   regeneration can never clobber it): every name in `OWNER_ENV_VARS`.
 
@@ -41,7 +41,7 @@ from conductor.hosts import base, runhost
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and the
 # `conductor:start` skill's reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 9
+TEMPLATE_VERSION = 10
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
@@ -304,6 +304,9 @@ def fire_supervision_prologue() -> str:
         "#                 instance). This is what catches a host that never answers.\n"
         "#   FIRE_IDLE     no progress this long AFTER some = it stopped. Much longer, because it\n"
         "#                 has proven it works and killing a live phase costs an hour of real work.\n"
+        "# The baseline both windows are measured from is NO progress -- zero CPU, and the log at\n"
+        "# the size it had at launch -- so output or CPU the fire produced before the sampler's\n"
+        "# first look counts as its first sign of life instead of vanishing into the baseline.\n"
         "# The values are `conductor.hosts.base`'s, beside the plugin-lookup bound: the host layer\n"
         "# declares what it will wait for a host process to do, this script enforces one of them.\n"
         f"FIRE_STARTUP={base.FIRE_STARTUP_TIMEOUT_S}\n"
@@ -323,6 +326,42 @@ def fire_supervision_prologue() -> str:
         + "')\"\n"
         "    printf '%s/%s' \"${fire_cpu:-0}\" "
         '"$(wc -c < "$LOG" 2>/dev/null || printf 0)"\n'
+        "}\n"
+        "fire_alive() {\n"
+        "    # ANY member of the fire's process group, never just its leader. `kill -0 -<pgid>`\n"
+        "    # is killpg: it succeeds while the group still holds one process. A descendant that\n"
+        "    # outlives the leader inherited fd 9 when the fire was forked, so it holds\n"
+        "    # `.conductor/resume.lock` — and a check that stops at the leader calls such an\n"
+        "    # expiry SETTLED, skips the KILL, and leaves the run permanently blocked behind a\n"
+        "    # lock nothing is watching. The leader is asked too, so a shell that could not give\n"
+        "    # the fire its own group degrades to the narrower answer rather than to none.\n"
+        '    kill -0 -"$FIRE_PID" 2>/dev/null || kill -0 "$FIRE_PID" 2>/dev/null\n'
+        "}\n"
+        "fire_drain() {\n"
+        "    # Up to FIRE_GRACE seconds of waiting for that group to empty, and not one more: a\n"
+        "    # fire that dies at once must not cost the grace, and one that never dies must not\n"
+        "    # cost more than it.\n"
+        "    fire_waited=0\n"
+        '    while [ "$fire_waited" -lt "$FIRE_GRACE" ] && fire_alive; do\n'
+        "        sleep 1\n"
+        "        fire_waited=$(( fire_waited + 1 ))\n"
+        "    done\n"
+        "}\n"
+        "fire_shutdown() {\n"
+        "    # TERM the group, wait out the grace, KILL what ignored it, then wait again — this\n"
+        "    # driver exiting releases nothing while one of the fire's descendants still holds\n"
+        "    # fd 9. Sets `fire_rc` in `timeout`'s vocabulary: 124 = the TERM settled it, 137 =\n"
+        "    # the KILL had to. ONE definition, used by the expiry path AND by the signal trap,\n"
+        "    # because a trap that only asks politely orphans exactly what the expiry path kills.\n"
+        '    kill -TERM -"$FIRE_PID" 2>/dev/null || kill -TERM "$FIRE_PID" 2>/dev/null || true\n'
+        "    fire_drain\n"
+        "    if fire_alive; then\n"
+        '        kill -KILL -"$FIRE_PID" 2>/dev/null || kill -KILL "$FIRE_PID" 2>/dev/null || true\n'
+        "        fire_drain\n"
+        "        fire_rc=137\n"
+        "    else\n"
+        "        fire_rc=124\n"
+        "    fi\n"
         "}\n"
         "# The fire gets its OWN process group: the sampler must not read this driver's polling as\n"
         "# the worker's progress, and the kill must reach the worker's whole tree.\n"
@@ -363,8 +402,12 @@ def fire_watchdog(h: base.HostAdapter) -> str:
     bin_var = f'"${h.BIN_VAR}"'
     return (
         "# If this DRIVER is signalled, take the worker down with it: `set -m` moved the fire out\n"
-        "# of this process group, so it would otherwise outlive the driver holding the lock.\n"
-        "trap 'kill -TERM -\"$FIRE_PID\" 2>/dev/null || true; exit 143' TERM INT HUP\n"
+        "# of this process group, so it would otherwise outlive the driver holding the lock. The\n"
+        "# SAME grace-then-KILL discipline as the expiry path, never a bare TERM: a descendant\n"
+        "# that ignores the signal survives a polite trap, keeps fd 9, and holds\n"
+        "# `.conductor/resume.lock` after the driver that took it is gone. 143 stays the DRIVER's\n"
+        "# own signalled status; what `fire_shutdown` decides is only how the fire died.\n"
+        "trap 'fire_shutdown; exit 143' TERM INT HUP\n"
         'if [ -z "$FIRE_PS" ]; then\n'
         "    printf '%s fire-unsupervised reason=no-ps bin=%s\\n' \"$(ts)\" "
         f"{bin_var}"
@@ -374,7 +417,14 @@ def fire_watchdog(h: base.HostAdapter) -> str:
         "else\n"
         "    fire_started=$SECONDS\n"
         "    fire_sampled=$SECONDS\n"
-        '    fire_mark="$(fire_progress "$FIRE_PID")"\n'
+        "    # The zero-progress baseline is STATED, never sampled. Sampling it after the launch\n"
+        "    # folded everything the worker produced between the two into the baseline, where it\n"
+        "    # could never read as movement: a worker that prints a banner and then thinks was\n"
+        "    # judged to have made no progress at all and died on the STARTUP deadline instead of\n"
+        "    # earning the far longer idle window. Zero CPU and the log at its launch size is a\n"
+        "    # fact known before the fire exists, and it is `fire_progress`'s own `<cpu>/<bytes>`\n"
+        "    # spelling so the first sample is comparable with it.\n"
+        '    fire_mark="0/$FIRE_LOG0"\n'
         "    fire_deadline=$(( SECONDS + FIRE_STARTUP ))\n"
         "    fire_limit=$FIRE_STARTUP\n"
         '    fire_rc=""\n'
@@ -419,9 +469,10 @@ def fire_watchdog(h: base.HostAdapter) -> str:
         '                case "$fire_branch" in ""|*[!a-z0-9./_-]*) fire_branch="" ;; esac\n'
         '                [ -z "$fire_branch" ] || fire_run=" run_branch=$fire_branch"\n'
         "            fi\n"
-        "            # TERM first, then KILL: a bound expressed only as a TERM is not a bound,\n"
-        "            # because a child that traps or ignores it keeps running and its supervisor\n"
-        "            # keeps waiting. 124 = the TERM settled it, 137 = the KILL had to.\n"
+        "            # `fire_shutdown` below is TERM, grace, then KILL over the fire's WHOLE\n"
+        "            # process group: a bound expressed only as a TERM is not a bound, because a\n"
+        "            # child that traps or ignores it keeps running and its supervisor keeps\n"
+        "            # waiting. 124 = the TERM settled it, 137 = the KILL had to.\n"
         "            printf '%s fire-timeout%s op=worker-dispatch bin=%s silent=%ss elapsed=%ss "
         "wrote: log=+%sB worktree=unknown inspect: git -C %s status --short "
         "recover: %s driver status --project %s\\n' \\\n"
@@ -429,14 +480,7 @@ def fire_watchdog(h: base.HostAdapter) -> str:
         '"$fire_limit" "$(( SECONDS - fire_started ))" \\\n'
         '                "$(( $(wc -c < "$LOG" 2>/dev/null || printf 0) - FIRE_LOG0 ))" \\\n'
         '                "$WORKTREE" "$CONDUCTOR" "$PROJECT" >> "$LOG"\n'
-        '            kill -TERM -"$FIRE_PID" 2>/dev/null || kill -TERM "$FIRE_PID" 2>/dev/null || true\n'
-        '            sleep "$FIRE_GRACE"\n'
-        '            if kill -0 "$FIRE_PID" 2>/dev/null; then\n'
-        '                kill -KILL -"$FIRE_PID" 2>/dev/null || kill -KILL "$FIRE_PID" 2>/dev/null || true\n'
-        "                fire_rc=137\n"
-        "            else\n"
-        "                fire_rc=124\n"
-        "            fi\n"
+        "            fire_shutdown\n"
         '            wait "$FIRE_PID" 2>/dev/null || true\n'
         "            break\n"
         "        fi\n"
@@ -512,21 +556,28 @@ export CONDUCTOR_HOME="$WORKTREE"
 cd "$WORKTREE" || {{ printf '%s worktree-missing %s\\n' "$(ts)" "$WORKTREE" >> "$LOG"; exit 4; }}
 mkdir -p "$PROJECT/.conductor"
 
-# (c) one headless fire at a time — hold the lock in the main checkout for the whole fire.
-exec 9>"$PROJECT/.conductor/resume.lock"
-flock -n 9 || exit 0
+# (a)+(c) ONE thing drives this run at a time, and the thing that decides it is a
+# Conductor-owned lock — NEVER a process-name match. `.conductor/resume.lock` is that lock; this
+# fire holds it for its whole life, and `conductor.core.ownership` refuses on the same fact from
+# the Python side. The guard this replaced grepped `pgrep -f 'claude'` whatever host the run
+# recorded, and was wrong in both directions at once: on a Codex run it matched nothing, so the
+# guard was absent while looking present; on a Claude run it matched THIS SCRIPT, because a
+# driver's command line is the path of the driver, so a checkout whose path contains the host's
+# name exited 0 before firing and protected nothing.
+#
+# A SKIP IS LOGGED. Refusing to fire because something else is already driving is correct, but
+# `flock -n 9 || exit 0` wrote nothing at all — so a run blocked forever behind a stuck holder
+# produced byte-for-byte the log a healthy idle one produces. `fire-skipped` is deliberately not
+# one of `conductor.driver`'s failure markers: it is evidence, not a fault. What it makes
+# impossible is an exit 0 that could mean "permanently blocked" with nothing on the record.
+LOCK="$PROJECT/.conductor/resume.lock"
+exec 9>"$LOCK"
+flock -n 9 || {{ printf '%s fire-skipped reason=lock-held lock=%s\\n' "$(ts)" "$LOCK" >> "$LOG"; exit 0; }}
 
-# (a) never double-drive: exit if a claude process already holds the project OR worktree cwd (a
-#     live terminal session or a prior fire is then the sole driver).
-for pid in $(pgrep -f 'claude' 2>/dev/null); do
-    cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
-    case "$cwd" in
-        "$PROJECT"|"$PROJECT"/*|"$WORKTREE"|"$WORKTREE"/*) exit 0 ;;
-    esac
-done
-
-# (b) finished runs get no-op fires: exit once the spec done-gate is green.
-"$CONDUCTOR" assert run --level spec >/dev/null 2>&1 && exit 0
+# (b) finished runs get no-op fires: exit once the spec done-gate is green. Logged for the same
+# reason the skip above is — "this run is done" and "this run is stuck" must not look alike.
+"$CONDUCTOR" assert run --level spec >/dev/null 2>&1 && {{
+    printf '%s fire-skipped reason=gate-green\\n' "$(ts)" >> "$LOG"; exit 0; }}
 
 # One headless phase of progress, in the run worktree. Bracket the fire in the log so a stalled
 # or crash-looping driver is visible: `fire-start` with no matching `fire-end` = a hung fire

@@ -1,6 +1,7 @@
 """Tier-B resume-driver generator: the runtime-resolution contract that fixes the 2026-07-05
 silent-stall (generation-time-pinned bins that rot on upgrade)."""
 
+import fcntl
 import json
 import os
 import re
@@ -246,10 +247,12 @@ def test_write_nudge_fires_on_command_prefix_temp_env(tmp_path, capsys):
     assert "unattended" in err
 
 
-def test_render_preserves_the_three_guards():
+def test_render_preserves_the_two_guards():
     s = _render()
-    assert "flock -n 9" in s  # (c) one fire at a time
-    assert "/proc/$pid/cwd" in s  # (a) no double-drive (cwd detection)
+    # (a)+(c) ONE driver at a time, decided by the Conductor-owned lock and nothing else. The
+    # third guard was `pgrep -f 'claude'`, which matched nothing on Codex and matched the driver
+    # itself on Claude; the lock is what replaced it.
+    assert "flock -n 9" in s
     assert "assert run --level spec" in s  # (b) done-gate-green no-op
     assert (
         'CONDUCTOR_HOME="$WORKTREE"' in s
@@ -2032,7 +2035,6 @@ def _mk_fire_harness(tmp, fire_text, *, ps=True, conductor_text=_STUB_CONDUCTOR)
             "kill",
             "ls",
             "mkdir",
-            "pgrep",
             "printf",
             "python3",
             "readlink",
@@ -2308,6 +2310,363 @@ def test_the_fire_runs_in_its_own_process_group(tmp_path, short_fire_bounds):
     # for. The exclusion is structural: the sampler sums one process group and the fire has
     # its own.
     assert driver_pgid != pgid, (driver_pgid, pgid)
+
+
+# ---- driver-vs-worker exclusion is a lock, never a process-name match -----------------------
+#
+# The defect these close (H3): the shared template greps `pgrep -f 'claude'` whatever host the
+# run recorded, and that one line was wrong in both directions at once. On a Codex run it matched
+# nothing, so the guard was absent while looking present. On a Claude run it matched THIS SCRIPT
+# — the driver's own command line is the path of the driver — so a checkout whose path contains
+# the host's name made every fire exit 0 before firing. A process-name heuristic cannot express
+# "is something already driving this run"; the Conductor-owned lock the driver already takes can,
+# and it is the same fact `conductor.core.ownership` refuses on. What was missing from it was
+# evidence: `flock -n 9 || exit 0` writes nothing, so a permanently blocked run and a healthy
+# idle tick left byte-identical logs.
+
+
+def _executable_lines(text):
+    """The driver's lines that DO something: comment-only and blank lines dropped.
+
+    The generated driver explains itself at length, and a must-not-contain over the raw text
+    cannot tell a guard from a paragraph about why that guard is gone. Every `#` in this template
+    starts a comment line — none appears inside a quoted string — so first-non-space is the whole
+    rule."""
+    return [
+        line
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+@pytest.mark.parametrize("host_id", ["claude", "codex"])
+def test_no_driver_decides_anything_by_matching_a_process_name(host_id):
+    """Must-not-contain, for every host, over the lines that RUN. A guard that reads the process
+    table by name is the shape of the defect and not an implementation detail of it: on one host
+    it matches nothing and on the other it matches the driver itself."""
+    running = "\n".join(_executable_lines(rs.render(PROJECT, WORKTREE, host_id)))
+    assert "pgrep" not in running, running
+    assert "/proc/" not in running, running
+    # `ps` is still how the supervisor attributes CPU — it is read for progress, never matched
+    # on for identity — so the check is specifically against matching a NAME.
+    assert "-f 'claude'" not in running and "-f 'codex'" not in running, running
+
+
+def test_a_checkout_named_after_the_host_still_fires(tmp_path, short_fire_bounds):
+    """H3, the self-match. `pgrep -f 'claude'` matched the driver's own command line, so a
+    project path containing the host's name made the fire exit 0 having protected nothing — and
+    silently, which is why `tests/.../test_a_dh_4...` has to index its host slots instead of
+    naming them. Exclusion that lives in a lock cannot do this."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    slot = tmp_path / "claude-checkout"
+    slot.mkdir()
+    project, driver, home, pids = _mk_fire_harness(
+        slot,
+        _WORKING_FIRE.format(
+            pids=str(slot / "fire.pids"), busy_s=1, then_hang=False, rc=0
+        ),
+    )
+    assert "claude" in str(driver), str(driver)
+
+    proc, _elapsed = _fire_supervised(driver, home, pids, timeout=60)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    _reap(pids)
+
+    assert pids.read_text().split(), (
+        f"the fire never ran: the driver matched its own command line and exited 0. log={log!r} "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert proc.returncode == 0, (proc.returncode, log)
+
+
+def test_a_fire_skipped_because_the_lock_is_held_says_so_in_the_log(
+    tmp_path, short_fire_bounds
+):
+    """H3, the evidence half. A tick that finds the lock taken is a CORRECT no-op — something is
+    already driving this run — but `flock -n 9 || exit 0` wrote nothing, so a run blocked forever
+    behind a stuck holder produced exactly the log a healthy idle one produces. Exit 0 must not
+    be able to mean "permanently blocked" with nothing on the record."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _WORKING_FIRE.format(
+            pids=str(tmp_path / "fire.pids"), busy_s=1, then_hang=False, rc=0
+        ),
+    )
+    lock = project / ".conductor" / "resume.lock"
+    fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        proc, _elapsed = _fire_supervised(driver, home, pids, timeout=60)
+    finally:
+        os.close(fd)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    _reap(pids)
+
+    assert proc.returncode == 0, (proc.returncode, log)
+    assert pids.read_text().split() == [], (
+        "the driver fired anyway while another holder had the lock"
+    )
+    assert "fire-skipped" in log, log
+    assert str(lock) in log, log
+
+
+def test_a_fire_skipped_because_the_gate_is_green_says_so_in_the_log(
+    tmp_path, short_fire_bounds
+):
+    """The other deliberate exit 0. A finished run and a blocked one both wrote nothing; naming
+    which of the two this tick was is the difference between "done" and "stuck" in the log."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _WORKING_FIRE.format(
+            pids=str(tmp_path / "fire.pids"), busy_s=1, then_hang=False, rc=0
+        ),
+        conductor_text="#!/bin/sh\nexit 0\n",  # the done-gate probe answering GREEN
+    )
+    proc, _elapsed = _fire_supervised(driver, home, pids, timeout=60)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    _reap(pids)
+
+    assert proc.returncode == 0, (proc.returncode, log)
+    assert pids.read_text().split() == [], "a green gate must not fire a phase"
+    assert "fire-skipped reason=gate-green" in log, log
+
+
+# ---- progress made before the first sample is progress --------------------------------------
+#
+# The defect this closes (H2): the zero-progress baseline was a sample taken AFTER the fire was
+# launched, so anything the worker produced between the launch and that sample was folded into
+# the baseline and could never read as movement. A worker that prints a banner and then thinks
+# was therefore judged to have made no progress at all and was killed at the 120-second STARTUP
+# deadline, instead of being given the 1800-second IDLE window it had earned. The baseline is a
+# fact known before the fire exists — zero CPU, and the log at the size it had at launch — so it
+# is stated, not sampled.
+
+#: Writes one line, flushes it, drops the ordering marker below, and then makes no sound and no
+#: CPU at all for `quiet_s`. The shape of every real worker's first second.
+_BANNER_THEN_SILENT_FIRE = """#!/usr/bin/env python3
+import sys, time
+
+sys.stdout.write("banner" + chr(10))
+sys.stdout.flush()
+open({marker!r}, "w").close()
+time.sleep({quiet_s})
+"""
+
+#: A `ps` that does not answer until the fire's banner is in the log. NOT a delay: it is the
+#: ORDERING this assertion is about, made a case instead of a race. `fire_progress` forks `ps`,
+#: the fire is a fresh interpreter, and which of the two wins is decided by machine load — so a
+#: bare "print quickly and hope" fixture passes against the defect roughly as often as it fails.
+#: Once the marker exists this costs nothing, so every later sample is unaffected.
+_ORDERING_PS = """#!/bin/sh
+i=0
+while [ ! -f {marker} ] && [ "$i" -lt 20 ]; do
+    {sleep} 1
+    i=$((i + 1))
+done
+echo used >> {calls}
+exec {real_ps} "$@"
+"""
+
+
+def test_output_produced_before_the_first_sample_counts_as_the_first_sign_of_life(
+    tmp_path, short_fire_bounds
+):
+    """H2. The fire writes its banner BEFORE the sampler's first look, then goes silent for
+    longer than the startup window and shorter than the idle one. Folding that banner into the
+    baseline is what killed it at the startup deadline; counted as progress, it buys the idle
+    window the worker has earned."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    real_ps = shutil.which("ps", path=os.defpath)
+    real_sleep = shutil.which("sleep", path=os.defpath)
+    assert real_ps and real_sleep, (
+        "no `ps`/`sleep` on the default path; this fixture cannot be built"
+    )
+    marker = tmp_path / "banner.written"
+    calls = tmp_path / "ps.calls"
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _BANNER_THEN_SILENT_FIRE.format(marker=str(marker), quiet_s=9),
+    )
+    shim = home / ".local" / "bin" / "ps"
+    shim.write_text(
+        _ORDERING_PS.format(
+            marker=str(marker), sleep=real_sleep, calls=str(calls), real_ps=real_ps
+        )
+    )
+    os.chmod(shim, 0o755)
+
+    proc, elapsed = _fire_supervised(driver, home, pids, timeout=90)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+
+    assert marker.is_file(), f"the fire never ran; nothing was measured. log={log}"
+    assert calls.is_file(), (
+        "the driver never invoked this fixture's `ps`, so the ordering it exists to guarantee "
+        "was never in force"
+    )
+    assert "banner" in log, log
+    assert "fire-timeout" not in log, log
+    assert proc.returncode == 0, (proc.returncode, log)
+    # It outlived the STARTUP window and its grace, which is the whole claim: the banner bought
+    # the idle window. `short_fire_bounds` is 6s startup / 12s idle / 2s grace.
+    assert elapsed > 6 + 2, (elapsed, log)
+
+
+# ---- the escalation covers the fire's whole process group, on every exit path ---------------
+#
+# The defect these close (H1): the supervisor asked `kill -0 "$FIRE_PID"` after the TERM, which
+# is the group LEADER and nothing else. A leader that dies politely while a descendant ignores
+# the signal therefore read as "the TERM settled it": no KILL was sent, only the leader was
+# waited for, and the descendant — which inherited fd 9 when the fire was forked — went on
+# holding `.conductor/resume.lock` with nothing watching it. Every later twenty-minute tick then
+# failed `flock -n` and exited 0, which is the permanently-blocked run this whole supervisor
+# exists to eliminate. The signal trap had the same hole and a worse one: a bare TERM to the
+# group and an immediate `exit 143`, with no grace and no KILL at all.
+
+#: A fire whose LEADER dies politely and whose DESCENDANT does not. Both are in the fire's own
+#: process group (`set -m`) and both inherited the driver's fd 9. Neither writes a byte nor burns
+#: a whole second of CPU, so the STARTUP window is what expires.
+_ORPHANING_FIRE = """#!/usr/bin/env python3
+import os, signal, subprocess, sys
+
+PIDS = {pids!r}
+# Joined with chr(10) rather than written with escapes: this whole program is a Python
+# string literal inside the test module, and an escape here would be consumed there.
+CHILD = chr(10).join([
+    "import os, signal",
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+    "signal.signal(signal.SIGINT, signal.SIG_IGN)",
+    "signal.signal(signal.SIGHUP, signal.SIG_IGN)",
+    "open(%r, 'a').write(str(os.getpid()) + chr(10))" % (PIDS,),
+    "while True:",
+    "    signal.pause()",
+])
+
+subprocess.Popen([sys.executable, "-c", CHILD])
+with open(PIDS, "a") as handle:
+    handle.write(str(os.getpid()) + chr(10))
+while True:
+    signal.pause()
+"""
+
+
+def _lock_is_free(project):
+    """Can `.conductor/resume.lock` be taken right now?
+
+    The lock itself, not a proxy for it. `flock -n` on that file is exactly what the next
+    twenty-minute tick does, so asking the same question the same way is the only check that
+    cannot pass while the run is in fact blocked. A descendant that inherited fd 9 keeps this
+    False for as long as it lives, whatever the driver's own exit status said.
+    """
+    path = str(project / ".conductor" / "resume.lock")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return True
+    finally:
+        os.close(fd)
+
+
+def _wait_for_pids(pids_file, count, timeout=30):
+    """Block until `count` processes have recorded themselves, so a test that goes on to signal
+    the driver cannot race the fire it is supervising into existence."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        recorded = pids_file.read_text().split()
+        if len(recorded) >= count:
+            return [int(x) for x in recorded]
+        time.sleep(0.1)
+    raise AssertionError(
+        f"only {pids_file.read_text().split()} recorded; expected {count}"
+    )
+
+
+def test_an_expiry_kills_the_whole_group_not_only_the_leader(
+    tmp_path, short_fire_bounds
+):
+    """H1, the timeout path. The leader dies on the TERM and the descendant ignores it, which is
+    precisely the case a leader-only `kill -0` calls settled — reporting 124, skipping the KILL,
+    and leaving the lock held by an orphan nothing is watching."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path, _ORPHANING_FIRE.format(pids=str(tmp_path / "fire.pids"))
+    )
+    proc, elapsed = _fire_supervised(driver, home, pids, timeout=90)
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    alive = _survivors(pids)
+    free = _lock_is_free(project)
+    _reap(pids)
+
+    assert len(pids.read_text().split()) == 2, (
+        f"the fixture never produced a leader AND a descendant, so nothing was measured: "
+        f"{pids.read_text().split()}"
+    )
+    assert "fire-timeout" in log, log
+    assert alive == [], (
+        f"the fire's process group survived the escalation: {alive}. The leader exited on the "
+        f"TERM, so a supervisor that checks only the leader never sends the KILL."
+    )
+    assert free, (
+        "`.conductor/resume.lock` is still held after the driver exited — an orphaned "
+        "descendant inherited fd 9, so every later tick fails `flock -n` and exits 0"
+    )
+    assert proc.returncode in (124, 137), (proc.returncode, log)
+    assert elapsed < 45, (elapsed, log)
+
+
+def test_a_signalled_driver_takes_the_whole_group_down_with_it(
+    tmp_path, short_fire_bounds
+):
+    """H1, the trap path. `trap '<TERM the group>; exit 143'` has no grace and no KILL, so a
+    descendant that ignores the signal outlives the driver that was holding the lock. The trap
+    needs the same discipline as the expiry path — proved by signalling a real fired driver."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path, _ORPHANING_FIRE.format(pids=str(tmp_path / "fire.pids"))
+    )
+    proc = subprocess.Popen(
+        ["bash", str(driver)],
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        cwd=str(home),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        _wait_for_pids(pids, 2)
+        os.kill(proc.pid, signal.SIGTERM)
+        rc = proc.wait(timeout=60)
+    except BaseException:
+        proc.kill()
+        _reap(pids)
+        raise
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    alive = _survivors(pids)
+    free = _lock_is_free(project)
+    _reap(pids)
+
+    assert rc == 143, (rc, log)  # the driver's own signalled status, unchanged
+    assert alive == [], (
+        f"a signalled driver left its fire's process group behind: {alive}. The trap asked "
+        f"politely once and exited; nothing escalated."
+    )
+    assert free, (
+        "`.conductor/resume.lock` is still held after the signalled driver exited — the "
+        "orphaned descendant inherited fd 9"
+    )
 
 
 # ---- the expiry report names WHICH RUN stalled -----------------------------------------------

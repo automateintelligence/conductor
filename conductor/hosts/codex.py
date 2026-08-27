@@ -51,6 +51,42 @@ PLUGIN_LIST_KILL_GRACE_S = 5
 #: fields that ARE, and then checked on disk.
 _INSTALL_CACHE = ("plugins", "cache")
 
+#: Characters that may follow the first one in a plugin-identity segment, beyond ASCII
+#: alphanumerics. Declared beside the predicate because ``PLUGIN_ROOT_SNIPPET`` spells the same
+#: set and the two are compared by a test that RUNS both.
+_ID_EXTRA_CHARS = "._-"
+
+
+def is_plugin_id_segment(value: object) -> bool:
+    """Whether ``value`` may be joined into the install cache as ONE path component.
+
+    ``marketplaceName``, ``name`` and ``version`` arrive as JSON over a pipe, from a binary this
+    machine merely happens to have, and ``_derived_root`` joins all three into a path under
+    ``$CODEX_HOME/plugins/cache``. ``os.path.join`` drops everything before an ABSOLUTE
+    component, ``..`` climbs out, and a value carrying a separator spends two levels of the
+    layout at once — after which ``isdir`` blesses whatever is really at the escaped path and the
+    driver's shell mirror points ``$CONDUCTOR`` at its ``bin/conductor``. Reproduced with an
+    absolute ``marketplaceName``.
+
+    Codex validates these segments itself (``plugin/src/plugin_id.rs`` at rust-v0.147.0), and
+    that is exactly why this exists rather than why it does not: an upstream check Conductor
+    cannot enforce is not a check Conductor may rely on, and the answer that matters here is what
+    the string is allowed to MEAN as a path, which is a question about this side.
+
+    ASCII alphanumeric first, then alphanumerics and ``._-``. Absolute paths, ``..``, ``.``,
+    anything with a separator, the empty string and every non-string are refused, and so is every
+    dotfile and option-shaped name — none of which is an install root. Mirrored verbatim in
+    ``PLUGIN_ROOT_SNIPPET``.
+    """
+    return (
+        isinstance(value, str)
+        and value != ""
+        and value[0].isascii()
+        and value[0].isalnum()
+        and all((c.isascii() and c.isalnum()) or c in _ID_EXTRA_CHARS for c in value)
+    )
+
+
 #: The plugin-root lookup as a self-contained program the generated cron
 #: driver can run before any conductor code is importable — that is the whole problem it solves,
 #: so it cannot import from here. Reads ``codex plugin list --json`` on stdin, takes a plugin
@@ -68,9 +104,16 @@ PLUGIN_ROOT_SNIPPET = (
     "import json,os,sys;"
     'h=os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex");'
     "j=json.load(sys.stdin);"
+    # `is_plugin_id_segment`, verbatim. Written without a regex so it carries no backslash: the
+    # driver wraps this whole program in shell single quotes.
+    'ok=lambda v: isinstance(v,str) and v!="" and v[0].isascii() and v[0].isalnum()'
+    ' and all((c.isascii() and c.isalnum()) or c in "'
+    + _ID_EXTRA_CHARS
+    + '" for c in v);'
     'e=[p for p in ((j.get("installed") if isinstance(j,dict) else None) or [])'
     ' if isinstance(p,dict) and p.get("name")==sys.argv[1]'
-    ' and p.get("enabled") is True and p.get("marketplaceName") and p.get("version")];'
+    ' and p.get("enabled") is True and ok(p.get("name"))'
+    ' and ok(p.get("marketplaceName")) and ok(p.get("version"))];'
     'a=sorted(set(os.path.join(h,"plugins","cache",p["marketplaceName"],p["name"],p["version"])'
     " for p in e));"
     "d=[x for x in a if os.path.isdir(x)];"
@@ -110,7 +153,9 @@ def _derived_root(entry: dict, home: str) -> str | None:
     name = entry.get("name")
     market = entry.get("marketplaceName")
     version = entry.get("version")
-    if not all(isinstance(v, str) and v for v in (name, market, version)):
+    # VALIDATED BEFORE JOINING, never after: an absolute component makes `os.path.join` discard
+    # the cache root entirely, and the `isdir` check below would then bless the escaped path.
+    if not all(is_plugin_id_segment(v) for v in (name, market, version)):
         return None
     return os.path.join(home, *_INSTALL_CACHE, str(market), str(name), str(version))
 
