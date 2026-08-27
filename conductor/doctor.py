@@ -566,8 +566,13 @@ def live_owners(checkout: str) -> Predicate:
                 f"{owner.wrapper_identity}, which {state}. Relocating the checkout under a "
                 f"running owner moves the state it is writing to.\n"
                 f"      record: {record}",
-                f"let the run finish, or stop process {owner.wrapper_identity} and re-run "
-                f"{_recheck(checkout)}",
+                # NOT "stop process <identity>": an identity is a (pid, start-time, boot) tuple
+                # or a Codex thread id, not something an operator can pass to `kill`. Naming the
+                # supported verb is what makes the recovery runnable — and it is the only thing
+                # standing between an operator and deleting owner.json by hand.
+                f"let the run finish; or, once you have confirmed nothing is still working on "
+                f"it, clear the record with conductor run disown --run {run_key} --force and "
+                f"re-run {_recheck(checkout)}",
             )
         )
     return Predicate(
