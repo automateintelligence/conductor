@@ -16,6 +16,7 @@ Sharing *argv construction* is not.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -189,7 +190,39 @@ class HostAdapter(Protocol):
     def permission_profile(self, posture: str = "supervised") -> dict: ...
     def validate_permissions(self, profile: dict) -> None: ...
     def process_identity(self, pid: int) -> str: ...
-    def process_alive(self, identity: str) -> bool: ...
+
+    # --- the INTERACTIVE session's own identity ---------------------------------------------
+    #
+    # `process_identity(pid)` serves the case it was designed for: the driver forks a host
+    # process and holds the child's pid. It cannot serve an interactive session, and the
+    # difference is not stylistic.
+    #
+    #   * Claude: the process asking has no useful pid. A `conductor` CLI call lives for
+    #     milliseconds, so `process_identity(os.getpid())` records a process that is already
+    #     gone by the time anything reads the record. What names the live session is `CLAUDE_PID`
+    #     in the CALLER'S ENVIRONMENT, which Claude Code exports into every tool shell.
+    #   * Codex: the identity is not derived from a pid at all. One Codex process can hold
+    #     several threads (observed: one pid holding two thread locks), so a pid is many-to-one
+    #     against the thing being excluded and can never be the identity.
+    #
+    # `env` is a PARAMETER rather than a read of `os.environ` for two reasons: it keeps the
+    # member testable without mutating the process, and it keeps visible at the call site that
+    # a Codex session launched from inside a Claude session inherits BOTH hosts' variables. A
+    # host is never inferred from which variables are present; it comes from the invoking
+    # skill's own host id, and this member is only ever asked of the adapter that host names.
+    #
+    # Returns `None` when this host's variable is absent or its liveness artifact cannot be
+    # resolved. Both variables are UNDOCUMENTED and can vanish in any release, so `None` is a
+    # real outcome and not an error path: the caller refuses to claim ownership rather than
+    # registering something weaker, because an identity nothing can later verify is worse than
+    # no record at all.
+    def session_identity(self, env: Mapping[str, str]) -> str | None: ...
+
+    # Tri-state on purpose: `True` live, `False` PROVABLY exited, `None` cannot tell. `bool`
+    # cannot carry the third answer, and every consumer needs it — `False` is what clears an
+    # ownership record and lets a cron fire into a checkout, so "I could not look" must never
+    # be able to arrive spelled the same way as "nobody is there".
+    def process_alive(self, identity: str) -> bool | None: ...
     def processes_under(self, roots: list[str]) -> list[int]: ...
     def install_hooks(
         self, state_root: str, run_key: str, *, command: list[str]
