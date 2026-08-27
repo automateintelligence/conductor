@@ -193,7 +193,7 @@ def _live_owner(state_root: str, run_key: str) -> str | None:
     record = ownership.read(state_root, run_key)
     if record is None:
         return None
-    live = ownership.identity_is_live(record.wrapper_identity)
+    live = ownership.identity_is_live(record)
     if live is False:
         return None
     return (
@@ -229,15 +229,31 @@ def _repo_context(repo_root: str) -> tuple[str, str, str]:
     return repo, remote, default
 
 
-def _project_env(repo_root: str) -> dict[str, str]:
+def _project_env(
+    repo_root: str, *, owner_identity: str | None = None
+) -> dict[str, str]:
     """This process's environment with ``CONDUCTOR_HOME`` re-anchored onto ``repo_root``.
+
+    ``owner_identity`` is the ownership this process has ALREADY taken, handed to the child so
+    the child does not block on it. Without it the heartbeat deadlocks against itself: it
+    acquires ownership, launches the driver, and the driver's whole job is to refuse to fire
+    while this run has a live owner — which is now the heartbeat that launched it. Every fire
+    would be skipped, forever, logging the most correct-looking reason available.
+
+    An explicit token, never an inference: the child either carries the exact string its parent
+    recorded or it does not. Nothing compares process names or guesses at ancestry.
 
     ``bin/conductor`` exports ``CONDUCTOR_HOME`` from the caller's cwd before any verb has parsed
     ``--project``, so a child launched from a ``--project``-scoped verb would otherwise inherit
     the WRONG project as its ambient one — a driver fired for run B resolving B's state root from
     the environment of repo A. The child's cwd is already ``repo_root``; this makes the variable
     agree with it."""
-    return {**os.environ, "CONDUCTOR_HOME": repo_root}
+    env = {**os.environ, "CONDUCTOR_HOME": repo_root}
+    if owner_identity:
+        env[ownership.INHERITED_IDENTITY_ENV] = owner_identity
+    else:
+        env.pop(ownership.INHERITED_IDENTITY_ENV, None)
+    return env
 
 
 # --- status -------------------------------------------------------------------------------
@@ -250,7 +266,7 @@ def _owner_report(state_root: str, run_key: str) -> dict:
         return {"state": "ambiguous", "detail": str(exc)}
     if record is None:
         return {"state": "none"}
-    live = ownership.identity_is_live(record.wrapper_identity)
+    live = ownership.identity_is_live(record)
     return {
         "state": {True: "live", False: "exited", None: "unknown"}[live],
         "host": record.host,
@@ -478,7 +494,9 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
             fire = subprocess.run(
                 [script],
                 cwd=resolution.repo_root,
-                env=_project_env(resolution.repo_root),
+                env=_project_env(
+                    resolution.repo_root, owner_identity=record.wrapper_identity
+                ),
                 check=False,
                 timeout=None,
             )

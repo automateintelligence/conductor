@@ -554,7 +554,7 @@ def live_owners(checkout: str) -> Predicate:
             continue
         if owner is None:
             continue
-        live = ownership.identity_is_live(owner.wrapper_identity)
+        live = ownership.identity_is_live(owner)
         if live is False:
             continue
         state = "is alive" if live else "cannot be checked"

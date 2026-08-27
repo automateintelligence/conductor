@@ -53,6 +53,32 @@ _FAILURE_MARKERS = (
     # is the pre-fix behaviour, deliberately degraded to rather than a false kill — and it is a
     # stall waiting to happen, so status has to see it.
     "fire-unsupervised",
+    # --- the ownership check, and why only HALF of it is a failure -------------------------
+    #
+    # The driver writes `fire-skipped reason=owner-busy` in two situations that look alike in
+    # the log and are opposite in what they ask of an operator, so they are split rather than
+    # both added or both omitted.
+    #
+    # `state=live` is NOT here, and that is the same decision `lock-held` and `gate-green`
+    # already embody: refusing to fire because a human has a session open on this run is the
+    # contract working exactly as specified. Listing it would turn `driver status` red for the
+    # whole of every working day anyone touches the run, and a health signal that is red while
+    # nothing is wrong is one an operator learns to stop reading — which is how the 2026-07-05
+    # silent stall got its cover.
+    #
+    # `state=unreadable` IS here, and it is not evidence. It means the record cannot be
+    # interpreted, so no process can ever be PROVEN exited and the run will skip every fire
+    # from now until a human runs `conductor run disown --run <key> --force`. Nothing else in
+    # the system will report that: the driver exits 0 by design, the heartbeat is not on this
+    # path, and the log line is a `fire-skipped` like any other. If `status` did not see it,
+    # a permanently blocked run would once again be byte-indistinguishable from a healthy idle
+    # one — the exact defect the skip logging exists to close.
+    "owner-busy state=unreadable",
+    # The check itself did not answer: a crash, a usage error, an unrecoverable journal. The
+    # driver fails SAFE and skips, which means an unbounded outage nobody is told about unless
+    # this is reported. Distinct from the marker above because the remedy differs — that one is
+    # a record to clear, this one is a tool to fix.
+    "owner-check-failed",
 )
 # Only this many trailing log lines are considered "the recent tail" — the recency
 # window does the real filtering; this just bounds work on a long-lived log.

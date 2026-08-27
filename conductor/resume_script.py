@@ -41,7 +41,7 @@ from conductor.hosts import base, runhost
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and the
 # `conductor:start` skill's reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 10
+TEMPLATE_VERSION = 11
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
@@ -573,6 +573,39 @@ mkdir -p "$PROJECT/.conductor"
 LOCK="$PROJECT/.conductor/resume.lock"
 exec 9>"$LOCK"
 flock -n 9 || {{ printf '%s fire-skipped reason=lock-held lock=%s\\n' "$(ts)" "$LOCK" >> "$LOG"; exit 0; }}
+
+# (a2) AN INTERACTIVE WORKER OUTRANKS A CRON FIRE. `resume.lock` above serializes DRIVER against
+# DRIVER and nothing else — a human's session holds no file descriptor that outlives a tool call,
+# so it can never appear in that flock and must not be made to. What excludes it is the run's
+# OWNERSHIP RECORD, which the session registers with `conductor run own` before it touches
+# product code, and which this asks about through the same Python that wrote it. Reimplementing
+# the check in bash would mean parsing owner.json here and re-deriving liveness from a pid, which
+# is how the two sides start disagreeing; `$CONDUCTOR` is already resolved and guarded above.
+#
+# NO PROCESS NAME IS CONSULTED, here or anywhere the verb reaches. The guard this replaces ran
+# `pgrep -f 'claude'`; the replacement asks the kernel about a process Conductor RECORDED —
+# /proc/<pid>/stat field 22 plus boot_id on claude, an flock in /proc/locks on codex.
+#
+# FAIL-SAFE, AND THAT IS WHY THE TEST IS `-ne 11` RATHER THAN A PLAIN `&&`. Exactly one exit
+# code means "proven free"; every other outcome — a live owner, a record this build cannot read,
+# an ambiguous run, a crashed check, a usage error — means DO NOT FIRE. A check that fails open
+# is worse than no check, because it fires precisely when something is wrong.
+#
+# THE INHERITED CASE IS NOT A SKIP. `conductor heartbeat` takes ownership and then launches this
+# script; the verb sees $CONDUCTOR_OWNER_IDENTITY matching the record and answers free, or the
+# heartbeat path would skip every fire forever on the record it just wrote itself.
+# The verb's own line is folded into the log (newlines squashed, so one fire is one line) and
+# carries a `state=` token: `state=live` is the contract working, `state=unreadable` is a fault
+# only a human can clear. `conductor.driver._FAILURE_MARKERS` distinguishes them.
+OWNER_OUT="$("$CONDUCTOR" run owner-busy 2>&1)"; OWNER_RC=$?
+OWNER_OUT="$(printf '%s' "$OWNER_OUT" | tr '\\n\\r' '  ')"
+if [ "$OWNER_RC" -eq 0 ]; then
+    printf '%s fire-skipped reason=owner-busy %s\\n' "$(ts)" "$OWNER_OUT" >> "$LOG"
+    exit 0
+elif [ "$OWNER_RC" -ne 11 ]; then
+    printf '%s owner-check-failed rc=%s %s\\n' "$(ts)" "$OWNER_RC" "$OWNER_OUT" >> "$LOG"
+    exit 0
+fi
 
 # (b) finished runs get no-op fires: exit once the spec done-gate is green. Logged for the same
 # reason the skip above is — "this run is done" and "this run is stuck" must not look alike.
