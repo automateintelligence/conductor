@@ -21,10 +21,17 @@ fields. Two consequences of that boundary are deliberate:
 * **``read`` ignores unknown fields.** Plan 02 will write a wider record. Selecting the fields it
   needs rather than rejecting the document keeps that forward move from breaking this reader.
 
-The identity written by ``acquire`` is the local process id of the acquiring process. PID reuse is
-real and Plan 02 answers it with an exit proof; until then a recycled PID makes ``identity_is_live``
-answer "live" for a holder that has exited. That is a false REFUSAL, never a false clear-to-proceed,
-so it fails in the safe direction for every consumer here.
+IDENTITY IS THE ADAPTER'S BUSINESS, NOT THIS MODULE'S. An identity string is opaque here: this
+module writes it, compares it for equality, and asks the adapter named by the record's ``host``
+field whether the thing it names is still running. It never parses one. That boundary is what
+lets the two hosts prove liveness by genuinely different mechanisms — Claude by ``(pid,
+starttime, boot_id)`` from ``/proc``, Codex by a kernel-held ``flock`` keyed on a thread id —
+without this module learning either. ``conductor.hosts.proc`` is imported for exactly one thing,
+minting the identity of the acquiring process itself, and that module knows no host name.
+
+NO PROCESS-NAME MATCHING REACHES THIS MODULE OR ANY MODULE IT CALLS. The cron guard this
+replaced ran ``pgrep -f 'claude'``, which matched Conductor's own shells and missed every real
+session; nothing in the chain from here to the kernel compares a process name to anything.
 """
 
 from __future__ import annotations
@@ -36,8 +43,19 @@ from collections.abc import Iterator
 from typing import NamedTuple
 
 from conductor.core import atomic, locks, runstate
+from conductor.hosts import base as hostbase
+from conductor.hosts import proc
 
-RECORD_SCHEMA_VERSION = 1
+#: Bumped 1 -> 2 when the identity stopped being a bare pid string.
+#:
+#: THE BUMP IS A SAFETY MECHANISM, NOT BOOKKEEPING. A v1 record's ``wrapper_identity`` is
+#: ``str(os.getpid())`` — a number with no reuse defence and no boot id. Read by this build,
+#: which asks an adapter about it, a bare pid parses as no known scheme and answers ``None``:
+#: safe, but permanently ambiguous. Read the other way round — a v1 record interpreted by code
+#: that BELIEVES reuse protection is present — a recycled pid answers "live" for a holder that
+#: exited, or "exited" for one that has not, and the second direction fires a driver into an
+#: occupied worktree. So an old record is REFUSED with instructions rather than guessed at.
+RECORD_SCHEMA_VERSION = 2
 
 #: "wrapper": a shell/heartbeat process that outlives a single tool call and can hold the mutex
 #: for its launched host's whole lifetime. "in-session": a fire inside a live host REPL, where
@@ -54,6 +72,22 @@ class OwnerBusy(RuntimeError):
 
 class OwnerAmbiguous(RuntimeError):
     """Ownership state cannot be interpreted safely. Always fail-closed on this."""
+
+
+class OwnerUnidentified(OwnerAmbiguous):
+    """No identity could be minted for the caller, so it must not claim ownership.
+
+    A SUBCLASS so every existing fail-closed handler keeps catching it, while a caller that
+    wants to say something more useful than "ambiguous" can. It is raised when the host's
+    session variable is absent — both are undocumented and can disappear in any release — or
+    when ``/proc`` will not yield a start time or a boot id.
+
+    Refusing to register is the SAFE direction and it is worth stating why, because the
+    alternative looks harmless: a record naming an identity that nothing can later verify does
+    not degrade to "no protection", it degrades to a permanent one. Every consultation would
+    answer "cannot tell", every consumer treats that as occupied, and the run stops advancing
+    with no process anywhere to point at.
+    """
 
 
 class OwnerRecord(NamedTuple):
@@ -80,9 +114,36 @@ class OwnerRecord(NamedTuple):
         return doc
 
 
+#: The identity a parent has ALREADY registered, handed down to the processes it launches.
+#:
+#: Without it the wrapper tier deadlocks against itself. ``conductor heartbeat`` takes ownership
+#: and then runs the driver, whose whole job is to refuse to fire while this run has a live
+#: owner — and the live owner it would find is the heartbeat that launched it. The driver would
+#: skip every fire, forever, for the most correct-looking reason in the log.
+#:
+#: An explicit token passed down a process tree, NOT an inference. Nothing here compares process
+#: names, walks for a "conductor-looking" ancestor, or assumes anything about who spawned whom:
+#: a descendant either carries the exact string its ancestor recorded or it does not. A stale or
+#: forged value is harmless in the direction that matters — the record it names must ALSO still
+#: be the recorded owner and still be live, so at worst a descendant declines to block on a
+#: record that is already about to be released.
+INHERITED_IDENTITY_ENV = "CONDUCTOR_OWNER_IDENTITY"
+
+
 def record_path(state_root: str, run_key: str) -> str:
     """``owner.json``, beside ``owner.lock`` in the run directory."""
     return os.path.join(runstate.run_dir(state_root, run_key), "owner.json")
+
+
+def is_inherited(record: OwnerRecord, env) -> bool:
+    """Does ``record`` name an ownership this caller was launched underneath?
+
+    True only on an exact match against ``INHERITED_IDENTITY_ENV``. A descendant of the process
+    that owns the run is not a second claimant to be excluded; it is that owner, doing the work
+    the ownership was taken for.
+    """
+    inherited = env.get(INHERITED_IDENTITY_ENV)
+    return bool(inherited) and inherited == record.wrapper_identity
 
 
 def read(state_root: str, run_key: str) -> OwnerRecord | None:
@@ -114,33 +175,48 @@ def read(state_root: str, run_key: str) -> OwnerRecord | None:
             f"{doc['run_key']!r}, not {run_key!r}. Inspect both with: "
             f"conductor run show --run {run_key}"
         )
+    version = doc.get("schema_version")
+    if version != RECORD_SCHEMA_VERSION:
+        raise OwnerAmbiguous(
+            f"ownership record at {record_path(state_root, run_key)} is schema version "
+            f"{version!r}; this build writes and reads version {RECORD_SCHEMA_VERSION}. A "
+            f"version {version!r} record names its owner as a bare process id, which carries no "
+            "defence against that id having been reused by an unrelated process — so believing "
+            "it could either block this run forever or clear a live owner. It is refused rather "
+            "than guessed at. If no process is still working on this run, clear it with:\n"
+            f"  conductor run disown --run {run_key} --force"
+        )
     return OwnerRecord(**{field: doc[field] for field in _FIELDS}).validated()
 
 
-def identity_is_live(wrapper_identity: str) -> bool | None:
-    """Is the process this identity names still running?
+def identity_is_live(record: OwnerRecord) -> bool | None:
+    """Is the session or process this record names still running?
 
     ``True`` live, ``False`` provably exited, ``None`` uninterpretable — a caller deciding whether
     it is safe to disturb a run must be able to tell "nobody is there" from "I cannot tell", and
     collapsing the third answer into either of the other two is how a scan either clears a live
     checkout or blocks forever on a garbage string.
+
+    TAKES THE RECORD, NOT THE IDENTITY STRING, because the identity alone is not enough to
+    interpret: the two hosts prove liveness by different kernel facts, and which one applies is
+    the record's ``host`` field. The previous signature took the bare string and parsed it as an
+    ``int``, which meant the FIRST structured identity ever written made ``int()`` raise, this
+    function answer ``None``, and every subsequent ``acquire`` raise ``OwnerBusy`` forever —
+    including for the process that wrote the record. That is why nothing here parses an identity
+    any more; the adapter does.
+
+    An adapter that cannot be loaded, or that raises, is ``None`` and never ``False``. A record
+    written by a host this build does not know is exactly the case where an exit proof is
+    unavailable, and inventing one there is what would clear a live owner.
     """
     try:
-        pid = int(wrapper_identity)
-    except (TypeError, ValueError):
-        return None
-    if pid <= 0:
+        adapter = hostbase.load(record.host)
+    except hostbase.UnknownHost:
         return None
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # The process exists; it belongs to another user. Alive is the honest answer.
-        return True
-    except OSError:
+        return adapter.process_alive(record.wrapper_identity)
+    except Exception:
         return None
-    return True
 
 
 def _write(state_root: str, run_key: str, record: OwnerRecord | None) -> None:
@@ -178,13 +254,67 @@ def acquire(
     over is left alone; deleting it would hand the run to a third acquirer while its real owner
     is still working.
     """
-    identity = str(os.getpid()) if wrapper_identity is None else str(wrapper_identity)
+    record = claim(
+        state_root,
+        run_key,
+        host=host,
+        wrapper_identity=wrapper_identity,
+        tier=tier,
+    )
+    try:
+        yield record
+    finally:
+        release(state_root, run_key, wrapper_identity=record.wrapper_identity)
+
+
+def local_process_identity() -> str:
+    """This process's own identity, for a caller that IS the thing to be excluded.
+
+    The wrapper tier only: a ``conductor heartbeat`` supervising a fire lives for the fire's
+    whole life, so its pid is a truthful answer to "what is working on this run". A caller
+    inside a host REPL must NOT use this — the ``conductor`` CLI call it runs in exits within
+    the second, and recording it would leave a record that reads as provably exited while the
+    session is still working. Those callers use the adapter's ``session_identity`` instead.
+    """
+    identity = proc.local_identity(os.getpid())
+    if identity is None:
+        raise OwnerUnidentified(
+            "no verifiable identity could be minted for this process: /proc did not yield "
+            f"both a start time for pid {os.getpid()} and a boot id. Refusing to claim "
+            "ownership rather than record an identity nothing can later check."
+        )
+    return identity
+
+
+def claim(
+    state_root: str,
+    run_key: str,
+    *,
+    host: str,
+    wrapper_identity: str | None = None,
+    tier: str = "wrapper",
+) -> OwnerRecord:
+    """Write the ownership record for ``run_key``, refusing while a live owner holds it.
+
+    Split out of ``acquire`` because the two tiers have different lifetimes and only one of them
+    fits a context manager. A wrapper outlives its fire and can hold a ``with`` block around it.
+    An in-session worker cannot: the process that registers is a ``conductor`` CLI call that
+    exits immediately, while the session it speaks for keeps working for hours. That worker
+    needs a bare write now and an explicit ``release`` later, which is exactly this function.
+    """
+    identity = (
+        local_process_identity() if wrapper_identity is None else str(wrapper_identity)
+    )
+    if not identity:
+        raise OwnerUnidentified(
+            f"refusing to claim run {run_key!r} with an empty identity; no write occurred."
+        )
     lock = runstate.owner_lock_path(state_root, run_key)
     os.makedirs(runstate.run_dir(state_root, run_key), exist_ok=True)
     with locks.hold(lock, kind="owner", run_key=run_key):
         existing = read(state_root, run_key)
         if existing is not None and existing.wrapper_identity != identity:
-            live = identity_is_live(existing.wrapper_identity)
+            live = identity_is_live(existing)
             if live is not False:
                 raise OwnerBusy(
                     f"run {run_key!r} is owned by {existing.host} identity "
@@ -200,10 +330,54 @@ def acquire(
             acquired_at=_now(),
         ).validated()
         _write(state_root, run_key, record)
-    try:
-        yield record
-    finally:
-        release(state_root, run_key, wrapper_identity=identity)
+    return record
+
+
+def disown(state_root: str, run_key: str, *, force: bool = False) -> tuple[str, str]:
+    """Clear a record whose owner is provably gone. Returns ``(outcome, detail)``.
+
+    Outcomes: ``"none"`` (there was no record), ``"cleared"``, ``"refused"``.
+
+    THE SUPPORTED RECOVERY PATH, and it exists so operators do not learn to ``rm`` state files
+    by hand. Every refusal this contract can produce lands on "occupied", which is the safe
+    direction but leaves a human with nowhere to go unless clearing is a first-class verb.
+
+    Without ``force`` only a POSITIVE EXIT PROOF clears the record — never age. A record naming
+    a live process is a correct refusal however old it is, and a timer that cleared it would
+    fire a driver into a checkout someone is working in. ``force`` is for the genuinely
+    uninterpretable cases (a foreign host, an unloadable adapter, a schema this build refuses,
+    ``hidepid`` hiding the target) where no proof is obtainable and only a human can supply the
+    missing fact.
+    """
+    lock = runstate.owner_lock_path(state_root, run_key)
+    os.makedirs(runstate.run_dir(state_root, run_key), exist_ok=True)
+    with locks.hold(lock, kind="owner", run_key=run_key):
+        try:
+            record = read(state_root, run_key)
+        except OwnerAmbiguous as exc:
+            if not force:
+                return "refused", str(exc)
+            _write(state_root, run_key, None)
+            return "cleared", f"forced removal of an unreadable record: {exc}"
+        if record is None:
+            return "none", f"run {run_key!r} has no ownership record."
+        live = identity_is_live(record)
+        if live is False or force:
+            _write(state_root, run_key, None)
+            proof = "provably exited" if live is False else "forced by the operator"
+            return (
+                "cleared",
+                f"cleared {record.host} identity {record.wrapper_identity} ({proof}).",
+            )
+        return (
+            "refused",
+            f"run {run_key!r} is owned by {record.host} identity "
+            f"{record.wrapper_identity} "
+            + ("(live)" if live else "(liveness unknown)")
+            + f", recorded {record.acquired_at}; nothing was removed. A record is cleared on a "
+            "positive exit proof, never on age. If you have confirmed nothing is working on "
+            f"this run, force it with:\n  conductor run disown --run {run_key} --force",
+        )
 
 
 def release(state_root: str, run_key: str, *, wrapper_identity: str) -> None:
