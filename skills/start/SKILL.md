@@ -233,14 +233,16 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    clean recent log tail.
    - **`--host` is `claude` or `codex`, and it is YOUR OWN id — you are the host** executing
      this skill, the same id step 0 recorded, so this install leaves the recording as it is.
-     State it; do not omit it and do not make the CLI guess. Nothing below this
-     point can work it out: `driver install` runs as a subprocess, Claude Code exports
-     `CLAUDECODE`/`CLAUDE_PLUGIN_ROOT` but the Codex ground truth records no exported
-     equivalent, so "neither variable" is indistinguishable from a plain shell. An omitted
-     `--host` therefore leaves the run on the legacy `claude` default — which on a Codex machine
-     installs a driver that fires an agent that is not there, and logs nothing about it. The
-     recorded answer lands in `<main-root>/.conductor/host` and every later fire, preflight,
-     plan-lint and merge-gate reads it from there.
+     State it anyway. After step 0 an omitted `--host` would render the recorded host, so the
+     argument is not what supplies the host any more; it is what makes the install say which
+     host it renders instead of inferring it from state, so the driver can only fire the host
+     step 0 checked. Nothing below you can supply it either: `driver install` runs as a
+     subprocess, Claude Code exports `CLAUDECODE`/`CLAUDE_PLUGIN_ROOT` but the Codex ground
+     truth records no exported equivalent, so "neither variable" is indistinguishable from a
+     plain shell. **Never pass a different id than step 0's:** `driver install --host` is the
+     sanctioned way to MOVE a run onto another host, and it will. The driver and
+     `<main-root>/.conductor/host` are written under one lock, and every later fire, preflight,
+     plan-lint and merge-gate reads the host from there.
    - **The resume driver is GENERATED mechanically — never hand-write it.** (`conductor
      resume-script write --project <main-root> --worktree <run-worktree> --out
      <main-root>/.conductor/resume-autodev.sh` is exactly what `driver install` runs;
