@@ -345,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         host = runhost.resolve(root)
     required = required_commands(host)
-    result = check(host_id=host)
+    result = check(host_id=host, project_root=root)
     ok: bool = result["ok"]
     unverifiable = set(result["unverified"])
     for line in result["advice"]:

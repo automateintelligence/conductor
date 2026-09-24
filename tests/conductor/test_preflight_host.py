@@ -350,8 +350,9 @@ def test_preflight_declares_into_conductor_home_not_the_cwd(
     monkeypatch.setenv("CONDUCTOR_HOME", proj)
     seen = {}
 
-    def _check(host_id=None, **_):
+    def _check(host_id=None, project_root=None, **_):
         seen["host"] = host_id
+        seen["root"] = project_root
         return {"ok": True, "missing": [], "unverified": [], "advice": []}
 
     monkeypatch.setattr(preflight, "check", _check)
@@ -359,6 +360,8 @@ def test_preflight_declares_into_conductor_home_not_the_cwd(
     assert runhost.recorded(proj) == "codex"
     assert runhost.recorded(str(elsewhere)) is None
     assert seen["host"] == "codex"
+    # skill discovery (project-local skill roots) must look at the same project
+    assert os.path.realpath(seen["root"]) == os.path.realpath(proj)
     monkeypatch.setattr(
         runhost, "resolve", lambda _root: "claude"
     )  # re-resolve must not
