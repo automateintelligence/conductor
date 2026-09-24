@@ -121,7 +121,7 @@ def _tick_plan_section(plan_path: str, issue_title: str) -> dict[str, Any]:
             text = f.read()
     except OSError as exc:
         return {"error": f"plan-unreadable: {exc}"}
-    headings = list(sync._H2_ANY.finditer(text))
+    headings = sync._h2_headings(text)
     for i, m in enumerate(headings):
         parsed = sync._phase_heading(m.group(1))
         if parsed is None or parsed[0] != issue_title:
