@@ -210,6 +210,14 @@ def _fire(label: str) -> Fire:
     # harness_fakes` pins.
     fire_env = dict(base_env)
     fire_env["PATH"] = os.pathsep.join([str(bindir), *DRIVER_SYSTEM_PATH])
+    # HERMETIC BEFORE IT FIRES. The guard test below only REPORTS a shadowing binary; by the
+    # time it ran, every other test here had already fired the driver — which would have
+    # launched this machine's real `codex`. So the fire itself refuses first.
+    shadowing = _shadowing_binaries()
+    assert not shadowing, (
+        "refusing to fire: a real host/conductor binary sits ahead of the harness fakes on "
+        f"the driver's PATH and would be what this fire launched: {shadowing}"
+    )
 
     fire.before = _snapshot(fire.home, fire.codex_home)
     proc = subprocess.run(
@@ -332,16 +340,21 @@ def _resolution_artifacts(fire: Fire) -> list[pathlib.Path]:
     return artifacts
 
 
-def test_no_system_bin_dir_shadows_the_harness_fakes() -> None:
-    """Setup guarantee. The driver prepends the system bin dirs ahead of the harness's own, so
-    a real `codex` or `conductor` in one of them would be what the fire measured. Refuse loudly
-    rather than report on the wrong binary."""
-    shadowing = [
+def _shadowing_binaries() -> list[str]:
+    """Real `codex`/`conductor` binaries in the system bin dirs the driver searches first."""
+    return [
         os.path.join(directory, name)
         for directory in DRIVER_SYSTEM_PATH
         for name in ("codex", "conductor")
         if os.path.exists(os.path.join(directory, name))
     ]
+
+
+def test_no_system_bin_dir_shadows_the_harness_fakes() -> None:
+    """Setup guarantee. The driver prepends the system bin dirs ahead of the harness's own, so
+    a real `codex` or `conductor` in one of them would be what the fire measured. Refuse loudly
+    rather than report on the wrong binary."""
+    shadowing = _shadowing_binaries()
     assert not shadowing, (
         f"a real host/conductor binary sits ahead of the harness fakes on the driver's PATH: "
         f"{shadowing}"
