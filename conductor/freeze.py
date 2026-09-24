@@ -494,17 +494,17 @@ def verify(
             )
         else:
             try:
+                current_sources: dict | None
                 current_sources, _via = _assertions_source(repo_root, manifest_path)
-                current_set: set | None = set(current_sources)
             except Exception as exc:  # ambiguous/missing now -> fail closed
-                current_set = None
+                current_sources = None
                 tampered.append(f"assertions-source-unresolvable: {exc}")
-            if current_set is not None and not _same_sources(
+            if current_sources is not None and not _same_sources(
                 current_sources, base_sources
             ):
                 tampered.append(
                     "assertions-source-set-changed "
-                    f"(recorded {sorted(base_sources)}, current {sorted(current_set)})"
+                    f"(recorded {sorted(base_sources)}, current {sorted(current_sources)})"
                 )
     return {"ok": not tampered, "tampered": tampered, "frozen": True}
 
