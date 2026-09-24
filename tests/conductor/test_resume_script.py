@@ -2978,6 +2978,50 @@ def test_a_signalled_driver_takes_the_whole_group_down_with_it(
     )
 
 
+def test_a_signalled_driver_kills_a_worker_that_ignores_term(
+    tmp_path, short_fire_bounds
+):
+    """The trap path with the LEADER itself ignoring TERM (codex review of #89 reproduced
+    `driver_exit: 143, worker_still_alive: True` against a trap that sent one TERM and exited).
+    Only the grace-then-KILL escalation ends this worker, so `alive == []` proves the trap
+    escalated and did not merely ask."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path, _HANGING_FIRE.format(pids=str(tmp_path / "fire.pids"))
+    )
+    proc = subprocess.Popen(
+        ["bash", str(driver)],
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        cwd=str(home),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        _wait_for_pids(pids, 1)
+        os.kill(proc.pid, signal.SIGTERM)
+        rc = proc.wait(timeout=60)
+    except BaseException:
+        proc.kill()
+        _reap(pids)
+        raise
+    log = _log_of(project)
+    alive = _survivors(pids)
+    free = _lock_is_free(project)
+    _reap(pids)
+
+    assert rc == 143, (rc, log)
+    assert alive == [], (
+        f"a TERM-ignoring worker outlived the signalled driver: {alive}. log={log!r}"
+    )
+    assert free, (
+        "`.conductor/resume.lock` is still held after the signalled driver exited"
+    )
+
+
 # ---- the expiry report names WHICH RUN stalled -----------------------------------------------
 #
 # §"Failure handling" requires every actionable failure to report the run key. `fire-timeout`
