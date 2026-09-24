@@ -664,13 +664,13 @@ class CodexAdapter:
     # session or, worse, succeed against a session that had exited and leave Conductor holding
     # a lock Codex expects to own.
 
-    def thread_lock_path(
-        self, thread_id: str, *, home: str | None = None
-    ) -> str | None:
-        """The lock file for ``thread_id``, or ``None`` if the id is not one this may join."""
+    def thread_lock_path(self, thread_id: str, *, home: str) -> str | None:
+        """The lock file for ``thread_id`` under ``home`` — the CODEX_HOME the identity RECORDED,
+        never a default: the reader's own CODEX_HOME is the wrong directory whenever the two
+        differ. ``None`` if the id is not one this may join."""
         if not _THREAD_ID_RE.match(thread_id):
             return None
-        return os.path.join(home or config_root(), THREAD_LOCK_DIR, f"{thread_id}.lock")
+        return os.path.join(home, THREAD_LOCK_DIR, f"{thread_id}.lock")
 
     def _thread_id_from_ancestry(self, home: str) -> str | None:
         """The thread id of the Codex process this call is running under, via parentage.
@@ -783,13 +783,16 @@ class CodexAdapter:
         if scheme != self.id:
             return None
         parts = identity.split(":")
-        if len(parts) not in (3, 4) or not parts[2]:
+        # Exactly four fields. An identity without its recorded CODEX_HOME is MALFORMED — none
+        # was ever released (the format arrived with the home in it) — and resolving it against
+        # the reader's CODEX_HOME is the wrong-home read the fourth field exists to prevent. So
+        # it is "cannot tell" (occupied), and the refusal the caller prints names
+        # `conductor run disown --force` as the way to clear it.
+        if len(parts) != 4 or not parts[2]:
             return None
         thread_id, recorded_boot = parts[1], parts[2]
-        # A three-field identity predates the recorded home; the reader's CODEX_HOME is the only
-        # answer it ever had. A four-field one names its own, and nothing else is consulted.
-        home = urllib.parse.unquote(parts[3]) if len(parts) == 4 else None
-        if home is not None and not os.path.isabs(home):
+        home = urllib.parse.unquote(parts[3])
+        if not os.path.isabs(home):
             return None
         current_boot = proc.boot_id()
         if current_boot is None:

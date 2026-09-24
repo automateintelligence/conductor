@@ -34,6 +34,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -510,7 +511,10 @@ def test_the_worker_and_the_driver_use_one_record_on_both_hosts(harness, monkeyp
     fail-safe direction for an undocumented artifact on a 0.x CLI: if a future Codex moves the
     lock directory, every record must stop clearing rather than start clearing.
     """
-    unknown_thread = "codex:019feab3-05f0-7081-90fb-18b96bc27db3:not-this-boot"
+    codex_home = quote(str(harness.root / "no-such-codex-home"), safe="")
+    unknown_thread = (
+        f"codex:019feab3-05f0-7081-90fb-18b96bc27db3:not-this-boot:{codex_home}"
+    )
     ownership._write(
         harness.state_root,
         harness.run_key,
@@ -540,11 +544,12 @@ def test_the_worker_and_the_driver_use_one_record_on_both_hosts(harness, monkeyp
             run_key=harness.run_key,
             host="codex",
             tier="in-session",
-            wrapper_identity=f"codex:019feab3-05f0-7081-90fb-18b96bc27db3:{boot}",
+            wrapper_identity=(
+                f"codex:019feab3-05f0-7081-90fb-18b96bc27db3:{boot}:{codex_home}"
+            ),
             acquired_at="2026-08-10T12:00:00+00:00",
         ),
     )
-    monkeypatch.setenv("CODEX_HOME", str(harness.root / "no-such-codex-home"))
     # Lock directory absent -> cannot tell -> OCCUPIED.
     assert (
         run_cmd.main(
@@ -1074,3 +1079,35 @@ def test_run_disown_of_ones_own_record_refuses_under_a_foreign_fire(
     finally:
         fire.kill()
         fire.wait(timeout=30)
+
+
+def test_a_codex_identity_without_its_recorded_home_is_refused_with_a_recovery(
+    harness, capsys
+):
+    """Malformed, so OCCUPIED — and the refusal names the command that clears it."""
+    boot = proc.boot_id()
+    assert boot is not None
+    ownership._write(
+        harness.state_root,
+        harness.run_key,
+        ownership.OwnerRecord(
+            run_key=harness.run_key,
+            host="codex",
+            tier="in-session",
+            wrapper_identity=f"codex:019feab3-05f0-7081-90fb-18b96bc27db3:{boot}",
+            acquired_at="2026-08-10T12:00:00+00:00",
+        ),
+    )
+    capsys.readouterr()
+    assert (
+        run_cmd.main(
+            ["owner-busy", "--run", harness.run_key, "--project", str(harness.root)]
+        )
+        == run_cmd.EXIT_OK
+    )
+    out = capsys.readouterr().out
+    assert "state=unreadable" in out, out
+    assert f"conductor run disown --run {harness.run_key} --force" in out, out
+    with pytest.raises(ownership.OwnerBusy) as refused:
+        ownership.claim(harness.state_root, harness.run_key, host="claude")
+    assert f"conductor run disown --run {harness.run_key} --force" in str(refused.value)

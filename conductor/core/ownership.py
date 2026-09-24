@@ -438,6 +438,13 @@ def claim(
                     f"{existing.wrapper_identity} "
                     + ("(live)" if live else "(liveness unknown)")
                     + f", recorded at {record_path(state_root, run_key)}; no write occurred."
+                    + (
+                        ""
+                        if live
+                        else " This build cannot tell whether that identity is still "
+                        "running. If you have confirmed no process is working on this run, "
+                        f"clear it with: conductor run disown --run {run_key} --force"
+                    )
                 )
         if existing is None or existing.wrapper_identity != identity:
             fire = running_fire(state_root)

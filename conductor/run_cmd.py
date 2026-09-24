@@ -544,9 +544,15 @@ def cmd_owner_busy(args: argparse.Namespace) -> int:
         )
         return EXIT_OWNER_FREE
     state = "live" if live else "unreadable"
+    recovery = (
+        ""
+        if live
+        else " recover=confirm no process is working on this run, then: conductor run "
+        f"disown --run {key} --force"
+    )
     print(
         f"owner-busy state={state} run={key} host={record.host} tier={record.tier} "
-        f"identity={record.wrapper_identity} since={record.acquired_at}"
+        f"identity={record.wrapper_identity} since={record.acquired_at}{recovery}"
     )
     return EXIT_OK
 
