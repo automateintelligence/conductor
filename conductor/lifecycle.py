@@ -501,9 +501,7 @@ def _driver_unbound(repo_root: str, script: str, run: dict) -> str | None:
     checkout of this run's integration or phase branch. Anything else, including a binding this
     build cannot read, launches nothing."""
     key = run["run_key"]
-    reinstall = (
-        f"  conductor driver install --worktree <this run's worktree>   (run {key})"
-    )
+    reinstall = f"  {_driver_install_hint(run)}"
     worktree = resume_script.installed_worktree(script)
     if worktree is None:
         return (
@@ -524,6 +522,25 @@ def _driver_unbound(repo_root: str, script: str, run: dict) -> str | None:
         for name in (run.get("integration_branch"), run.get("phase_branch"))
         if isinstance(name, str) and name
     ]
+    # A branch NAME is evidence only inside THIS repository: a clone elsewhere with the same
+    # branch checked out is another repository's work tree. The worktree must share this
+    # project's git common dir before its branch counts.
+    common = _git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    common_dir = (common.stdout or "").strip() if common.returncode == 0 else ""
+    if not common_dir or os.path.realpath(
+        os.path.dirname(common_dir)
+    ) != os.path.realpath(repo_root):
+        where = (
+            f"belongs to the repository at {os.path.dirname(common_dir)}"
+            if common_dir
+            else f"is not a git work tree git could resolve (exit {common.returncode}: "
+            f"{(common.stderr or '').strip() or 'no output'})"
+        )
+        return (
+            f"run {key!r}: the durable driver {script} fires in {worktree}, which {where}, "
+            f"not this project ({repo_root}); no fire was launched and no write occurred. "
+            f"Reinstall the driver for this run:\n{reinstall}"
+        )
     head = _git(worktree, "symbolic-ref", "--quiet", "--short", "HEAD")
     checked_out = (head.stdout or "").strip() if head.returncode == 0 else None
     if checked_out and checked_out in branches_of_run:

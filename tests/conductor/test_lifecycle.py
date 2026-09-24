@@ -632,6 +632,40 @@ def test_heartbeat_refuses_a_driver_that_names_no_run_worktree(project, capsys) 
     assert not marker.exists()
 
 
+def test_heartbeat_refuses_a_same_branch_checkout_of_another_repository(
+    project, tmp_path, capsys
+) -> None:
+    """A branch NAME is only evidence inside this repository. A clone elsewhere with the run's
+    integration branch checked out is another repository's work tree, not this run's."""
+    marker = project.root / "fired"
+    stranger = tmp_path / "stranger-clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(project.root), str(stranger)],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(stranger),
+            "checkout",
+            "-q",
+            "-b",
+            project.run["integration_branch"],
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    _install_driver(project, f"#!/bin/sh\ntouch {marker}\n", worktree=stranger)
+    assert project.verb("heartbeat", "--run", project.run_key) == 1
+    err = capsys.readouterr().err
+    assert str(stranger) in err and "no fire was launched" in err, err
+    assert not marker.exists()
+
+
 def test_heartbeat_launches_a_driver_bound_to_the_runs_recorded_worktree(
     project,
 ) -> None:
