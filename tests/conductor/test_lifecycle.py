@@ -486,12 +486,48 @@ def test_resume_sends_a_merged_final_pull_request_to_finish_instead(
 # --- heartbeat ------------------------------------------------------------------------------
 
 
-def _install_driver(project: Project, body: str) -> Path:
+def _run_worktree(project: Project, branch: str, name: str = "run") -> Path:
+    """A linked worktree with ``branch`` checked out — what ``driver install --worktree`` names."""
+    path = project.root / ".worktrees" / name
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project.root),
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    return path
+
+
+def _install_driver(
+    project: Project, body: str, *, worktree: Path | None = None
+) -> Path:
+    """The project's driver script, bound (as the generated one is) to a run worktree.
+
+    ``body``'s shebang line is kept first; the ``WORKTREE=`` binding follows it, spelled the way
+    ``resume_script.render`` spells it. The default binding is a worktree on THIS run's
+    integration branch."""
+    import shlex
+
     from conductor import resume_script
 
+    if worktree is None:
+        worktree = _run_worktree(project, project.run["integration_branch"])
+    shebang, _, rest = body.partition("\n")
     path = Path(resume_script.driver_script_path(str(project.root)))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    path.write_text(
+        f"{shebang}\nWORKTREE={shlex.quote(str(worktree))}\n{rest}", encoding="utf-8"
+    )
     path.chmod(0o755)
     return path
 
@@ -564,6 +600,67 @@ def test_heartbeat_reports_a_failing_fire(project, capsys) -> None:
     _install_driver(project, "#!/bin/sh\nexit 9\n")
     assert project.verb("heartbeat", "--run", project.run_key) == 1
     assert "fire ended rc=9" in capsys.readouterr().err
+
+
+def test_heartbeat_refuses_a_driver_bound_to_another_runs_worktree(
+    project, capsys
+) -> None:
+    """The project has ONE driver script and it drives ONE worktree. A heartbeat fired for this
+    run must not launch it while it is bound to a worktree carrying some other run's branch."""
+    marker = project.root / "fired"
+    other = _run_worktree(project, "conductor/run-some-other-run-0123abcd", "other")
+    _install_driver(project, f"#!/bin/sh\ntouch {marker}\n", worktree=other)
+    assert project.verb("heartbeat", "--run", project.run_key) == 1
+    err = capsys.readouterr().err
+    assert str(other) in err and project.run["integration_branch"] in err, err
+    assert "no fire was launched" in err
+    assert "conductor driver install --worktree" in err
+    assert not marker.exists()
+    assert ownership.read(project.state_root, project.run_key) is None
+
+
+def test_heartbeat_refuses_a_driver_that_names_no_run_worktree(project, capsys) -> None:
+    from conductor import resume_script
+
+    marker = project.root / "fired"
+    script = Path(resume_script.driver_script_path(str(project.root)))
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    script.chmod(0o755)
+    assert project.verb("heartbeat", "--run", project.run_key) == 1
+    assert "names no run worktree" in capsys.readouterr().err
+    assert not marker.exists()
+
+
+def test_heartbeat_launches_a_driver_bound_to_the_runs_recorded_worktree(
+    project,
+) -> None:
+    """``run.json``'s recorded worktree is authoritative even when its checkout is detached."""
+    marker = project.root / "fired"
+    worktree = project.root / ".worktrees" / "detached"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project.root),
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            str(worktree),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    runstate.update(
+        project.state_root,
+        project.run_key,
+        lambda doc: {**doc, "integration_worktree": str(worktree)},
+    )
+    _install_driver(project, f"#!/bin/sh\ntouch {marker}\n", worktree=worktree)
+    assert project.verb("heartbeat", "--run", project.run_key) == 0
+    assert marker.exists()
 
 
 def test_a_lifecycle_write_refuses_a_revision_it_did_not_read(project) -> None:

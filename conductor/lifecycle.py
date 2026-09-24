@@ -56,6 +56,7 @@ import argparse
 import datetime
 import json
 import os
+import shlex
 import subprocess
 import sys
 
@@ -467,13 +468,78 @@ def cmd_resume(args: argparse.Namespace) -> int:
     print(
         "Reinstall this project's durable driver if it is not scheduled:\n"
         f"  conductor driver status\n"
-        f"  conductor driver install --worktree {resolution.repo_root}",
+        f"  {_driver_install_hint(run)}",
         file=sys.stderr,
     )
     return EXIT_OK
 
 
 # --- heartbeat ----------------------------------------------------------------------------
+
+
+def _driver_install_hint(run: dict) -> str:
+    """The install command for THIS run's driver. The driver fires in a run worktree, never the
+    owner checkout, so the hint names the worktree run.json records, or says which one to name."""
+    recorded = run.get("integration_worktree")
+    if isinstance(recorded, str) and recorded:
+        return f"conductor driver install --worktree {shlex.quote(recorded)}"
+    return (
+        "conductor driver install --worktree <the worktree with "
+        f"{run.get('integration_branch')} checked out>"
+    )
+
+
+def _driver_unbound(repo_root: str, script: str, run: dict) -> str | None:
+    """A refusal sentence unless the installed driver fires in THIS run's worktree, else ``None``.
+
+    The project has one driver script (``resume_script.driver_script_path``) and it is rendered
+    for one run worktree. ``--run`` selects the run whose ownership this verb takes, but the
+    script it launches drives whichever worktree it was installed for — so a heartbeat fired for
+    run A would launch run B's worker under A's ownership. Launching is allowed only when the
+    script's binding is provably this run's: the worktree ``run.json`` records for it, or a
+    checkout of this run's integration or phase branch. Anything else, including a binding this
+    build cannot read, launches nothing."""
+    key = run["run_key"]
+    reinstall = (
+        f"  conductor driver install --worktree <this run's worktree>   (run {key})"
+    )
+    worktree = resume_script.installed_worktree(script)
+    if worktree is None:
+        return (
+            f"run {key!r}: the durable driver {script} names no run worktree this build can "
+            "read, so which run it would drive is unknown; no fire was launched and no write "
+            f"occurred. Reinstall it for this run:\n{reinstall}"
+        )
+    real = os.path.realpath(worktree)
+    recorded = {
+        os.path.realpath(path)
+        for path in (run.get("integration_worktree"), run.get("phase_worktree"))
+        if isinstance(path, str) and path
+    }
+    if real in recorded:
+        return None
+    branches_of_run = [
+        name
+        for name in (run.get("integration_branch"), run.get("phase_branch"))
+        if isinstance(name, str) and name
+    ]
+    head = _git(worktree, "symbolic-ref", "--quiet", "--short", "HEAD")
+    checked_out = (head.stdout or "").strip() if head.returncode == 0 else None
+    if checked_out and checked_out in branches_of_run:
+        return None
+    found = (
+        f"branch {checked_out!r}"
+        if checked_out
+        else f"no branch git could name (exit {head.returncode}: "
+        f"{(head.stderr or '').strip() or 'no output'})"
+    )
+    return (
+        f"run {key!r}: the durable driver {script} fires in {worktree}, which has {found} "
+        f"checked out — not this run's {' or '.join(map(repr, branches_of_run))} — and is not "
+        "a worktree run.json records for it. Launching it would drive another run under this "
+        "run's ownership; no fire was launched and no write occurred. Reinstall the driver for "
+        f"this run:\n{reinstall}"
+    )
 
 
 def cmd_heartbeat(args: argparse.Namespace) -> int:
@@ -511,9 +577,13 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
         print(
             f"run {key!r} is {status} but its durable driver {script} is missing or not "
             "executable, so this fire has nothing to launch; no write occurred. Install it "
-            f"with:\n  conductor driver install --worktree {resolution.repo_root}",
+            f"with:\n  {_driver_install_hint(run)}",
             file=sys.stderr,
         )
+        return EXIT_FAIL
+    unbound = _driver_unbound(resolution.repo_root, script, run)
+    if unbound:
+        print(unbound, file=sys.stderr)
         return EXIT_FAIL
     # Stamped BEFORE ownership is taken: `_commit` acquires project.lock, which ranks ahead of
     # owner.lock, so doing it inside `ownership.acquire` would be a lock-order violation.

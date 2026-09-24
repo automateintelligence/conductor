@@ -136,6 +136,27 @@ def driver_script_path(root: str) -> str:
     return os.path.join(root, ".conductor", "resume-autodev.sh")
 
 
+_WORKTREE_LINE = re.compile(r"^WORKTREE=(.+)$", re.M)
+
+
+def installed_worktree(script_path: str) -> str | None:
+    """The run worktree an installed driver fires in — its ``WORKTREE=`` binding, as ``render``
+    wrote it — or ``None`` when the file is unreadable or carries no single parseable binding."""
+    try:
+        with open(script_path, encoding="utf-8") as handle:
+            text = handle.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    found = _WORKTREE_LINE.findall(text)
+    if len(found) != 1:
+        return None
+    try:
+        tokens = shlex.split(found[0])
+    except ValueError:
+        return None
+    return tokens[0] if len(tokens) == 1 and tokens[0] else None
+
+
 def install_lock_for(script_path: str) -> str:
     """The advisory lock serializing every writer of ONE driver script.
 
