@@ -850,3 +850,17 @@ def test_the_cli_derives_codex_from_the_repos_durable_recording(
     (repo / "claude-plan.md").write_text(GOOD_PLAN, encoding="utf-8")
     assert plan_lint.main([str(repo / "claude-plan.md")]) == 1
     assert "recipe-missing:claude" in capsys.readouterr().err
+
+
+def test_plan_lint_and_the_ledger_parser_agree_on_phases():
+    # plan-lint grades the phases `convert` will create issues for; if the two splitters
+    # disagree, a lint-clean plan gets a phase issue for a fenced example (or loses one)
+    from ledger import sync
+
+    text = (
+        _fenced("```md", "```", body=_FENCED_PHASE_EXAMPLE)
+        + "\n## Phase 3 — Glue (A9)\n\n- [ ] wire it up\n"
+    )
+    lint_titles = [t for (t, _s, _i), _sec in plan_lint._phase_sections(text)]
+    ledger_titles = [p["title"] for p in sync.parse_plan_md(text)["phases"]]
+    assert lint_titles == ledger_titles
