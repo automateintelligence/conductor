@@ -298,7 +298,9 @@ def _assertions_source(
         candidates = _source_candidates(base)
         path = _pick_source(candidates, repo_root)
         if path:
-            return {os.path.relpath(path, repo_root): _sha256_file(path)}, "gate"
+            return {
+                os.path.relpath(path, repo_root): _source_digest(path, repo_root)
+            }, "gate"
         raise MissingAssertionsSource(
             f"missing-assertions-source: {os.path.join(gate_dir, SOURCE_POINTER)} "
             f"names {declared} but none of {', '.join(candidates)} exist"

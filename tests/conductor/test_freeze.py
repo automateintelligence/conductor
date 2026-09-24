@@ -951,3 +951,48 @@ def test_a_root_whose_directory_name_really_contains_a_bracket_still_resolves(
     freeze.record(manifest, baseline, str(tmp_path))
     doc = json.loads(open(baseline).read())
     assert list(doc["sources"]) == ["docs/spec[1]/real.assertions.md"]
+
+
+# ------------------------- the gate-local pointer resolves under both spellings as well
+#
+# The pointer tier (`<gate-dir>/.assertions-source`) sits between the env override and the
+# goal, and names a spec the same way they do. It must take the same two spellings, refuse
+# the same divergence, and turn the same unreadable file into the same domain refusal — or a
+# repo whose gate carries a pointer would lose every one of those fixes at the tier that wins.
+
+
+def test_pointer_resolves_the_stem_form_source(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _spec_with_sources(tmp_path, stem=True)
+    _add_pointer(tmp_path, "docs/specs/fixture-spec.md")
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/fixture-spec.assertions.md"]
+    assert doc["sources_via"] == "gate"
+    assert freeze.verify(manifest, baseline, str(tmp_path))["ok"] is True
+
+
+def test_pointer_with_divergent_spellings_refuses(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    _spec_with_sources(tmp_path, stem=True, legacy=True)  # different bytes
+    _add_pointer(tmp_path, "docs/specs/fixture-spec.md")
+    with pytest.raises(freeze.DivergentAssertionsSource):
+        freeze.record(manifest, baseline, str(tmp_path))
+    assert not os.path.exists(baseline)
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores mode 0o000, so the file cannot be made unreadable",
+)
+def test_pointer_selected_unreadable_source_is_a_domain_refusal(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    stem_path, _legacy = _spec_with_sources(tmp_path, stem=True)
+    _add_pointer(tmp_path, "docs/specs/fixture-spec.md")
+    stem_path.chmod(0o000)
+    try:
+        with pytest.raises(freeze.UnreadableAssertionsSource):
+            freeze.record(manifest, baseline, str(tmp_path))
+    finally:
+        stem_path.chmod(0o644)
+    assert not os.path.exists(baseline)
