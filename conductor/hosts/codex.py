@@ -102,32 +102,194 @@ SKILL_NAME_MAX_CHARS = 64
 
 
 def codex_skill_names(pattern: str) -> set[str]:
-    """The names Codex would load a ``.../skills/*/SKILL.md`` glob under — the FALLBACK rule.
+    """The names Codex would load a ``.../skills/*/SKILL.md`` glob under.
 
-    ``parse_skill_frontmatter_metadata`` at rust-v0.155.0, restated: a ``---`` frontmatter block
-    with a closing ``---`` is required; ``name`` is the declared one (whitespace collapsed) or
-    the directory name when none is declared, and at most 64 characters; ``description`` is
-    required and non-empty. Anything else Codex reports as an error and does not load, so it is
-    not counted. gstack depends on the declared-name half: its Codex installer links
+    Codex's own rule (``parse_skill_frontmatter_metadata``, ``codex-rs/skills/src/parser.rs``
+    at rust-v0.155.0), applied by ``codex_frontmatter``: a SKILL.md it rejects is not counted,
+    and one it accepts is named by its declared ``name`` or, failing that, its directory. gstack
+    depends on the declared-name half: its Codex installer links
     ``$CODEX_HOME/skills/gstack-claude/`` declaring ``name: claude``. Claude Code names user
     skills by directory, so none of this applies to the Claude adapter.
 
-    Used only when Codex's own catalog (``skills_list``) cannot be had. Codex parses the
-    frontmatter as YAML; ``discovery.frontmatter`` is a stdlib line reader, which agrees on the
-    frontmatter skills are written in and is the reason this is the fallback, not the source.
+    Used for the roots Codex's catalog does not speak for (conductor's own checkout and the
+    ``CONDUCTOR_PLUGIN_DIRS`` dev roots), and as on-disk evidence when the catalog is
+    unavailable — never as a pass on its own.
     """
     names = set()
     for path in glob.glob(pattern):
-        fields = discovery.frontmatter(path)
-        if fields is None:
+        block = discovery.frontmatter_block(path)
+        parsed = codex_frontmatter(block) if block is not None else None
+        if parsed is None:
             continue
-        name = " ".join(fields.get("name", "").split()) or os.path.basename(
-            os.path.dirname(path)
-        )
-        description = " ".join(fields.get("description", "").split())
-        if description and len(name) <= SKILL_NAME_MAX_CHARS:
+        declared, _ = parsed
+        name = declared or os.path.basename(os.path.dirname(path))
+        if len(name) <= SKILL_NAME_MAX_CHARS:
             names.add(name)
     return names
+
+
+def codex_frontmatter(block: str) -> tuple[str | None, str] | None:
+    """``(declared name or None, description)`` if Codex 0.155.0 accepts this frontmatter block,
+    else None.
+
+    Codex deserializes the block with serde_yaml into ``{name?: String, description?: String,
+    metadata?: {short-description?: String}}``. If that fails, for ANY reason, it quotes the
+    scalars that YAML cannot take as written (``repair_frontmatter_scalar_fields``) and tries
+    once more. So ``description: [`` loads as the string ``[`` and ``description: Build for AWS:
+    ECS`` loads as written, while ``description: [a, b]`` (a real sequence) and ``description:
+    null`` do not. Plain scalars keep their written text: serde_yaml hands a ``String`` field the
+    scalar as written, which is why ``_CodexLoader`` resolves nothing but null. Every case here
+    was checked against a live 0.155.0 ``skills/list``; see ``tests/conductor/hosts/``.
+
+    Without PyYAML the rule cannot be applied exactly, and ``_simple_frontmatter`` accepts only
+    a subset of what Codex accepts. It can reject a skill Codex would load; it never accepts one
+    Codex would reject.
+    """
+    if _yaml is None:
+        return _simple_frontmatter(block)
+    parsed = _typed_frontmatter(block)
+    if parsed is None:
+        repaired = _repair_frontmatter(block)
+        parsed = _typed_frontmatter(repaired) if repaired is not None else None
+    return parsed
+
+
+try:
+    import yaml as _yaml
+except ImportError:  # optional, as it is for assertions/run.py
+    _yaml = None
+
+if _yaml is not None:
+
+    class _CodexLoader(_yaml.SafeLoader):
+        """SafeLoader resolving only null: every other plain scalar stays the text it was
+        written as, as serde_yaml gives it to a ``String`` field."""
+
+    _CodexLoader.yaml_implicit_resolvers = {
+        first: [(tag, regexp) for tag, regexp in resolvers if tag.endswith(":null")]
+        for first, resolvers in _yaml.SafeLoader.yaml_implicit_resolvers.items()
+    }
+
+
+def _single_line(value: str) -> str:
+    return " ".join(value.split())
+
+
+#: A tab separating a key from its value. serde_yaml's YAML 1.2 parser accepts it (live
+#: 0.155.0: ``description:<TAB>d`` loads as ``d``); PyYAML's YAML 1.1 scanner refuses a tab
+#: that starts a token. Rewriting it to a space is the one place the two parsers were found to
+#: disagree on a frontmatter line.
+_TAB_AFTER_KEY = re.compile(r"^(\s*[^\s#:][^:]*):\t+", re.MULTILINE)
+
+
+def _typed_frontmatter(block: str) -> tuple[str | None, str] | None:
+    assert _yaml is not None
+    try:
+        data = _yaml.load(  # noqa: S506 - SafeLoader subclass
+            _TAB_AFTER_KEY.sub(r"\1: ", block), Loader=_CodexLoader
+        )
+    except _yaml.YAMLError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    name, description = data.get("name"), data.get("description")
+    metadata = data.get("metadata")
+    if not all(v is None or isinstance(v, str) for v in (name, description)):
+        return None
+    if metadata is not None:
+        if not isinstance(metadata, dict):
+            return None
+        short = metadata.get("short-description")
+        if short is not None and not isinstance(short, str):
+            return None
+    description = _single_line(description or "")
+    if not description:
+        return None
+    return (_single_line(name) or None) if name is not None else None, description
+
+
+def _yaml_parses(text: str) -> bool:
+    assert _yaml is not None
+    try:
+        _yaml.load(text, Loader=_CodexLoader)  # noqa: S506 - SafeLoader subclass
+    except _yaml.YAMLError:
+        return False
+    return True
+
+
+def _repair_frontmatter(block: str) -> str | None:
+    """``repair_frontmatter_scalar_fields`` (rust-v0.155.0), line for line: single-quote each
+    ``key: value`` scalar that contains ``: `` or starts like a flow value YAML cannot parse,
+    leaving block scalars, quoted scalars and comments alone. None when nothing changed."""
+    changed = False
+    block_indent: int | None = None
+    lines: list[str] = []
+    for line in block.split("\n"):
+        indent = len(line) - len(line.lstrip(" "))
+        if block_indent is not None:
+            if not line.strip() or indent > block_indent:
+                lines.append(line)
+                continue
+            block_indent = None
+        key, colon, value = line.partition(":")
+        if not colon or not key.strip() or (value and not value[0].isspace()):
+            lines.append(line)
+            continue
+        trimmed = value.lstrip()
+        leading = value[: len(value) - len(trimmed)]
+        scalar, comment = trimmed, ""
+        for index, char in enumerate(trimmed):
+            if char == "#" and (index == 0 or trimmed[index - 1].isspace()):
+                cut = len(trimmed[:index].rstrip())
+                scalar, comment = trimmed[:cut], trimmed[cut:]
+                break
+        scalar = scalar.rstrip()
+        if not scalar or scalar[0] in "'\"":
+            lines.append(line)
+            continue
+        if scalar[0] in "|>":
+            block_indent = indent
+            lines.append(line)
+            continue
+        colon_separated = any(
+            c == ":" and nxt.isspace() for c, nxt in zip(scalar, scalar[1:])
+        )
+        broken_flow = scalar[0] in "[{@`" and not _yaml_parses(scalar)
+        if not colon_separated and not broken_flow:
+            lines.append(line)
+            continue
+        quoted = "'" + scalar.replace("'", "''") + "'"
+        lines.append(f"{key}:{leading}{quoted}{comment}")
+        changed = True
+    return "\n".join(lines) if changed else None
+
+
+_NULLS = {"", "~", "null", "Null", "NULL"}
+
+
+def _simple_frontmatter(block: str) -> tuple[str | None, str] | None:
+    """The no-PyYAML subset: flat ``key: value`` lines only, values taken as written."""
+    fields: dict[str, str] = {}
+    for line in block.split("\n"):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        key, colon, value = line.partition(":")
+        if line[:1].isspace() or not colon or not key.strip():
+            return None
+        value = value.strip()
+        if value[:1] in "[{&*!|>%@`'\"":
+            if key.strip() in ("name", "description", "metadata"):
+                return None
+            continue
+        fields[key.strip()] = value
+    if "metadata" in fields and fields["metadata"] not in _NULLS:
+        return None
+    name = fields.get("name")
+    description = _single_line(fields.get("description", ""))
+    if description in _NULLS:
+        return None
+    name = None if name is None or name in _NULLS else _single_line(name) or None
+    return name, description
 
 
 _SKILL_NAMER: discovery.SkillNamer = codex_skill_names
@@ -161,12 +323,19 @@ def _skills_list_request(cwd: str) -> bytes:
     return "".join(json.dumps(m) + "\n" for m in messages).encode()
 
 
+class CatalogUnavailable(base.HostUnavailable):
+    """Codex was reachable but gave no usable ``skills/list`` answer, or is not on ``PATH``.
+
+    Distinct from ``base.HostProbeTimeout``: nothing expired. The caller still has no catalog,
+    and preflight treats the two alike — nothing counts as loadable on a filesystem guess.
+    """
+
+
 def skills_from_response(message: object) -> list[dict] | None:
     """The skill entries of a ``skills/list`` response, or None when it is not one.
 
     None — never an empty list — for an error response or an unexpected shape, because "Codex
-    lists no skills" is an answer and "this is not an answer" is a different fact: the caller
-    falls back to the filesystem on the second and trusts the first.
+    lists no skills" is an answer and "this is not an answer" is a different fact.
     """
     if not isinstance(message, dict) or "error" in message:
         return None
@@ -185,9 +354,10 @@ def skills_from_response(message: object) -> list[dict] | None:
     return skills
 
 
-def skills_list(project_root: str | None = None) -> list[dict] | None:
+def skills_list(project_root: str | None = None) -> list[dict]:
     """Codex's own skill catalog for ``project_root``, from ``codex app-server``'s
-    ``skills/list``; None when Codex cannot give one; ``HostProbeTimeout`` when it never answers.
+    ``skills/list``. ``CatalogUnavailable`` when Codex cannot give one; ``HostProbeTimeout`` when
+    it does not answer in time.
 
     WHY ASK CODEX RATHER THAN SCAN. The catalog is what a ``$`` mention resolves against, and
     reproducing it means reproducing ``resolve_skill_roots`` and ``SkillNamespaceResolver``
@@ -201,18 +371,22 @@ def skills_list(project_root: str | None = None) -> list[dict] | None:
     carries all of it by construction.
 
     WHY IT IS SAFE FOR A BARE CRON. No auth is needed; it answers from local config and disk.
-    It runs as a child of this process with stdin, stdout and a deadline under our control; the
-    run is killed — the whole process group, since a Codex server may have spawned helpers — if
-    no answer arrives in ``SKILLS_LIST_TIMEOUT_S``. ``HOME`` must be set, as it must for Codex to
-    find ``~/.agents`` at all.
+    ``HOME`` must be set, as it must for Codex to find ``~/.agents`` at all. The whole exchange —
+    writing the request as well as reading the answer — runs inside one deadline of
+    ``SKILLS_LIST_TIMEOUT_S``: stdin is non-blocking, so a server that never reads cannot hold
+    the write. The server runs in its own process group, and every exit path ends that group
+    (``_end_group``), so no helper it started outlives the probe.
 
-    The server does not answer a request it has already seen EOF behind, so the exchange is
-    written, the answer read, and only then stdin closed.
+    The server does not answer a request it has already seen EOF behind, so stdin stays open
+    until the answer is read.
     """
     project = project_root or os.getcwd()
     exe = shutil.which(HOST_ID)
     if not exe:
-        return None
+        raise CatalogUnavailable(
+            f"`{HOST_ID}` is not on PATH, so its `skills/list` catalog could not be asked for. "
+            f"host={HOST_ID} project_root={project}"
+        )
     try:
         child = subprocess.Popen(
             [exe, "app-server"],
@@ -221,37 +395,80 @@ def skills_list(project_root: str | None = None) -> list[dict] | None:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-    except OSError:
-        return None
+    except OSError as exc:
+        raise CatalogUnavailable(
+            f"`codex app-server` could not be started ({exc}), so no `skills/list` catalog. "
+            f"host={HOST_ID} project_root={project}"
+        ) from exc
     deadline = time.monotonic() + SKILLS_LIST_TIMEOUT_S
     expired = False
     try:
-        assert child.stdin is not None and child.stdout is not None
-        try:
-            child.stdin.write(_skills_list_request(project))
-            child.stdin.flush()
-        except OSError:
-            return None
-        pending = b""
-        with selectors.DefaultSelector() as selector:
-            selector.register(child.stdout, selectors.EVENT_READ)
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    expired = True
-                    raise base.HostProbeTimeout(
-                        f"`codex app-server` did not answer within {SKILLS_LIST_TIMEOUT_S}s when "
-                        f"asked for `skills/list`, and was killed; conductor wrote nothing. "
-                        f"host={HOST_ID} project_root={project} — this is a pre-run capability "
-                        f"probe, so it names the host it could not ask and the project it was "
-                        f"asked about in place of a run key. Codex could not be asked which "
-                        f"skills it loads, so every one is unknown rather than absent."
-                    )
-                if not selector.select(remaining):
+        message = _exchange(child, _skills_list_request(project), deadline)
+        if message is _EXPIRED:
+            expired = True
+            raise base.HostProbeTimeout(
+                f"`codex app-server` did not answer within {SKILLS_LIST_TIMEOUT_S}s when "
+                f"asked for `skills/list`, and was killed; conductor wrote nothing. "
+                f"host={HOST_ID} project_root={project} — this is a pre-run capability "
+                f"probe, so it names the host it could not ask and the project it was "
+                f"asked about in place of a run key. Codex could not be asked which "
+                f"skills it loads, so every one is unknown rather than absent."
+            )
+        skills = skills_from_response(message) if message is not None else None
+        if skills is None:
+            raise CatalogUnavailable(
+                "`codex app-server` gave no usable `skills/list` answer (it "
+                + (
+                    "exited without one"
+                    if message is None
+                    else "answered with an error"
+                )
+                + f"), so Codex's catalog of loadable skills is unknown. "
+                f"host={HOST_ID} project_root={project}"
+            )
+        return skills
+    finally:
+        _end_group(child, grace=0 if expired else PLUGIN_LIST_KILL_GRACE_S)
+
+
+#: ``_exchange``'s answer when the deadline passed first.
+_EXPIRED = object()
+
+
+def _exchange(child: subprocess.Popen, request: bytes, deadline: float) -> object:
+    """Write ``request`` and read until the ``skills/list`` reply, all before ``deadline``.
+
+    Returns the reply, None when the server closed stdout (or stopped reading) without one, or
+    ``_EXPIRED``.
+    """
+    assert child.stdin is not None and child.stdout is not None
+    os.set_blocking(child.stdin.fileno(), False)
+    unsent = memoryview(request)
+    pending = b""
+    with selectors.DefaultSelector() as selector:
+        selector.register(child.stdout, selectors.EVENT_READ)
+        selector.register(child.stdin, selectors.EVENT_WRITE)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return _EXPIRED
+            for key, _ in selector.select(remaining):
+                if key.fileobj is child.stdin:
+                    try:
+                        sent = os.write(child.stdin.fileno(), unsent)
+                    except BlockingIOError:
+                        continue
+                    except OSError:
+                        return (
+                            None  # the server stopped reading before taking the request
+                        )
+                    unsent = unsent[sent:]
+                    if not unsent:
+                        selector.unregister(child.stdin)
                     continue
                 chunk = os.read(child.stdout.fileno(), 65536)
                 if not chunk:
-                    return None  # exited without answering: not a catalog
+                    return None
                 pending += chunk
                 *lines, pending = pending.split(b"\n")
                 for line in lines:
@@ -263,16 +480,26 @@ def skills_list(project_root: str | None = None) -> list[dict] | None:
                         isinstance(message, dict)
                         and message.get("id") == _SKILLS_LIST_ID
                     ):
-                        return skills_from_response(message)
-    finally:
-        _end(child, grace=0 if expired else PLUGIN_LIST_KILL_GRACE_S)
+                        return message
 
 
-def _end(child: subprocess.Popen, *, grace: float) -> None:
-    """Close the exchange and make sure nothing of it outlives this call.
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
-    Closing stdin is how a server that answered is asked to exit; ``grace`` is how long it gets
-    to do so. An expired probe gets none — it already had its bound.
+
+def _end_group(child: subprocess.Popen, *, grace: float) -> None:
+    """End the server's whole process group, whatever the leader has already done.
+
+    Closing stdin asks a server that answered to exit. Then the GROUP — not the leader, whose
+    exit says nothing about helpers it started — gets SIGTERM, ``grace`` seconds to empty, and
+    SIGKILL. The leader is reaped throughout, since an unreaped leader keeps the group alive.
+    An expired probe gets no grace; it already had its bound.
     """
     for stream in (child.stdin, child.stdout):
         try:
@@ -280,29 +507,42 @@ def _end(child: subprocess.Popen, *, grace: float) -> None:
                 stream.close()
         except OSError:
             pass
+    pgid = child.pid  # start_new_session=True: the leader's pid is the group id
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except OSError:
+            pass
+        until = time.monotonic() + (
+            grace if sig == signal.SIGTERM else PLUGIN_LIST_KILL_GRACE_S
+        )
+        while True:
+            child.poll()
+            if not _group_alive(pgid) or time.monotonic() >= until:
+                break
+            time.sleep(0.02)
+        if not _group_alive(pgid):
+            break
     try:
-        child.wait(timeout=grace)
-        return
+        child.wait(timeout=PLUGIN_LIST_KILL_GRACE_S)
     except subprocess.TimeoutExpired:
         pass
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except OSError:
-        child.kill()
-    child.wait()
 
 
 def catalog_names(skills: list[dict]) -> tuple[set[str], frozenset[str]]:
     """``(invocable names, contested namespaces)`` from a ``skills/list`` catalog.
 
-    A disabled skill is not invocable. A qualified name listed at more than one path is
-    contested: both answer to ``$<namespace>:<skill>`` and which one Codex runs is not something
-    conductor can establish, so its namespace travels with the plugin-list collisions.
+    Only an entry whose ``enabled`` is literally ``true`` is invocable: ``enabled`` is a required
+    ``bool`` of ``SkillMetadata`` in 0.155.0 (``app-server-protocol/src/protocol/v2/plugin.rs``),
+    so an entry without it is malformed, not enabled by default. A qualified name listed at more
+    than one path is contested: both answer to ``$<namespace>:<skill>`` and which one Codex runs
+    is not something conductor can establish, so its namespace travels with the plugin-list
+    collisions.
     """
     names: set[str] = set()
     paths: dict[str, set[str]] = {}
     for skill in skills:
-        if skill.get("enabled") is False:
+        if skill.get("enabled") is not True:
             continue
         name = skill["name"]
         names.add(name)
@@ -1072,11 +1312,20 @@ class CodexAdapter:
         ``$CODEX_HOME/prompts/`` (the analogue of Claude's slash commands) and conductor's own
         checkout and dev roots are added to it, as they always were.
 
-        When Codex cannot give a catalog — no executable, an error, output that is not the
-        protocol — the answer falls back to scanning: ``$CODEX_HOME/skills/``, the project-local
-        ``./.codex/skills/``, and each installed plugin's root, named and filtered by
-        ``codex_skill_names``. That scan does not reach ``~/.agents/skills`` or the other roots
-        only Codex's resolver knows, so it can under-report; it is the answer of last resort.
+        WITHOUT THE CATALOG NOTHING ELSE COUNTS. When Codex cannot give one — not on ``PATH``,
+        an error, output that is not the protocol (``CatalogUnavailable``), or no answer in time
+        (``HostProbeTimeout``) — ``commands`` keeps only what does not come from Codex's
+        catalog in the first place: conductor's own checkout, the ``CONDUCTOR_PLUGIN_DIRS`` dev
+        roots the operator named, and ``prompts/``. The filesystem scan of ``$CODEX_HOME/skills/``,
+        ``./.codex/skills/`` and each installed plugin's root goes into ``on_disk`` as evidence
+        for the advice line, never into ``commands``: it cannot see ``~/.agents/skills``, config-
+        disabled skills or trust layers, so "on disk" is not "loadable", and counting it is how
+        preflight greened a machine whose Codex never answered.
+
+        Those three kept legs are trusted because the catalog is not their authority. The
+        running checkout is the code executing this very check, and its skills are launched by
+        ``SKILL.md`` path (``resume_fire_command``), not looked up by name; the dev roots are an
+        explicit operator override; ``prompts/`` are not skills and not in the catalog at all.
 
         ``codex plugin list --json`` is asked either way, first. It is what knows a plugin Codex
         lists but whose root is NOT ON DISK (``unverifiable_plugins``) and a plugin name two
@@ -1111,7 +1360,10 @@ class CodexAdapter:
             )
         except base.HostProbeTimeout as expiry:
             raise base.HostProbeTimeout(
-                str(expiry), partial=discovery.HostSkills(cmds | scanned, frozenset())
+                str(expiry),
+                partial=discovery.HostSkills(
+                    cmds, frozenset(), on_disk=frozenset(scanned)
+                ),
             ) from expiry
         for name, root in attributed.items():
             scanned |= discovery.qualified(name, root, named)
@@ -1119,15 +1371,17 @@ class CodexAdapter:
             for root in roots:
                 scanned |= discovery.qualified(name, root, named)
         colliding = frozenset(contested)
+        without_catalog = discovery.HostSkills(
+            cmds, unverifiable, colliding, on_disk=frozenset(scanned)
+        )
         try:
             catalog = skills_list(project_root=project)
         except base.HostProbeTimeout as expiry:
             raise base.HostProbeTimeout(
-                str(expiry),
-                partial=discovery.HostSkills(cmds | scanned, unverifiable, colliding),
+                str(expiry), partial=without_catalog
             ) from expiry
-        if catalog is None:
-            return discovery.HostSkills(cmds | scanned, unverifiable, colliding)
+        except CatalogUnavailable as missing:
+            return without_catalog._replace(unconfirmed=str(missing))
         listed, listed_twice = catalog_names(catalog)
         return discovery.HostSkills(
             cmds | listed, unverifiable, colliding | listed_twice

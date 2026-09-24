@@ -139,19 +139,42 @@ def _plugin_list_json(sources, disabled=()):
     )
 
 
-def _stub_codex_on_path(tmp_path, monkeypatch, sources, disabled=()):
+def _stub_codex_on_path(tmp_path, monkeypatch, sources, disabled=(), catalog=None):
     """A `codex` on PATH reporting `sources` (name -> `source.path`) as its installed plugins.
+
+    `catalog` is what its `app-server` answers `skills/list` with: `(name, path, pluginId)`
+    triples, the skills Codex itself would list for the tree the caller built. None means the
+    server gives no catalog, and discovery then has only on-disk evidence.
 
     `git` is carried across because host resolution shells out to it (`runhost._common_root`);
     a PATH without it would silently degrade every derivation test to the literal-path branch.
     """
     bindir = tmp_path / "stub-bin"
-    bindir.mkdir(exist_ok=True)
-    codex = bindir / "codex"
-    codex.write_text(
-        f"#!/bin/sh\nprintf '%s' '{_plugin_list_json(sources, disabled)}'\nexit 0\n",
+    app_server = None
+    if catalog is not None:
+        home = os.environ.get("CODEX_HOME", str(tmp_path))
+        initialize = codex_stub.recorded_app_server(
+            codex_home=home, cwd=str(tmp_path), home=str(tmp_path)
+        )[0]
+        skills = [
+            {
+                "name": name,
+                "description": "d",
+                "path": str(path),
+                "scope": "user",
+                "enabled": True,
+                "pluginId": plugin_id,
+            }
+            for name, path, plugin_id in catalog
+        ]
+        answer = {
+            "id": 1,
+            "result": {"data": [{"cwd": str(tmp_path), "skills": skills}]},
+        }
+        app_server = [initialize, json.dumps(answer)]
+    codex_stub.install(
+        bindir, plugin_list=_plugin_list_json(sources, disabled), app_server=app_server
     )
-    os.chmod(codex, 0o755)
     _link_git(bindir)
     monkeypatch.setenv("PATH", str(bindir))
     return bindir
@@ -225,10 +248,12 @@ def _codex_install(
     home = tmp_path / "codex-home"
     monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    catalog = []  # what Codex's own `skills/list` lists for the tree built below
     for name in ("code-review", review_wrapper, "document-release"):
         d = home / "skills" / f"{env_dir_prefix}{name}"
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n")
+        catalog.append((name, d / "SKILL.md", None))
     sources = {}
     for plugin, skills in _PLUGIN_SKILLS.items():
         root = _installed_root(home, plugin)
@@ -253,7 +278,15 @@ def _codex_install(
             d = (home / "skills" / name) if flat_only else (root / "skills" / name)
             d.mkdir(parents=True)
             (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n")
-    _stub_codex_on_path(tmp_path, monkeypatch, {} if flat_only else sources)
+            if flat_only:
+                catalog.append((name, d / "SKILL.md", None))
+            else:
+                catalog.append(
+                    (f"{plugin}:{name}", d / "SKILL.md", f"{plugin}@{_MARKET}")
+                )
+    _stub_codex_on_path(
+        tmp_path, monkeypatch, {} if flat_only else sources, catalog=catalog
+    )
     return home
 
 
@@ -369,6 +402,9 @@ def test_a_codex_install_missing_the_claude_wrapper_fails_closed(tmp_path, monke
 
 # ------------------------------------------- Codex names a skill by its frontmatter `name`
 #
+# These read `codex_skill_names`, the rule conductor applies to the trees Codex's catalog does not
+# speak for (its own checkout, the dev roots) and to on-disk evidence.
+#
 # Measured against codex-cli 0.155.0's own `skills/list` (app-server): a SKILL.md that declares
 # `name: alpha` in a directory called `dir-a` is listed as `alpha`; a quoted `name: "beta"` is
 # `beta`; a SKILL.md with no `name` falls back to its directory name. gstack depends on the first
@@ -400,7 +436,7 @@ def _codex_home_with(tmp_path, monkeypatch, skills):
 def test_codex_discovery_reports_the_declared_name_not_the_directory(
     tmp_path, monkeypatch
 ):
-    _codex_home_with(
+    home = _codex_home_with(
         tmp_path,
         monkeypatch,
         {
@@ -410,9 +446,7 @@ def test_codex_discovery_reports_the_declared_name_not_the_directory(
             "nameless": "---\ndescription: no name\n---\n",
         },
     )
-    found = preflight.available_commands(
-        host_id="codex", project_root=str(tmp_path / "project")
-    )
+    found = codex_host.codex_skill_names(f"{home}/skills/*/SKILL.md")
     assert {"claude", "beta", "gamma", "nameless"} <= found
     assert not {"gstack-claude", "quoted", "single-quoted"} & found
 
@@ -423,8 +457,7 @@ def test_a_codex_directory_named_after_a_requirement_does_not_satisfy_it(
     """Name, not directory, is what Codex resolves `$claude` against. A directory called
     `claude` that declares another name is not `$claude`, and a `gstack-claude` directory that
     declares `gstack-claude` is not either: there is no prefix or suffix matching."""
-    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
-    _codex_home_with(
+    home = _codex_home_with(
         tmp_path,
         monkeypatch,
         {
@@ -432,14 +465,13 @@ def test_a_codex_directory_named_after_a_requirement_does_not_satisfy_it(
             "gstack-claude": "---\nname: gstack-claude\ndescription: d\n---\n",
         },
     )
-    out = preflight.check(project_root=str(tmp_path / "project"))
-    assert "$claude" in out["missing"]
+    assert "claude" not in codex_host.codex_skill_names(f"{home}/skills/*/SKILL.md")
 
 
 def test_a_name_line_outside_the_frontmatter_is_not_a_declared_name(
     tmp_path, monkeypatch
 ):
-    _codex_home_with(
+    home = _codex_home_with(
         tmp_path,
         monkeypatch,
         {
@@ -449,16 +481,14 @@ def test_a_name_line_outside_the_frontmatter_is_not_a_declared_name(
             "empty-name": '---\nname: ""\ndescription: x\n---\n',
         },
     )
-    found = preflight.available_commands(
-        host_id="codex", project_root=str(tmp_path / "project")
-    )
+    found = codex_host.codex_skill_names(f"{home}/skills/*/SKILL.md")
     assert "claude" not in found
     # codex-cli 0.155.0 lists each of these under its directory name
     assert {"body-only", "nested", "empty-name"} <= found
 
 
 def test_a_codex_name_is_read_as_a_yaml_scalar(tmp_path, monkeypatch):
-    _codex_home_with(
+    home = _codex_home_with(
         tmp_path,
         monkeypatch,
         {
@@ -466,9 +496,7 @@ def test_a_codex_name_is_read_as_a_yaml_scalar(tmp_path, monkeypatch):
             "crlf": "---\r\nname: eps\r\ndescription: x\r\n---\r\n",
         },
     )
-    found = preflight.available_commands(
-        host_id="codex", project_root=str(tmp_path / "project")
-    )
+    found = codex_host.codex_skill_names(f"{home}/skills/*/SKILL.md")
     assert {"delta", "eps"} <= found
 
 
@@ -533,8 +561,10 @@ def test_a_codex_run_does_not_resolve_a_plugin_qualified_skill_from_a_flat_dir(
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
     d = tmp_path / "codex-home" / "skills" / "expectations"
     d.mkdir(parents=True)
-    (d / "SKILL.md").write_text("---\n---\n")
-    _stub_codex_on_path(tmp_path, monkeypatch, {})
+    (d / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
+    _stub_codex_on_path(
+        tmp_path, monkeypatch, {}, catalog=[("expectations", d / "SKILL.md", None)]
+    )
     out = preflight.check(project_root=str(tmp_path / "project"))
     assert "$spec-craft:expectations" in out["missing"]
 
@@ -610,8 +640,9 @@ def test_codex_recovers_plugin_identity_from_the_installed_plugin_list(
 ):
     """Identity IS recoverable for a plugin-installed skill: `codex plugin list --json` reports
     each installed plugin's identity, the install root derives from it, and its skills live
-    under that root. Discovery must use it rather than flattening every skill into an
-    unattributable bare name."""
+    under that root. The on-disk evidence discovery reports when Codex's catalog is missing
+    must use it rather than flattening every skill into an unattributable bare name — and it
+    stays evidence: nothing found this way is counted as invocable."""
     home = tmp_path / "codex-home"
     monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
@@ -621,9 +652,10 @@ def test_codex_recovers_plugin_identity_from_the_installed_plugin_list(
     _stub_codex_on_path(
         tmp_path, monkeypatch, {"spec-craft": tmp_path / "marketplace" / "spec-craft"}
     )
-    avail = preflight.available_commands(host_id="codex")
-    assert "spec-craft:expectations" in avail
-    assert "expectations" not in avail
+    snapshot = codex_host.CodexAdapter().host_skills(project_root=str(tmp_path / "p"))
+    assert "spec-craft:expectations" in snapshot.on_disk
+    assert "expectations" not in snapshot.on_disk
+    assert "spec-craft:expectations" not in snapshot.commands
 
 
 def test_a_second_marketplace_shipping_a_same_named_plugin_greens_nothing(
@@ -637,10 +669,16 @@ def test_a_second_marketplace_shipping_a_same_named_plugin_greens_nothing(
     home = tmp_path / "codex-home"
     monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    catalog = []
     for market in ("evil-market", _MARKET):
         skill = _installed_root(home, "spec-craft", market) / "skills" / "expectations"
         skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text("---\n---\n")
+        (skill / "SKILL.md").write_text(
+            "---\nname: expectations\ndescription: d\n---\n"
+        )
+        catalog.append(
+            ("spec-craft:expectations", skill / "SKILL.md", f"spec-craft@{market}")
+        )
     _stub_codex_on_path(
         tmp_path,
         monkeypatch,
@@ -648,6 +686,7 @@ def test_a_second_marketplace_shipping_a_same_named_plugin_greens_nothing(
             ("spec-craft", "evil-market"): tmp_path / "evil" / "spec-craft",
             ("spec-craft", _MARKET): tmp_path / "curated" / "spec-craft",
         },
+        catalog=catalog,
     )
 
     out = preflight.check(
@@ -753,7 +792,9 @@ def test_available_commands_uses_the_requested_hosts_root(tmp_path, monkeypatch)
     d = tmp_path / "codex-home" / "skills" / "only-on-codex"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text("---\ndescription: d\n---\n")
-    codex_stub.put_on_path(monkeypatch, tmp_path / "stub-bin")
+    _stub_codex_on_path(
+        tmp_path, monkeypatch, {}, catalog=[("only-on-codex", d / "SKILL.md", None)]
+    )
     assert "only-on-codex" in preflight.available_commands(host_id="codex")
     assert "only-on-codex" not in preflight.available_commands(host_id="claude")
 
@@ -882,7 +923,9 @@ def test_check_discovers_the_projects_own_codex_skills_not_the_current_directory
         required=["expectations"], host_id="codex", project_root=str(proj)
     )
 
-    assert out["ok"], out
+    # No Codex to confirm it, so not a pass — but the project's own tree was the one scanned.
+    assert out["unverified"] == ["$expectations"], out
+    assert any("is on disk" in line for line in out["advice"]), out
 
 
 def test_a_cached_plugin_is_named_by_its_cache_path_not_by_its_manifest(

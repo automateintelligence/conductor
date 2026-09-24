@@ -7,7 +7,7 @@ because the ``SKILL.md`` format and the ``skills/<name>/`` layout are identical 
 which manifest directory names the plugin, whether a skill is named by its directory or by the
 ``name`` its ``SKILL.md`` declares, and which SKILL.md files the host refuses to load — stays in
 each adapter, where a wrong answer is visible rather than averaged away. This module supplies
-the primitives (``skill_names``, ``frontmatter``) and chooses neither rule.
+the primitives (``skill_names``, ``frontmatter_block``) and chooses neither rule.
 
 Nothing here raises. Discovery answers "what is installed", and a missing, unreadable, or
 malformed directory is a legitimate answer to that question ("not this"), not an error. The
@@ -61,6 +61,13 @@ class HostSkills(NamedTuple):
     #: requirement naming one of these plugins is ``unverified``, never a pass. Defaults empty
     #: because only a host that reports installed plugins can have a collision to report.
     contested_plugins: frozenset[str] = frozenset()
+    #: Why the host's own list of loadable skills could not be had, or None when it was. When
+    #: set, ``commands`` holds only what is known without that list, and preflight reports
+    #: every other requirement ``unverified`` — never ``ok`` from a filesystem guess.
+    unconfirmed: str | None = None
+    #: Names found by scanning the filesystem that the host has NOT confirmed. Evidence for the
+    #: advice line only; never counted as invocable.
+    on_disk: frozenset[str] = frozenset()
 
 
 class CommandDiscovery(Protocol):
@@ -104,31 +111,12 @@ def skill_names(pattern: str) -> set[str]:
     return {os.path.basename(os.path.dirname(p)) for p in glob.glob(pattern)}
 
 
-def _yaml_scalar(raw: str) -> str:
-    """The string value of a one-line plain or quoted YAML scalar.
+def frontmatter_block(skill_md: str) -> str | None:
+    """The text between a SKILL.md's leading ``---`` and the next ``---``, or None.
 
-    Enough YAML for a ``name:`` line and no more: a quoted value ends at its closing quote, a
-    plain one at an inline `` #`` comment. Anything richer is not a skill name any host
-    accepts, and the result is compared for equality against required names, so a misread
-    value can only fail to match — never match something it should not.
-    """
-    value = raw.strip()
-    if value[:1] in ("'", '"'):
-        end = value.find(value[0], 1)
-        return value[1:end] if end > 0 else ""
-    return value.split(" #", 1)[0].strip()
-
-
-def frontmatter(skill_md: str) -> dict[str, str] | None:
-    """The top-level scalar fields of a SKILL.md's leading ``---`` frontmatter block.
-
-    None when there is no block: the first line is not ``---``, no closing ``---`` follows, the
-    block is empty, or the file cannot be read. Nested keys are skipped, and a ``|`` or ``>``
-    block scalar is folded into one line. A line in the body is never a field.
-
-    This is a line reader, not a YAML parser — the package is stdlib-only. It covers the
-    frontmatter skills are actually written in; a host that needs its own exact rule applies it
-    to what this returns.
+    None when the first line is not ``---``, no closing ``---`` follows, nothing sits between
+    them, or the file cannot be read. This only extracts the block; whether its contents make a
+    loadable skill is each host's own rule, applied by that host's adapter.
     """
     try:
         with open(skill_md, encoding="utf-8") as f:
@@ -137,32 +125,10 @@ def frontmatter(skill_md: str) -> dict[str, str] | None:
         return None
     if not lines or lines[0].strip() != "---":
         return None
-    try:
-        close = next(i for i, line in enumerate(lines[1:], 1) if line.strip() == "---")
-    except StopIteration:
-        return None
-    block = lines[1:close]
-    if not block:
-        return None
-    fields: dict[str, str] = {}
-    folding: str | None = None
-    for line in block:
-        indented = line[:1] in (" ", "\t")
-        if folding is not None:
-            if indented or not line.strip():
-                fields[folding] = " ".join((fields[folding] + " " + line).split())
-                continue
-            folding = None
-        if indented or line.startswith("#") or ":" not in line:
-            continue
-        key, _, raw = line.partition(":")
-        value = raw.strip()
-        if value[:1] in ("|", ">"):
-            fields[key.strip()] = ""
-            folding = key.strip()
-            continue
-        fields[key.strip()] = _yaml_scalar(value)
-    return fields
+    for close, line in enumerate(lines[1:], 1):
+        if line.strip() == "---":
+            return "\n".join(lines[1:close]) if close > 1 else None
+    return None
 
 
 def command_names(pattern: str) -> set[str]:

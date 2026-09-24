@@ -553,7 +553,9 @@ def test_host_skills_propagates_the_expiry_carrying_what_it_had_already_establis
     # The SHAPE is part of the contract: `preflight.check` degrades by using this in place of
     # the snapshot it did not get, so anything that is not a `HostSkills` is not usable there.
     assert isinstance(partial, discovery.HostSkills), partial
-    assert "flat-user-skill" in partial.commands
+    # Scanned, so kept as evidence; never counted, since Codex never said it loads it.
+    assert "flat-user-skill" in partial.on_disk
+    assert "flat-user-skill" not in partial.commands
     assert partial.unverifiable_plugins == frozenset()
 
 

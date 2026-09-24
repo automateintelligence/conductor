@@ -10,6 +10,8 @@ Codex for:
   order, one per request carrying an `id`. `None` (the default) means the stub exits without
   answering, which is how Codex behaves when it cannot give a catalog: discovery then falls back
   to its filesystem scan. `hang=True` makes it never answer, for the time-bound paths.
+  `helper_pidfile` makes it start a helper process in its own process group first and record
+  the helper's pid there, as a real server's helpers would.
 
 `recorded_app_server()` and `recorded_plugin_list()` load the captured 0.155.0 responses in
 `tests/conductor/fixtures/` with their placeholders filled in.
@@ -35,6 +37,11 @@ if args[:1] == ["--version"]:
 elif args[:3] == ["plugin", "list", "--json"]:
     sys.stdout.write({plugin_list!r})
 elif args[:1] == ["app-server"]:
+    if {helper_pidfile!r}:
+        import subprocess
+        helper = subprocess.Popen([{sleep!r}, "60"], stdout=subprocess.DEVNULL)
+        with open({helper_pidfile!r}, "w") as f:
+            f.write(str(helper.pid))
     if {hang!r}:
         import time
         time.sleep(60)
@@ -76,6 +83,7 @@ def install(
     plugin_list: str = '{"installed": []}',
     app_server: list[str] | None = None,
     hang: bool = False,
+    helper_pidfile: pathlib.Path | None = None,
 ) -> pathlib.Path:
     """Write the stub `codex` (and a `git` link, which host resolution shells out to)."""
     bindir.mkdir(parents=True, exist_ok=True)
@@ -87,6 +95,8 @@ def install(
             plugin_list=plugin_list,
             app_server=app_server,
             hang=hang,
+            helper_pidfile=str(helper_pidfile) if helper_pidfile else None,
+            sleep=shutil.which("sleep", path=os.defpath) or "/bin/sleep",
         ),
         encoding="utf-8",
     )

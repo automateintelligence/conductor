@@ -24,8 +24,9 @@ from tests.conductor import codex_stub
 @pytest.fixture(autouse=True)
 def _codex_without_a_catalog(monkeypatch, tmp_path):
     """Every Codex case here is about the filesystem legs, so the stub `codex` gives no
-    `skills/list` catalog and discovery takes its fallback scan. Hermetic either way:
-    `tests/conftest.py` refuses a real `codex`."""
+    `skills/list` catalog: what discovery scans is then on-disk evidence, and only conductor's
+    own checkout, the dev roots and `prompts/` count. Hermetic either way: `tests/conftest.py`
+    refuses a real `codex`."""
     codex_stub.put_on_path(monkeypatch, tmp_path / "stub-bin")
 
 
@@ -111,7 +112,11 @@ def test_discovered_commands_finds_a_bare_user_skill_under_the_host_source_root(
     (skill / "SKILL.md").write_text(
         "---\nname: document-release\ndescription: d\n---\n"
     )
-    assert "document-release" in discovery.adapter_for(host_id).discovered_commands()
+    snapshot = discovery.adapter_for(host_id).host_skills()
+    # Without Codex's catalog (the autouse stub gives none) a Codex skill on disk is evidence,
+    # not a command; Claude has no catalog and counts its source root directly.
+    found = snapshot.on_disk if host_id == "codex" else snapshot.commands
+    assert "document-release" in found
 
 
 def test_claude_discovers_the_marketplace_plugin_cache(monkeypatch, tmp_path):
@@ -136,9 +141,8 @@ def test_codex_discovers_a_project_local_skill(monkeypatch, tmp_path):
     skill = project / ".codex" / "skills" / "code-review"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: code-review\ndescription: d\n---\n")
-    assert "code-review" in discovery.adapter_for("codex").discovered_commands(
-        project_root=str(project)
-    )
+    snapshot = discovery.adapter_for("codex").host_skills(project_root=str(project))
+    assert "code-review" in snapshot.on_disk
 
 
 def test_codex_discovers_a_prompt_as_a_command(monkeypatch, tmp_path):

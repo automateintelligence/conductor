@@ -35,6 +35,11 @@ _SKILLS = {
     "empty-frontmatter": "---\n---\n",
     "no-frontmatter": "description: d\n",
     "long-name": f"---\nname: {'n' * 65}\ndescription: d\n---\n",
+    "bracket": "---\nname: bracket\ndescription: [\n---\n",
+    "colon": "---\nname: colon\ndescription: Build for AWS: ECS\n---\n",
+    "tab": "---\nname: tab\ndescription:\td\n---\n",
+    "list-description": "---\nname: list-description\ndescription: [a, b]\n---\n",
+    "null-description": "---\nname: null-description\ndescription: null\n---\n",
 }
 
 
@@ -59,5 +64,5 @@ def test_the_real_catalog_agrees_with_the_fallback_rule(tmp_path, monkeypatch):
         if str(s.get("path", "")).startswith(str(home / "skills"))
     }
     listed -= {s["name"] for s in catalog if "/.system/" in str(s.get("path", ""))}
-    assert listed == {"claude", "nameless", "beta"}, listed
+    assert listed == {"claude", "nameless", "beta", "bracket", "colon", "tab"}, listed
     assert codex.codex_skill_names(f"{home}/skills/*/SKILL.md") == listed

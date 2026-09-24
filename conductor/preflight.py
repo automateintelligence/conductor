@@ -139,6 +139,7 @@ def _advice(
     unlocatable: frozenset[str] = frozenset(),
     expired: str | None = None,
     contested: frozenset[str] = frozenset(),
+    on_disk: frozenset[str] = frozenset(),
 ) -> list[str]:
     """One actionable line per missing skill, one per unverifiable one, then the dependency
     note when it applies.
@@ -154,6 +155,9 @@ def _advice(
     install it points at the one thing that is not wrong. And an expired probe (``expired``) is
     neither: the host was never able to answer, so NOTHING is known about any of them, and the
     only honest line names the probe that expired rather than guessing at a remedy per skill.
+    A host that answered without its list of loadable skills (``HostSkills.unconfirmed``) is
+    handled the same way, with its own reason in place of the expiry. ``on_disk`` names what a
+    filesystem scan found: it earns a sentence in the line, never a pass.
 
     The note is the Track A answer to a packaging fact A3 verified against codex-cli 0.147.0:
     ``.codex-plugin/plugin.json`` has no ``dependencies`` field — the 180 manifests in the
@@ -179,9 +183,16 @@ def _advice(
             )
     for name in unverified:
         if expired is not None:
+            seen = adapter.native_invocation(name).lstrip("/$") in on_disk
             lines.append(
                 f"{adapter.native_invocation(name)} — {adapter.id} could not be asked what is "
                 f"installed, so this is neither confirmed present nor confirmed absent."
+                + (
+                    " A skill of this name is on disk, but only the host's own answer says "
+                    "whether it loads."
+                    if seen
+                    else ""
+                )
             )
             continue
         plugin = name.split(":", 1)[0]
@@ -226,6 +237,7 @@ def check(
     # nothing else, so it knows of no unlocatable plugin — never a leftover from another host.
     expired: str | None = None
     contested: frozenset[str] = frozenset()
+    on_disk: frozenset[str] = frozenset()
     if available is not None:
         avail, unlocatable = available, frozenset()
     else:
@@ -244,6 +256,11 @@ def check(
             )
         avail, unlocatable = snapshot.commands, snapshot.unverifiable_plugins
         contested = snapshot.contested_plugins
+        on_disk = snapshot.on_disk
+        # The host answered, but not with its own list of loadable skills. Same policy as an
+        # expiry: what was found on disk is evidence, not a pass.
+        if expired is None and snapshot.unconfirmed is not None:
+            expired = snapshot.unconfirmed
     # Match on the name AS THIS HOST RESOLVES IT: `native_invocation` is the single place that
     # knows how this host writes a skill name, so matching and reporting cannot drift apart
     # into a preflight that greens on a name it then prints differently.
@@ -268,7 +285,7 @@ def check(
         "missing": [adapter.native_invocation(name) for name in unresolved],
         "unverified": [adapter.native_invocation(name) for name in unverified],
         "advice": _advice(
-            adapter, unresolved, unverified, unlocatable, expired, contested
+            adapter, unresolved, unverified, unlocatable, expired, contested, on_disk
         ),
     }
 
