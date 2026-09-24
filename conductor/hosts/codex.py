@@ -92,6 +92,15 @@ PLUGIN_LIST_KILL_GRACE_S = 5
 #: fields that ARE, and then checked on disk.
 _INSTALL_CACHE = ("plugins", "cache")
 
+#: Codex names a skill by the ``name`` its SKILL.md frontmatter declares, falling back to the
+#: directory name only when none is declared. Measured against codex-cli 0.155.0's own
+#: ``skills/list``: ``dir-a/`` declaring ``name: alpha`` lists as ``alpha``; ``name: "beta"`` as
+#: ``beta``; a SKILL.md with no ``name`` as its directory. gstack relies on the first case — its
+#: Codex installer links ``$CODEX_HOME/skills/gstack-claude/`` declaring ``name: claude`` — so a
+#: directory-name discovery reports ``$claude`` missing on a machine where Codex lists it. Claude
+#: Code resolves user skills by directory name, so this rule is Codex's alone.
+_SKILL_NAMER: discovery.SkillNamer = discovery.declared_skill_names
+
 #: Characters that may follow the first one in a plugin-identity segment, beyond ASCII
 #: alphanumerics. Declared beside the predicate because ``PLUGIN_ROOT_SNIPPET`` spells the same
 #: set and the two are compared by a test that RUNS both.
@@ -863,14 +872,15 @@ class CodexAdapter:
         """
         home = self.source_root()
         project = project_root or os.getcwd()
-        cmds = discovery.skill_names(f"{home}/skills/*/SKILL.md")
+        named = _SKILL_NAMER
+        cmds = named(f"{home}/skills/*/SKILL.md")
         cmds |= discovery.command_names(f"{home}/prompts/*.md")
-        cmds |= discovery.skill_names(f"{project}/.{self.id}/skills/*/SKILL.md")
+        cmds |= named(f"{project}/.{self.id}/skills/*/SKILL.md")
         cmds |= discovery.scan_plugin_dir(
-            discovery.CONDUCTOR_ROOT, discovery.ALL_MANIFEST_DIRS
+            discovery.CONDUCTOR_ROOT, discovery.ALL_MANIFEST_DIRS, named
         )
         for root in discovery.dev_plugin_roots():
-            cmds |= discovery.scan_plugin_dir(root, (f".{self.id}-plugin",))
+            cmds |= discovery.scan_plugin_dir(root, (f".{self.id}-plugin",), named)
         # LAST, so everything above is established before the host is asked and can travel with
         # the expiry. Union order is otherwise irrelevant — these are sets.
         try:
@@ -882,7 +892,7 @@ class CodexAdapter:
                 str(expiry), partial=discovery.HostSkills(cmds, frozenset())
             ) from expiry
         for name, root in attributed.items():
-            cmds |= discovery.qualified(name, root)
+            cmds |= discovery.qualified(name, root, named)
         for root in contested:
-            cmds |= discovery.plugin_contents(root)
+            cmds |= discovery.plugin_contents(root, named)
         return discovery.HostSkills(cmds, unverifiable)

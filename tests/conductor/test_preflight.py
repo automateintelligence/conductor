@@ -185,6 +185,7 @@ def _codex_install(
     without=(),
     pin_host=True,
     roots_missing=(),
+    env_dir_prefix="",
 ):
     """A Codex machine with the conducted stack installed the way Codex installs it.
 
@@ -209,6 +210,10 @@ def _codex_install(
     install root is not on disk — the machine where the cache moved under a version bump, or an
     install landed half-written. It is a distinct state from both "installed" and "absent", and
     no fixture could express it while every listed plugin's root was unconditionally created.
+
+    `env_dir_prefix` is the gstack layout: its Codex installer links each environment-provided
+    skill in as `$CODEX_HOME/skills/gstack-<name>/` while the SKILL.md still declares
+    `name: <name>` — so the directory name and the skill's name disagree.
     """
     if pin_host:
         monkeypatch.setenv("CONDUCTOR_HOST", "codex")
@@ -219,7 +224,7 @@ def _codex_install(
     monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
     for name in ("code-review", review_wrapper, "document-release"):
-        d = home / "skills" / name
+        d = home / "skills" / f"{env_dir_prefix}{name}"
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
     sources = {}
@@ -357,6 +362,145 @@ def test_a_codex_install_missing_the_claude_wrapper_fails_closed(tmp_path, monke
     out = preflight.check(project_root=str(tmp_path / "project"))
     assert not out["ok"]
     assert "$claude" in out["missing"]
+
+
+# ------------------------------------------- Codex names a skill by its frontmatter `name`
+#
+# Measured against codex-cli 0.155.0's own `skills/list` (app-server): a SKILL.md that declares
+# `name: alpha` in a directory called `dir-a` is listed as `alpha`; a quoted `name: "beta"` is
+# `beta`; a SKILL.md with no `name` falls back to its directory name. gstack depends on the first
+# rule — it installs `gstack-claude/` declaring `name: claude` — so a discovery that reads only
+# directory names reports `$claude` missing on a machine where `$claude` is what Codex lists.
+
+
+def test_a_gstack_style_codex_install_resolves_the_environment_provided_skills(
+    tmp_path, monkeypatch
+):
+    _codex_install(tmp_path, monkeypatch, env_dir_prefix="gstack-")
+    out = preflight.check(project_root=str(tmp_path / "project"))
+    assert out["ok"], out
+
+
+def _codex_home_with(tmp_path, monkeypatch, skills):
+    """`$CODEX_HOME/skills/<dir>/SKILL.md` with the given text each, and no plugins."""
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    for dirname, text in skills.items():
+        d = home / "skills" / dirname
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(text)
+    _stub_codex_on_path(tmp_path, monkeypatch, {})
+    return home
+
+
+def test_codex_discovery_reports_the_declared_name_not_the_directory(
+    tmp_path, monkeypatch
+):
+    _codex_home_with(
+        tmp_path,
+        monkeypatch,
+        {
+            "gstack-claude": "---\nname: claude\ndescription: x\n---\nbody\n",
+            "quoted": '---\nname: "beta"\n---\n',
+            "single-quoted": "---\nname: 'gamma'\n---\n",
+            "nameless": "---\ndescription: no name\n---\n",
+        },
+    )
+    found = preflight.available_commands(
+        host_id="codex", project_root=str(tmp_path / "project")
+    )
+    assert {"claude", "beta", "gamma", "nameless"} <= found
+    assert not {"gstack-claude", "quoted", "single-quoted"} & found
+
+
+def test_a_codex_directory_named_after_a_requirement_does_not_satisfy_it(
+    tmp_path, monkeypatch
+):
+    """Name, not directory, is what Codex resolves `$claude` against. A directory called
+    `claude` that declares another name is not `$claude`, and a `gstack-claude` directory that
+    declares `gstack-claude` is not either: there is no prefix or suffix matching."""
+    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
+    _codex_home_with(
+        tmp_path,
+        monkeypatch,
+        {
+            "claude": "---\nname: something-else\n---\n",
+            "gstack-claude": "---\nname: gstack-claude\n---\n",
+        },
+    )
+    out = preflight.check(project_root=str(tmp_path / "project"))
+    assert "$claude" in out["missing"]
+
+
+def test_a_name_line_outside_the_frontmatter_is_not_a_declared_name(
+    tmp_path, monkeypatch
+):
+    _codex_home_with(
+        tmp_path,
+        monkeypatch,
+        {
+            "no-frontmatter": "name: claude\n",
+            "body-only": "---\ndescription: x\n---\nname: claude\n",
+            "nested": "---\ndescription: x\nmetadata:\n  name: claude\n---\n",
+            "empty-name": '---\nname: ""\ndescription: x\n---\n',
+        },
+    )
+    found = preflight.available_commands(
+        host_id="codex", project_root=str(tmp_path / "project")
+    )
+    assert "claude" not in found
+    # codex-cli 0.155.0 lists each of these under its directory name
+    assert {"body-only", "nested", "empty-name"} <= found
+
+
+def test_a_codex_name_is_read_as_a_yaml_scalar(tmp_path, monkeypatch):
+    _codex_home_with(
+        tmp_path,
+        monkeypatch,
+        {
+            "commented": "---\nname: delta # trailing\ndescription: x\n---\n",
+            "crlf": "---\r\nname: eps\r\ndescription: x\r\n---\r\n",
+        },
+    )
+    found = preflight.available_commands(
+        host_id="codex", project_root=str(tmp_path / "project")
+    )
+    assert {"delta", "eps"} <= found
+
+
+def test_a_codex_plugin_skill_is_qualified_by_its_declared_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    plug = tmp_path / "spec-craft"
+    (plug / ".codex-plugin").mkdir(parents=True)
+    (plug / ".codex-plugin" / "plugin.json").write_text('{"name": "spec-craft"}')
+    skill = plug / "skills" / "spec-craft-expectations"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    _stub_codex_on_path(tmp_path, monkeypatch, {})
+    monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
+    found = preflight.available_commands(
+        host_id="codex", project_root=str(tmp_path / "project")
+    )
+    assert "spec-craft:expectations" in found
+    assert "spec-craft:spec-craft-expectations" not in found
+
+
+def test_claude_discovery_still_names_a_user_skill_by_its_directory(
+    tmp_path, monkeypatch
+):
+    """Claude Code's rule is the other one: a user skill is invoked by its directory name
+    (`~/.claude/skills/connect-chrome/` declaring `name: open-gstack-browser` is
+    `/connect-chrome`). Codex's rule must not leak into the Claude adapter."""
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    d = home / "skills" / "connect-chrome"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: open-gstack-browser\n---\n")
+    found = preflight.available_commands(host_id="claude")
+    assert "connect-chrome" in found
+    assert "open-gstack-browser" not in found
 
 
 def test_required_commands_swap_only_the_opposite_host_wrapper():

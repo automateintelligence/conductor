@@ -14,12 +14,13 @@ are derived rather than written down:
   ``claude`` on a Codex-hosted one. This is the requirement that actually flips, and getting it
   wrong greens a machine that can only ever produce a same-host review.
 
-One genuine asymmetry, stated rather than papered over: on Claude the opposite-host wrapper is
-gstack's ``/codex`` skill, which exists. On Codex the mirror image is a ``claude`` wrapper,
-which nothing in the conducted stack ships today. A Codex machine without one therefore fails
-this gate — correctly. The run cannot get an opposite-host review, and reporting ``$claude``
-missing is the honest answer; silently accepting ``$codex`` would set up the same-host review
-the policy exists to forbid.
+Both wrappers ship in gstack: ``/codex`` on Claude, and on Codex a ``claude`` skill that gstack's
+Codex installer links in as ``$CODEX_HOME/skills/gstack-claude/``. The directory carries a
+``gstack-`` prefix but the SKILL.md declares ``name: claude``, and Codex resolves the declared
+name — which is why the Codex adapter's discovery reads it. No prefix is stripped and no suffix
+is matched: a skill satisfies ``$claude`` only by declaring that exact name. A Codex machine
+without one still fails this gate, correctly: silently accepting ``$codex`` would set up the
+same-host review the policy exists to forbid.
 """
 
 import os

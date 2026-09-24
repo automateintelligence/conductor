@@ -3,9 +3,10 @@
 ``base``'s standing rule is that **argv construction is never shared**. Discovery is not argv.
 It is "glob a directory, read a JSON ``name``", and it is genuinely identical on the two hosts
 because the ``SKILL.md`` format and the ``skills/<name>/`` layout are identical (ground truth
-§"Skill file format is compatible across hosts"). What *does* differ — which roots are searched
-and which manifest directory names the plugin — stays in each adapter, where a wrong answer is
-visible rather than averaged away.
+§"Skill file format is compatible across hosts"). What *does* differ — which roots are searched,
+which manifest directory names the plugin, and whether a skill is named by its directory or by
+the ``name`` its ``SKILL.md`` declares — stays in each adapter, where a wrong answer is visible
+rather than averaged away. This module supplies both naming primitives and chooses neither.
 
 Nothing here raises. Discovery answers "what is installed", and a missing, unreadable, or
 malformed directory is a legitimate answer to that question ("not this"), not an error. The
@@ -17,7 +18,7 @@ from __future__ import annotations
 import glob
 import json
 import os
-from typing import NamedTuple, Protocol, cast
+from typing import Callable, NamedTuple, Protocol, cast
 
 from conductor.hosts.base import HOST_IDS, load
 
@@ -84,9 +85,59 @@ def adapter_for(host_id: str) -> CommandDiscovery:
     return cast(CommandDiscovery, load(host_id))
 
 
+#: How a host turns a ``.../skills/*/SKILL.md`` glob into the names it resolves. Each adapter
+#: picks one of the two below and passes it to every helper that enumerates skills.
+SkillNamer = Callable[[str], set[str]]
+
+
 def skill_names(pattern: str) -> set[str]:
     """Bare skill names from a ``.../skills/*/SKILL.md`` glob — the *directory* names."""
     return {os.path.basename(os.path.dirname(p)) for p in glob.glob(pattern)}
+
+
+def _yaml_scalar(raw: str) -> str:
+    """The string value of a one-line plain or quoted YAML scalar.
+
+    Enough YAML for a ``name:`` line and no more: a quoted value ends at its closing quote, a
+    plain one at an inline `` #`` comment. Anything richer is not a skill name any host
+    accepts, and the result is compared for equality against required names, so a misread
+    value can only fail to match — never match something it should not.
+    """
+    value = raw.strip()
+    if value[:1] in ("'", '"'):
+        end = value.find(value[0], 1)
+        return value[1:end] if end > 0 else ""
+    return value.split(" #", 1)[0].strip()
+
+
+def declared_name(skill_md: str) -> str | None:
+    """The top-level ``name`` declared in a SKILL.md's leading ``---`` frontmatter, or None.
+
+    None for no frontmatter, no ``name`` key in it, an empty value, or an unreadable file. A
+    ``name:`` line in the body, or nested under another key, is not a declaration.
+    """
+    try:
+        with open(skill_md, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return None
+        if line.startswith("name:"):
+            return _yaml_scalar(line[len("name:") :]) or None
+    return None
+
+
+def declared_skill_names(pattern: str) -> set[str]:
+    """Skill names from a ``.../skills/*/SKILL.md`` glob — the declared ``name`` of each, or
+    its directory name when it declares none."""
+    return {
+        declared_name(p) or os.path.basename(os.path.dirname(p))
+        for p in glob.glob(pattern)
+    }
 
 
 def command_names(pattern: str) -> set[str]:
@@ -107,19 +158,19 @@ def manifest_name(root: str, manifest_dirs: tuple[str, ...]) -> str | None:
     return None
 
 
-def plugin_contents(root: str) -> set[str]:
+def plugin_contents(root: str, namer: SkillNamer = skill_names) -> set[str]:
     """The bare skill and command names one plugin root provides."""
-    return skill_names(f"{root}/skills/*/SKILL.md") | command_names(
-        f"{root}/commands/*.md"
-    )
+    return namer(f"{root}/skills/*/SKILL.md") | command_names(f"{root}/commands/*.md")
 
 
-def qualified(name: str, root: str) -> set[str]:
+def qualified(name: str, root: str, namer: SkillNamer = skill_names) -> set[str]:
     """``<plugin>:<skill>`` for everything in ``root``, attributed to ``name``."""
-    return {f"{name}:{n}" for n in plugin_contents(root)}
+    return {f"{name}:{n}" for n in plugin_contents(root, namer)}
 
 
-def scan_plugin_dir(root: str, manifest_dirs: tuple[str, ...]) -> set[str]:
+def scan_plugin_dir(
+    root: str, manifest_dirs: tuple[str, ...], namer: SkillNamer = skill_names
+) -> set[str]:
     """``<plugin>:<name>`` for every skill and command in one plugin root.
 
     An unnamed root yields nothing rather than a bare name: an unattributed entry cannot be
@@ -128,7 +179,7 @@ def scan_plugin_dir(root: str, manifest_dirs: tuple[str, ...]) -> set[str]:
     worst suggest a plugin the host cannot actually load.
     """
     name = manifest_name(root, manifest_dirs)
-    return qualified(name, root) if name else set()
+    return qualified(name, root, namer) if name else set()
 
 
 def dev_plugin_roots(*env_vars: str) -> list[str]:
