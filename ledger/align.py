@@ -62,7 +62,8 @@ def align(
     duplicated_sets = {s for s, n in set_counts.items() if n > 1}
 
     issues: list[dict[str, Any]] = []
-    for milestone in gh.list_milestones(repo):
+    milestones = list(gh.list_milestones(repo))
+    for milestone in milestones:
         for issue in gh.list_milestone_issues(repo, milestone["number"]):
             issue["milestone"] = milestone
             issues.append(issue)
@@ -79,19 +80,8 @@ def align(
 
     for phase_title, wanted in phase_sets.items():
         if not wanted:  # gateless phase (gate: none) — no id set to match on
+            # resolved below, once convert's milestone is known
             gateless_phases.append(phase_title)
-            # Resolve it the way `convert` will: by EXACT title. Nothing is guessed — an issue
-            # either already carries the heading character for character or it does not.
-            titled = [i for i in issues if (i.get("title") or "") == phase_title]
-            if len(titled) > 1:
-                ambiguous_phases[phase_title] = sorted(i["number"] for i in titled)
-                ambiguous_issue_numbers.update(i["number"] for i in titled)
-            elif titled:
-                gateless_pairs.append(
-                    {"title": phase_title, "issue": titled[0]["number"]}
-                )
-            else:
-                gateless_unpaired.append(phase_title)
             continue
         found = [i for i in issues if _tokens(i) == wanted]
         if wanted in duplicated_sets:  # plan-side ambiguity: never guess an assignment
@@ -116,6 +106,35 @@ def align(
                 "rename": issue["title"] != phase_title,
             }
         )
+
+    # Resolve each gateless phase the way `convert` will: by EXACT title, inside the ONE
+    # milestone convert looks in. `sync.generate` uses `find_milestone(plan["title"])`, which
+    # after `--apply` is the milestone the token-set matches live in (renamed to the plan
+    # title); with no such rename it is whichever milestone already carries the plan title,
+    # and with none convert CREATES the milestone, so nothing can be reused. An issue with the
+    # heading in any other milestone is invisible to convert — pairing it would report a
+    # reuse that becomes a duplicate phase issue. Nothing is guessed: an issue either already
+    # carries the heading character for character in that milestone or it does not.
+    if len(matched_milestones) == 1:
+        convert_milestone: int | None = next(iter(matched_milestones))
+    else:
+        convert_milestone = next(
+            (m["number"] for m in milestones if m.get("title") == plan["title"]), None
+        )
+    for phase_title in gateless_phases:
+        titled = [
+            i
+            for i in issues
+            if i["milestone"]["number"] == convert_milestone
+            and (i.get("title") or "") == phase_title
+        ]
+        if len(titled) > 1:
+            ambiguous_phases[phase_title] = sorted(i["number"] for i in titled)
+            ambiguous_issue_numbers.update(i["number"] for i in titled)
+        elif titled:
+            gateless_pairs.append({"title": phase_title, "issue": titled[0]["number"]})
+        else:
+            gateless_unpaired.append(phase_title)
 
     unmatched_issues = sorted(
         i["number"]

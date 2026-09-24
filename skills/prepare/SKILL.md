@@ -77,7 +77,8 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
    **PAIRING GATE — the precondition is `gateless_unpaired == []`: do not run `convert` while
    that bucket has an entry the owner has not explicitly dispositioned.** A `gate: none` phase
    has no assertion-id set to match on, so align resolves it the way `convert` will — by EXACT
-   title — and splits the outcome in two: `gateless_pairs` (an issue already carries the phase
+   title, inside the one milestone convert looks in (the milestone carrying the plan title
+   after `--apply`) — and splits the outcome in two: `gateless_pairs` (an issue already carries the phase
    heading character for character, so convert reuses it) and `gateless_unpaired` (none does,
    so convert WILL create one). That second bucket is the whole risk: convert resolves each
    phase issue by exact title, so a paraphrased issue is missed and a second, duplicate phase
@@ -89,7 +90,8 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
    Take exactly one decision per `gateless_unpaired` entry:
    - some markerless issue IS this phase → **rename the issue to the phase heading exactly**
      — character for character, em dash and all; this string is the match key, not a label —
-     then re-run the dry run and confirm the phase moved into `gateless_pairs`; or
+     and, if it sits in a different milestone, move it into the plan's milestone; then re-run
+     the dry run and confirm the phase moved into `gateless_pairs`; or
    - no existing issue is this phase → the owner says so explicitly, accepting that `convert`
      will create one. Record the decision: after the fact, a duplicate phase issue created by
      surprise and an issue created on purpose look identical.

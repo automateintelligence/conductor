@@ -320,9 +320,11 @@ def test_a_gateless_phase_with_no_exact_title_issue_is_unpaired():
 
 def test_two_issues_carrying_the_phase_heading_are_ambiguous_not_paired():
     # convert would reuse one of them and leave the other; which one is not align's to guess,
-    # and `ledger align` exits nonzero on ambiguity, so the owner sees it.
+    # and `ledger align` exits nonzero on ambiguity, so the owner sees it. Both sit in the
+    # milestone convert will use (the one carrying the plan title) — the only place where two
+    # same-titled issues compete for convert's lookup.
     g = _gh(
-        [{"number": 1, "title": "W"}],
+        [{"number": 1, "title": _plan()["title"]}],
         {
             1: [
                 {"number": 42, "title": "Phase 3 — Glue — OPTIONAL", "body": ""},
@@ -346,3 +348,71 @@ def test_pairing_a_gateless_phase_renames_nothing():
     report = align.align("o/r", _plan(), g, apply=True)
     assert [m["issue"] for m in report["matches"]] == []
     g.update_issue_title.assert_not_called()
+
+
+# --- the gateless pairing is scoped to the milestone `convert` will use ------------------
+#
+# `sync.generate` looks a phase issue up by exact title INSIDE one milestone: the one titled
+# like the plan (`find_milestone(plan["title"])`), which `align --apply` produces by renaming
+# the milestone its token-set matches live in. Pairing across every milestone reported an
+# issue as reused when convert would never see it, and a duplicate phase issue followed.
+
+
+def test_an_exact_title_issue_in_another_milestone_is_not_a_pairing():
+    g = _gh(
+        [{"number": 1, "title": "W"}, {"number": 2, "title": "An older plan"}],
+        {
+            1: [{"number": 10, "title": "x (A3, A4)", "body": ""}],
+            2: [{"number": 42, "title": "Phase 3 — Glue — OPTIONAL", "body": ""}],
+        },
+    )
+    report = align.align("o/r", _plan(), g)
+    assert report["milestone"]["number"] == 1  # convert's milestone after --apply
+    assert report["gateless_pairs"] == []
+    assert report["gateless_unpaired"] == ["Phase 3 — Glue — OPTIONAL"]
+
+
+def test_a_second_same_titled_issue_in_another_milestone_is_not_an_ambiguity():
+    g = _gh(
+        [{"number": 1, "title": "W"}, {"number": 2, "title": "An older plan"}],
+        {
+            1: [
+                {"number": 10, "title": "x (A3, A4)", "body": ""},
+                {"number": 42, "title": "Phase 3 — Glue — OPTIONAL", "body": ""},
+            ],
+            2: [{"number": 44, "title": "Phase 3 — Glue — OPTIONAL", "body": ""}],
+        },
+    )
+    report = align.align("o/r", _plan(), g)
+    assert report["ambiguous_phases"] == {}
+    assert report["gateless_pairs"] == [
+        {"title": "Phase 3 — Glue — OPTIONAL", "issue": 42}
+    ]
+
+
+def test_with_no_matched_milestone_the_plan_titled_one_is_convert_s():
+    # no token-set match renames anything, so convert reuses the milestone already carrying
+    # the plan's title
+    title = _plan()["title"]
+    g = _gh(
+        [{"number": 1, "title": "W"}, {"number": 2, "title": title}],
+        {
+            1: [{"number": 41, "title": "Phase 3 — Glue — OPTIONAL", "body": ""}],
+            2: [{"number": 42, "title": "Phase 3 — Glue — OPTIONAL", "body": ""}],
+        },
+    )
+    report = align.align("o/r", _plan(), g)
+    assert report["gateless_pairs"] == [
+        {"title": "Phase 3 — Glue — OPTIONAL", "issue": 42}
+    ]
+
+
+def test_with_no_milestone_convert_could_reuse_every_gateless_phase_is_unpaired():
+    # convert will CREATE the milestone, so no existing issue can be reused
+    g = _gh(
+        [{"number": 1, "title": "W"}],
+        {1: [{"number": 42, "title": "Phase 3 — Glue — OPTIONAL", "body": ""}]},
+    )
+    report = align.align("o/r", _plan(), g)
+    assert report["gateless_pairs"] == []
+    assert report["gateless_unpaired"] == ["Phase 3 — Glue — OPTIONAL"]
