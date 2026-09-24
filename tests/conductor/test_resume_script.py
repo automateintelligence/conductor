@@ -3075,9 +3075,7 @@ def test_a_fire_whose_leader_exits_does_not_leave_its_group_running(
 #: The two lines of the rendered driver the unkillable-survivor seam rewrites. Asserted present
 #: before rewriting, so a template change that moves them fails loudly instead of silently
 #: testing an unmodified driver.
-_FIRE_ALIVE_LINE = (
-    '    kill -0 -"$FIRE_PID" 2>/dev/null || kill -0 "$FIRE_PID" 2>/dev/null\n'
-)
+_FIRE_ALIVE_LINE = "fire_alive() {\n"
 _FIRE_KILL_LINE = '        kill -KILL -"$FIRE_PID" 2>/dev/null || kill -KILL "$FIRE_PID" 2>/dev/null || true\n'
 
 
@@ -3102,7 +3100,7 @@ def test_a_fire_member_that_survives_kill_fails_loud_instead_of_releasing_silent
     )
     text = text.replace(
         _FIRE_ALIVE_LINE,
-        '    [ -n "${SEAM_KILL_SENT:-}" ] && return 0\n' + _FIRE_ALIVE_LINE,
+        _FIRE_ALIVE_LINE + '    [ -n "${SEAM_KILL_SENT:-}" ] && return 0\n',
     ).replace(_FIRE_KILL_LINE, _FIRE_KILL_LINE + "        SEAM_KILL_SENT=1\n")
     driver.write_text(text)
     try:
@@ -3119,6 +3117,90 @@ def test_a_fire_member_that_survives_kill_fails_loud_instead_of_releasing_silent
     assert any(m in line for m in driver_mod._FAILURE_MARKERS), (
         f"`conductor driver status` would not report {line!r} as a failure"
     )
+
+
+#: A hung fire (ignores TERM, so the expiry escalates to KILL) whose process group ends up
+#: holding a ZOMBIE: a helper leaves the group, forks a child that JOINS the fire's group and
+#: exits, and never reaps it. The helper stays alive (bounded) outside the group, so the zombie
+#: outlives the KILL exactly as one does under a PID 1 or subreaper that does not reap. The
+#: zombie's pid is written to ``{zpid}`` so the test can prove the fixture really produced one.
+_ZOMBIE_LEAVING_FIRE = """#!/usr/bin/env python3
+import os, signal, time
+for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(sig, signal.SIG_IGN)
+PIDS, ZPID = {pids!r}, {zpid!r}
+group = os.getpgid(0)
+with open(PIDS, "a") as handle:
+    handle.write(str(os.getpid()) + chr(10))
+helper = os.fork()
+if helper == 0:
+    os.setpgid(0, 0)
+    child = os.fork()
+    if child == 0:
+        os.setpgid(0, group)
+        with open(ZPID + ".tmp", "w") as handle:
+            handle.write(str(os.getpid()))
+        os.rename(ZPID + ".tmp", ZPID)
+        os._exit(0)
+    time.sleep(30)  # never waits on `child`
+    os._exit(0)
+with open(PIDS, "a") as handle:
+    handle.write(str(helper) + chr(10))
+deadline = time.time() + 10
+while not os.path.exists(ZPID) and time.time() < deadline:
+    time.sleep(0.05)
+while True:
+    signal.pause()
+"""
+
+
+def _proc_state_and_group(pid):
+    """(state, pgrp) from /proc/<pid>/stat, or None once the pid is gone."""
+    try:
+        stat_line = open(f"/proc/{pid}/stat", encoding="utf-8").read()
+    except OSError:
+        return None
+    fields = stat_line.rsplit(")", 1)[1].split()
+    return fields[0], int(fields[2])
+
+
+def test_a_zombie_left_in_the_fire_group_is_not_reported_unkillable(
+    tmp_path, short_fire_bounds
+):
+    """Issue #98. `kill -0` succeeds on an unreaped zombie, so a group whose every member has
+    exited could still read as alive after the KILL and be reported `fire-unkillable` (exit 102)
+    for what was a clean shutdown. A zombie runs nothing and holds no descriptors."""
+    if not _which("bash") or not os.path.isdir("/proc/self"):
+        pytest.skip("needs bash and /proc")
+    zpid_file = tmp_path / "zombie.pid"
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _ZOMBIE_LEAVING_FIRE.format(
+            pids=str(tmp_path / "fire.pids"), zpid=str(zpid_file)
+        ),
+    )
+    try:
+        proc, elapsed = _fire_supervised(driver, home, pids, timeout=90)
+        log = _log_of(project)
+        leader = int(pids.read_text().split()[0])
+        zombie = int(zpid_file.read_text()) if zpid_file.exists() else None
+        zombie_state = _proc_state_and_group(zombie) if zombie else None
+    finally:
+        _reap(pids)
+
+    assert zombie_state is not None and zombie_state[0] == "Z", (
+        f"the fixture never left a zombie behind, so nothing was measured: {zombie_state}"
+    )
+    assert zombie_state[1] == leader, (
+        "the zombie is not in the fire's group",
+        zombie_state,
+    )
+    assert "fire-unkillable" not in log, log
+    assert proc.returncode == 137, (
+        proc.returncode,
+        log,
+    )  # the KILL settled the live members
+    assert elapsed < 45, (elapsed, log)
 
 
 # ---- the expiry report names WHICH RUN stalled -----------------------------------------------

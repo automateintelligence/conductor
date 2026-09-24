@@ -351,6 +351,24 @@ def fire_supervision_prologue() -> str:
         "    # and leaves two workers in one tree. The leader is asked too, so a shell that\n"
         "    # could not give the fire its own group degrades to the narrower answer rather\n"
         "    # than to none.\n"
+        "    #\n"
+        "    # A ZOMBIE IS NOT ALIVE. `kill -0` succeeds on an exited-but-unreaped member, and under\n"
+        "    # a PID 1 or subreaper that does not reap, one can sit in the group indefinitely: it\n"
+        "    # runs nothing and holds no descriptors, but it made a clean KILL read as\n"
+        "    # `fire-unkillable` and made every drain spend its whole grace on nothing. With `ps`,\n"
+        "    # members in state Z are therefore not counted — in every caller, the drains included,\n"
+        "    # because a group of zombies has already finished. With no `ps` (or a `ps` that\n"
+        "    # answers nothing) this falls back to `kill -0`, which cannot see process state: it\n"
+        "    # counts a zombie as alive, so the fallback errs toward a loud `fire-unkillable`\n"
+        "    # and a full grace wait, never toward releasing the lock over a live process.\n"
+        '    if [ -n "$FIRE_PS" ] && fire_table="$("$FIRE_PS" -eo pid=,pgid=,stat= 2>/dev/null)" \\\n'
+        '        && [ -n "$fire_table" ]; then\n'
+        '        printf \'%s\\n\' "$fire_table" | awk -v g="$FIRE_PID" \\\n'
+        "            '($1 == g || $2 == g) && $3 !~ /^Z/ { f = 1 } END { exit !f }'\n"
+        "        # EXPLICIT status: a bare `return` inside a trap handler (the TERM trap calls\n"
+        "        # `fire_shutdown`) returns the status of whatever ran BEFORE the trap, not awk's.\n"
+        '        return "$?"\n'
+        "    fi\n"
         '    kill -0 -"$FIRE_PID" 2>/dev/null || kill -0 "$FIRE_PID" 2>/dev/null\n'
         "}\n"
         "fire_drain() {\n"
@@ -385,8 +403,8 @@ def fire_supervision_prologue() -> str:
         "    if fire_alive; then\n"
         '        fire_left="unknown"\n'
         '        if [ -n "$FIRE_PS" ]; then\n'
-        '            fire_left="$("$FIRE_PS" -eo pid=,pgid= 2>/dev/null | awk -v g="$FIRE_PID" \'\n'
-        '                $2 == g { printf "%s%s", s, $1; s = "," }\')"\n'
+        '            fire_left="$("$FIRE_PS" -eo pid=,pgid=,stat= 2>/dev/null | awk -v g="$FIRE_PID" \'\n'
+        '                $2 == g && $3 !~ /^Z/ { printf "%s%s", s, $1; s = "," }\')"\n'
         "        fi\n"
         "        printf '%s fire-unkillable pgid=%s pids=%s grace=%ss\\n' \\\n"
         '            "$(ts)" "$FIRE_PID" "${fire_left:-unknown}" "$FIRE_GRACE" >> "$LOG"\n'
