@@ -24,6 +24,7 @@ import signal
 import subprocess
 import textwrap
 import time
+import unicodedata
 from collections.abc import Mapping
 
 from conductor.hosts import base, discovery, proc
@@ -119,11 +120,63 @@ def codex_skill_names(pattern: str) -> set[str]:
     """
     names = set()
     for path in glob.glob(pattern):
-        block = discovery.frontmatter_block(path)
+        block = _raw_frontmatter(path)
         name = codex_frontmatter(block) if block is not None else None
         if name is not None:
             names.add(name)
     return names
+
+
+def _raw_frontmatter(path: str) -> str | None:
+    """The lines between a SKILL.md's ``---`` fences, joined by ``\\n``, or None.
+
+    Read raw and checked before anything is normalized, because every normalization is a place
+    the subset could accept what Codex rejects. The file must be UTF-8 (Codex reads it as a
+    string). Lines are split on ``\\n`` only; a ``\\r`` directly before a ``\\n`` is dropped,
+    which is what Rust's ``str::lines`` in Codex's ``extract_frontmatter`` does, and any other
+    ``\\r`` stays and is refused. Both fences must be exactly ``---``. Between them, every
+    character must pass ``_frontmatter_char``; one that does not rejects the whole file.
+    Python's ``str.splitlines`` is not used: it splits on ``\\x1c``-``\\x1e``, U+0085 and
+    U+2028/9, and would drop the very characters this refuses.
+    """
+    try:
+        with open(path, "rb") as f:
+            text = f.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    parts = text.split("\n")
+    lines = [p[:-1] if p.endswith("\r") else p for p in parts[:-1]] + parts[-1:]
+    if len(lines) < 2 or lines[0] != "---":
+        return None
+    try:
+        close = lines.index("---", 1)
+    except ValueError:
+        return None
+    block = lines[1:close]
+    if not block or not all(_frontmatter_line_chars(line) for line in block):
+        return None
+    return "\n".join(block)
+
+
+def _frontmatter_char(c: str) -> bool:
+    """Printable ASCII (0x20-0x7E), or a non-ASCII letter, mark, number, punctuation or symbol.
+
+    Refused: every control character (tab and ``\\r`` included), every format, private-use,
+    surrogate or unassigned code point (the BOM among them), and every separator but the ASCII
+    space — NBSP, U+2028, U+2029, the Unicode spaces, and U+0085 (a control character). Those are
+    exactly the characters YAML or Codex treat as something other than text: a line break, a
+    separator, or whitespace that Codex's ``split_whitespace`` would collapse. What is left, YAML
+    reads as ordinary content and Rust as a non-whitespace ``char``, so the subset's reading and
+    Codex's cannot differ over it. Non-ASCII content is kept rather than refused because
+    conductor's own skill descriptions use it (U+2014 EM DASH).
+    """
+    if " " <= c <= "~":
+        return True
+    return ord(c) > 0x7F and unicodedata.category(c)[0] in "LMNPS"
+
+
+def _frontmatter_line_chars(line: str) -> bool:
+    return all(_frontmatter_char(c) for c in line)
 
 
 #: A frontmatter line in the subset: an unindented ``key: value`` with a simple key.
@@ -140,10 +193,8 @@ _NON_STRING_WORDS = frozenset("null ~ true false yes no on off y n".split())
 
 def _subset_value(raw: str) -> str | None:
     """The string a subset value denotes, or None when it is outside the subset."""
-    value = raw.strip()
-    # Python's notion of printable is narrower than YAML's, which is the safe side: it also
-    # refuses U+0085, U+2028 and U+2029, which a YAML parser reads as line breaks.
-    if not value or not value.isprintable():
+    value = raw.strip(" ")  # ASCII space only, and only after the raw check
+    if not value:
         return None
     if value[0] == '"':
         inner = value[1:-1]
@@ -180,9 +231,11 @@ def codex_frontmatter(block: str) -> str | None:
     fields: dict[str, str] = {}
     plain: set[str] = set()
     for line in block.split("\n"):
-        if not line.strip():
+        if not _frontmatter_line_chars(line):
+            return None
+        if not line.strip(" "):
             continue
-        match = _SUBSET_LINE.fullmatch(line.rstrip("\r"))
+        match = _SUBSET_LINE.fullmatch(line)
         if match is None or match.group(1) in fields:
             return None
         key, raw = match.groups()
@@ -190,12 +243,13 @@ def codex_frontmatter(block: str) -> str | None:
         if value is None:
             return None
         fields[key] = value
-        if raw.strip()[0] not in "'\"":
+        if raw.strip(" ")[0] not in "'\"":
             plain.add(key)
     if "metadata" in fields:
         return None
     for key in ("name", "description"):
-        value = " ".join(fields.get(key, "").split())
+        # Codex collapses whitespace runs; the only whitespace the subset admits is the space.
+        value = " ".join(word for word in fields.get(key, "").split(" ") if word)
         if not value:
             return None
         if key in plain and (

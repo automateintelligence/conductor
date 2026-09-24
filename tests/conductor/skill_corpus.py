@@ -16,6 +16,7 @@ NAMES = (
     "name: g{i} # c",
     "name: &a g{i}",
     "name: true",
+    'name:\u00a0"g{i}"',
     None,
 )
 DESCRIPTIONS = (
@@ -31,6 +32,17 @@ DESCRIPTIONS = (
     "description: x # y",
     'description: "esc\\n"',
     "description: |",
+    "description:  d",
+    "description: d\u001f",
+    "description: a\u00a0b",
+    "description: a\u2028b",
+    "description: a\u0085b",
+    "description: a\u001cb",
+    "description: a\tb",
+    "description: a\rb",
+    "description: a\u200bb",
+    "description: a\u3000b",
+    "description: naïve — «ok» ✓ 日本",
 )
 EXTRAS = (
     None,
@@ -41,6 +53,7 @@ EXTRAS = (
     "",
     "name: dup{i}",
     "  continued",
+    "\u0001",
 )
 
 

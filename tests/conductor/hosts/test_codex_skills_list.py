@@ -373,6 +373,15 @@ ACCEPTED = {
     ),
     "crlf": ("---\r\nname: crlf\r\ndescription: d\r\n---\r\n", "crlf"),
     "max-name": (f"---\nname: {'m' * 64}\ndescription: d\n---\n", "m" * 64),
+    "double-space": ('---\nname:  "dbl"\ndescription:   d\n---\n', "dbl"),
+    "non-ascii-body": (
+        "---\nname: body\ndescription: d\n---\ncafé \u2028 ok\n",
+        "body",
+    ),
+    "non-ascii-text": (
+        "---\nname: café\ndescription: naïve — «ok» ✓ 日本\n---\n",
+        "café",
+    ),
 }
 
 REJECTED = {
@@ -415,6 +424,23 @@ REJECTED = {
     "bad-key": "---\nname: key\ndescription: d\nbad key: v\n---\n",
     "empty-value": "---\nname: empty\ndescription: d\nfoo:\n---\n",
     "document-marker": "---\nname: doc\ndescription: d\n...\n---\n",
+    # round 3: between the fences only printable ASCII, \n (or \r\n), and non-ASCII letters,
+    # marks, numbers, punctuation and symbols — checked raw, before anything is normalized
+    "nbsp-separator": '---\nname:\u00a0"x"\ndescription: d\n---\n',
+    "unit-separator": "---\nname: us\ndescription: d\u001f\n---\n",
+    "nbsp-value": "---\nname: nbsp\ndescription: a\u00a0b\n---\n",
+    "line-separator": "---\nname: ls\ndescription: a\u2028b\n---\n",
+    "paragraph-separator": "---\nname: ps\ndescription: a\u2029b\n---\n",
+    "next-line": "---\nname: nel\ndescription: a\u0085b\n---\n",
+    "file-separator": "---\nname: fs\ndescription: a\u001cb\n---\n",
+    "tab-in-value": "---\nname: tab\ndescription: a\tb\n---\n",
+    "lone-cr": "---\nname: cr\ndescription: a\rb\n---\n",
+    "zero-width-space": "---\nname: zw\ndescription: a\u200bb\n---\n",
+    "private-use": "---\nname: pua\ndescription: a\ue000b\n---\n",
+    "ideographic-space": "---\nname: ideo\ndescription: a\u3000b\n---\n",
+    "control-only-line": "---\nname: ctl\ndescription: d\n\u0001\n---\n",
+    "control-only-line-2": "---\nname: ctl\n\u001c\ndescription: d\n---\n",
+    "bom": "\ufeff---\nname: bom\ndescription: d\n---\n",
 }
 
 
@@ -422,7 +448,7 @@ def _names(tmp_path, skills):
     for dirname, text in skills.items():
         d = tmp_path / "skills" / dirname
         d.mkdir(parents=True)
-        (d / "SKILL.md").write_text(text, newline="")
+        (d / "SKILL.md").write_text(text, encoding="utf-8", newline="")
     return codex.codex_skill_names(f"{tmp_path}/skills/*/SKILL.md")
 
 
@@ -442,6 +468,13 @@ def test_the_generated_corpus_exercises_both_sides_of_the_subset(tmp_path):
     files = skill_corpus.corpus()
     accepted = _names(tmp_path, files)
     assert 0 < len(accepted) < len(files)
+
+
+def test_a_file_that_is_not_utf8_is_rejected(tmp_path):
+    d = tmp_path / "skills" / "latin1"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_bytes(b"---\nname: latin1\ndescription: d\n---\ncaf\xe9\n")
+    assert codex.codex_skill_names(f"{tmp_path}/skills/*/SKILL.md") == set()
 
 
 def test_conductors_own_skills_are_inside_the_subset():

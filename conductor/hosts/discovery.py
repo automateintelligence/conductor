@@ -7,7 +7,8 @@ because the ``SKILL.md`` format and the ``skills/<name>/`` layout are identical 
 which manifest directory names the plugin, whether a skill is named by its directory or by the
 ``name`` its ``SKILL.md`` declares, and which SKILL.md files the host refuses to load — stays in
 each adapter, where a wrong answer is visible rather than averaged away. This module supplies
-the primitives (``skill_names``, ``frontmatter_block``) and chooses neither rule.
+the directory-name primitive (``skill_names``); a host that reads SKILL.md contents does its
+own raw read, in its adapter.
 
 Nothing here raises. Discovery answers "what is installed", and a missing, unreadable, or
 malformed directory is a legitimate answer to that question ("not this"), not an error. The
@@ -109,26 +110,6 @@ SkillNamer = Callable[[str], set[str]]
 def skill_names(pattern: str) -> set[str]:
     """Bare skill names from a ``.../skills/*/SKILL.md`` glob — the *directory* names."""
     return {os.path.basename(os.path.dirname(p)) for p in glob.glob(pattern)}
-
-
-def frontmatter_block(skill_md: str) -> str | None:
-    """The text between a SKILL.md's leading ``---`` and the next ``---``, or None.
-
-    None when the first line is not ``---``, no closing ``---`` follows, nothing sits between
-    them, or the file cannot be read. This only extracts the block; whether its contents make a
-    loadable skill is each host's own rule, applied by that host's adapter.
-    """
-    try:
-        with open(skill_md, encoding="utf-8") as f:
-            lines = f.read().splitlines()
-    except (OSError, UnicodeDecodeError):
-        return None
-    if not lines or lines[0].strip() != "---":
-        return None
-    for close, line in enumerate(lines[1:], 1):
-        if line.strip() == "---":
-            return "\n".join(lines[1:close]) if close > 1 else None
-    return None
 
 
 def command_names(pattern: str) -> set[str]:
