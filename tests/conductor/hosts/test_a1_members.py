@@ -18,6 +18,15 @@ import os
 import pytest
 
 from conductor.hosts import base, discovery
+from tests.conductor import codex_stub
+
+
+@pytest.fixture(autouse=True)
+def _codex_without_a_catalog(monkeypatch, tmp_path):
+    """Every Codex case here is about the filesystem legs, so the stub `codex` gives no
+    `skills/list` catalog and discovery takes its fallback scan. Hermetic either way:
+    `tests/conftest.py` refuses a real `codex`."""
+    codex_stub.put_on_path(monkeypatch, tmp_path / "stub-bin")
 
 
 @pytest.fixture

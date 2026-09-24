@@ -7,7 +7,8 @@ nearest plugin manifest, the `enabled` flag, and the SKILL.md files it rejected.
 codex-cli 0.155.0: no auth needed, about 1.5s against a populated `$CODEX_HOME`, and it lists
 `~/.agents/skills/superpowers/<skill>` as `superpowers:<skill>`.
 
-These tests drive a stub `codex` that speaks the same JSON-RPC over stdio. When Codex cannot
+These tests drive the stub `codex` in `tests/conductor/codex_stub.py`, which replays JSON-RPC
+recorded from codex-cli 0.155.0 (`tests/conductor/fixtures/`). When Codex cannot
 answer — not installed, an error, output that is not the protocol — discovery falls back to
 scanning the filesystem, and there it applies Codex's own SKILL.md validity rule.
 """
@@ -15,13 +16,11 @@ scanning the filesystem, and there it applies Codex's own SKILL.md validity rule
 from __future__ import annotations
 
 import json
-import os
-import shutil
-
 import pytest
 
 from conductor import preflight
 from conductor.hosts import codex
+from tests.conductor import codex_stub
 
 _REQUIRED_ON_CODEX = (
     "spec-craft:expectations",
@@ -36,27 +35,6 @@ _REQUIRED_ON_CODEX = (
     "document-release",
 )
 
-_STUB = """#!{python}
-import json, sys, time
-args = sys.argv[1:]
-if args[:3] == ["plugin", "list", "--json"]:
-    print(json.dumps({plugins}))
-    sys.exit(0)
-if args[:1] != ["app-server"]:
-    sys.exit(0)
-if {hang}:
-    time.sleep(60)
-for line in sys.stdin:
-    msg = json.loads(line)
-    if msg.get("id") == 0:
-        print(json.dumps({{"id": 0, "result": {{}}}}), flush=True)
-    elif msg.get("id") == 1:
-        with open({record!r}, "w") as f:
-            json.dump(msg, f)
-        print(json.dumps({{"method": "remoteControl/status/changed", "params": {{}}}}), flush=True)
-        print(json.dumps({answer}), flush=True)
-"""
-
 
 def _skill(name, path=None, enabled=True, plugin_id=None):
     return {
@@ -70,7 +48,11 @@ def _skill(name, path=None, enabled=True, plugin_id=None):
 
 
 def _stub(tmp_path, monkeypatch, *, skills=(), errors=(), answer=None, hang=False):
-    """A `codex` on PATH whose `app-server` answers `skills/list` with `skills`."""
+    """A stub `codex` whose `app-server` answers `skills/list` with `skills` (or `answer`).
+
+    The `initialize` reply is the one recorded from codex-cli 0.155.0; the `skills/list` reply
+    has the recorded shape with the entries each test needs.
+    """
     home = tmp_path / "codex-home"
     home.mkdir(exist_ok=True)
     monkeypatch.setenv("CODEX_HOME", str(home))
@@ -88,25 +70,16 @@ def _stub(tmp_path, monkeypatch, *, skills=(), errors=(), answer=None, hang=Fals
                 ]
             },
         }
-    bindir = tmp_path / "stub-bin"
-    bindir.mkdir(exist_ok=True)
-    exe = bindir / "codex"
-    record = tmp_path / "skills-list-request.json"
-    exe.write_text(
-        _STUB.format(
-            python=shutil.which("python3"),
-            plugins=repr({"installed": []}),
-            hang=hang,
-            record=str(record),
-            answer=repr(answer),
-        )
+    initialize = codex_stub.recorded_app_server(
+        codex_home=str(home), cwd=str(tmp_path), home=str(tmp_path)
+    )[0]
+    codex_stub.put_on_path(
+        monkeypatch,
+        tmp_path / "stub-bin",
+        app_server=[initialize, json.dumps(answer)],
+        hang=hang,
     )
-    os.chmod(exe, 0o755)
-    git = shutil.which("git")
-    assert git
-    (bindir / "git").symlink_to(git)
-    monkeypatch.setenv("PATH", str(bindir))
-    return home, record
+    return home
 
 
 def test_skills_codex_lists_are_what_discovery_reports(tmp_path, monkeypatch):
@@ -125,10 +98,8 @@ def test_the_catalog_is_asked_about_the_project_being_preflighted(
     tmp_path, monkeypatch
 ):
     """Repo `.agents/skills` and project `.codex/skills` depend on the cwd Codex is asked for."""
-    _, record = _stub(tmp_path, monkeypatch, skills=[_skill("claude")])
     project = tmp_path / "project"
-    preflight.available_commands(host_id="codex", project_root=str(project))
-    request = json.loads(record.read_text())
+    request = json.loads(codex._skills_list_request(str(project)).splitlines()[-1])
     assert request["method"] == "skills/list"
     assert request["params"]["cwds"] == [str(project)]
 
@@ -156,7 +127,7 @@ def test_a_codex_machine_equipped_through_agents_skills_passes_preflight(
 def test_a_skill_on_disk_that_codex_does_not_list_is_not_counted(tmp_path, monkeypatch):
     """Codex's answer wins over the directory: a SKILL.md Codex rejected or never scanned is not
     invocable, however it looks on disk."""
-    home, _ = _stub(tmp_path, monkeypatch, skills=[])
+    home = _stub(tmp_path, monkeypatch, skills=[])
     d = home / "skills" / "claude"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text("---\nname: claude\ndescription: d\n---\n")
@@ -202,7 +173,7 @@ def test_a_qualified_name_codex_lists_twice_is_unverified(tmp_path, monkeypatch)
     ],
 )
 def test_an_unusable_answer_falls_back_to_the_filesystem(tmp_path, monkeypatch, answer):
-    home, _ = _stub(tmp_path, monkeypatch, answer=answer)
+    home = _stub(tmp_path, monkeypatch, answer=answer)
     d = home / "skills" / "gstack-claude"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text("---\nname: claude\ndescription: d\n---\n")
@@ -237,7 +208,7 @@ def test_a_catalog_that_never_answers_is_unverified_and_says_which_probe(
 
 
 def _fallback_home(tmp_path, monkeypatch, skills):
-    home, _ = _stub(tmp_path, monkeypatch, answer={"id": 1, "error": {}})
+    home = _stub(tmp_path, monkeypatch, answer={"id": 1, "error": {}})
     for dirname, text in skills.items():
         d = home / "skills" / dirname
         d.mkdir(parents=True)
@@ -276,3 +247,38 @@ def test_the_fallback_counts_what_codex_accepts(tmp_path, monkeypatch):
         },
     )
     assert {"plain", "block", "m" * 64} <= found, found
+
+
+# ------------------------------------------------------- recorded codex-cli 0.155.0 responses
+
+
+def test_the_recorded_catalog_resolves_plugin_and_agents_skills(tmp_path, monkeypatch):
+    """Replayed verbatim from a scratch `$CODEX_HOME` with spec-craft installed from its
+    marketplace and superpowers reachable through `~/.agents/skills/superpowers`: Codex lists
+    the plugin's skills and the manifest-namespaced ones both qualified."""
+    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
+    home = tmp_path / "codex-home"
+    project = tmp_path / "project"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    codex_stub.put_on_path(
+        monkeypatch,
+        tmp_path / "stub-bin",
+        plugin_list=codex_stub.recorded_plugin_list(codex_home=str(home)),
+        app_server=codex_stub.recorded_app_server(
+            codex_home=str(home), cwd=str(project), home=str(tmp_path)
+        ),
+    )
+    found = preflight.available_commands(host_id="codex", project_root=str(project))
+    assert {
+        "spec-craft:expectations",
+        "spec-craft:executable-assertions",
+        "superpowers:writing-plans",
+        "superpowers:subagent-driven-development",
+    } <= found
+    assert "expectations" not in found and "writing-plans" not in found
+
+    out = preflight.check(project_root=str(project))
+    assert out["unverified"] == [], out
+    # That scratch home had no gstack install, so the environment-provided skills are absent.
+    assert out["missing"] == ["$code-review", "$claude", "$document-release"], out

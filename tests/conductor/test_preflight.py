@@ -9,6 +9,7 @@ import pytest
 from conductor import preflight
 from conductor.hosts import base
 from conductor.hosts import codex as codex_host
+from tests.conductor import codex_stub
 from tests.conductor.conftest import stale_version_siblings
 
 _ALL = {
@@ -752,6 +753,7 @@ def test_available_commands_uses_the_requested_hosts_root(tmp_path, monkeypatch)
     d = tmp_path / "codex-home" / "skills" / "only-on-codex"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text("---\ndescription: d\n---\n")
+    codex_stub.put_on_path(monkeypatch, tmp_path / "stub-bin")
     assert "only-on-codex" in preflight.available_commands(host_id="codex")
     assert "only-on-codex" not in preflight.available_commands(host_id="claude")
 
