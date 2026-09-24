@@ -108,13 +108,21 @@ def _commit(
     run_key: str,
     *,
     status: str,
+    expect_revision: int,
     mutate=lambda doc: doc,
 ) -> dict:
     """Write ``run.json`` and ``project.json``'s status mirror as ONE journalled transaction.
 
     ``status`` may equal the current status — ``schema.assert_transition`` allows same-to-same —
     which is how a reconciliation that only records evidence gets the same durability guarantee
-    as a status change without pretending to be one."""
+    as a status change without pretending to be one.
+
+    COMPARE-AND-SET ON ``expect_revision``, the revision the caller DECIDED on. Every verb here
+    reads the run, decides, and writes later; a transition check alone does not protect that
+    window, because ``awaiting-team-merge -> active`` is legal — a heartbeat that read ``active``
+    would otherwise silently undo a completion that landed after its read. The revision is
+    checked again under ``state.lock``, because ``runstate.commit`` writers take only that lock
+    and can advance the record after the ``project.lock`` read."""
     with locks.hold(registry.lock_path(state_root), kind="project"):
         transaction.recover(state_root)
         project_doc = registry.load(state_root)
@@ -129,6 +137,7 @@ def _commit(
                 f"no run record at {runstate.run_path(state_root, run_key)}; no write occurred. "
                 "List known runs with: conductor run list --all"
             )
+        _expect(state_root, run_key, current, expect_revision)
         schema.assert_transition(current["status"], status)
         after = mutate(schema.clone(current))
         after["status"] = status
@@ -150,6 +159,9 @@ def _commit(
         with locks.hold(
             runstate.state_lock_path(state_root, run_key), kind="state", run_key=run_key
         ):
+            _expect(
+                state_root, run_key, runstate.load(state_root, run_key), expect_revision
+            )
             txn_id = f"lifecycle-{run_key}"
             transaction.prepare(
                 state_root,
@@ -176,6 +188,20 @@ def _commit(
             transaction.commit(state_root, txn_id)
             transaction.apply(state_root, txn_id)
     return after
+
+
+def _expect(
+    state_root: str, run_key: str, current: dict | None, expect_revision: int
+) -> None:
+    if current is None or current["revision"] != expect_revision:
+        found = "no record" if current is None else f"revision {current['revision']}"
+        status = "" if current is None else f" ({current['status']})"
+        raise runstate.RevisionConflict(
+            f"run {run_key!r} was read at revision {expect_revision} but "
+            f"{runstate.run_path(state_root, run_key)} now holds {found}{status}; no write "
+            f"occurred. Something else changed the run since this verb decided. Inspect it "
+            f"with: conductor status --run {run_key}"
+        )
 
 
 def _stamp_reconciled(doc: dict) -> dict:
@@ -426,7 +452,13 @@ def cmd_resume(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return EXIT_FAIL
-    after = _commit(state_root, key, status="active", mutate=_stamp_reconciled)
+    after = _commit(
+        state_root,
+        key,
+        status="active",
+        expect_revision=run["revision"],
+        mutate=_stamp_reconciled,
+    )
     print(f"run {key} resumed: {status} -> active (revision {after['revision']})")
     # The per-run schedule is NOT reinstalled here. Design §"Heartbeat and autodev" wants
     # resume to restore it, but per-run heartbeat artifacts (`.conductor/runs/<key>/heartbeat.sh`
@@ -461,7 +493,13 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
         )
         return EXIT_FAIL
     if status == "blocked":
-        _commit(state_root, key, status="blocked", mutate=_stamp_reconciled)
+        _commit(
+            state_root,
+            key,
+            status="blocked",
+            expect_revision=run["revision"],
+            mutate=_stamp_reconciled,
+        )
         print(
             f"run {key} is blocked: reconciled and reported only, no phase advanced. "
             f"Advancing it requires: conductor resume --run {key}"
@@ -479,10 +517,29 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
         return EXIT_FAIL
     # Stamped BEFORE ownership is taken: `_commit` acquires project.lock, which ranks ahead of
     # owner.lock, so doing it inside `ownership.acquire` would be a lock-order violation.
-    _commit(state_root, key, status=status, mutate=_stamp_reconciled)
+    reconciled = _commit(
+        state_root,
+        key,
+        status=status,
+        expect_revision=run["revision"],
+        mutate=_stamp_reconciled,
+    )
     host = runhost.resolve(resolution.repo_root)
     try:
         with ownership.acquire(state_root, key, host=host) as record:
+            # Judged again UNDER ownership: the reconciliation write above had to happen before
+            # it (lock order), so the run may have left the work-capable set in between — and
+            # a fire is launched for the status ownership was taken over, not a remembered one.
+            now = runstate.load(state_root, key)
+            if now is None or now["status"] not in _WORK_CAPABLE:
+                print(
+                    f"run {key!r} moved to "
+                    f"{'(no record)' if now is None else now['status']} after this heartbeat "
+                    f"reconciled it at revision {reconciled['revision']}; no fire was launched "
+                    f"and no write occurred. Inspect it with: conductor status --run {key}",
+                    file=sys.stderr,
+                )
+                return EXIT_FAIL
             print(
                 f"run {key} fire: {host} owner {record.wrapper_identity}, launching {script}",
                 file=sys.stderr,
@@ -731,7 +788,11 @@ def _finish_reserved(
         # below, and the pull request's URL and state, are printed either way.
         try:
             run = _commit(
-                state_root, key, status=status, mutate=_record_final_pr(pull.number)
+                state_root,
+                key,
+                status=status,
+                expect_revision=run["revision"],
+                mutate=_record_final_pr(pull.number),
             )
         except (
             locks.LockTimeout,
@@ -800,7 +861,13 @@ def _finish_reserved(
         )
         return EXIT_FAIL
     deleted, kept = _delete_local_branches(resolution.repo_root, run, remote, default)
-    after = _commit(state_root, key, status="terminal", mutate=_stamp_completed)
+    after = _commit(
+        state_root,
+        key,
+        status="terminal",
+        expect_revision=run["revision"],
+        mutate=_stamp_completed,
+    )
     print(f"run {key} finished: {pull.url} merged into {default}")
     for path in removed:
         print(f"  removed worktree {path}")

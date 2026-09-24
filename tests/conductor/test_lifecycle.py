@@ -566,6 +566,64 @@ def test_heartbeat_reports_a_failing_fire(project, capsys) -> None:
     assert "fire ended rc=9" in capsys.readouterr().err
 
 
+def test_a_lifecycle_write_refuses_a_revision_it_did_not_read(project) -> None:
+    """``run.json`` writes carry the revision they read; a newer one on disk refuses the write."""
+    read_at = project.run["revision"]
+    project.status("checkpointed")
+    with pytest.raises(runstate.RevisionConflict):
+        lifecycle._commit(
+            project.state_root,
+            project.run_key,
+            status="active",
+            expect_revision=read_at,
+        )
+    assert project.run["status"] == "checkpointed"
+
+
+def test_heartbeat_does_not_reactivate_a_run_completed_after_it_was_read(
+    project, monkeypatch, capsys
+) -> None:
+    """The heartbeat reads ``active``; the run reaches ``awaiting-team-merge`` before it writes.
+
+    ``awaiting-team-merge -> active`` is a legal transition, so without a revision check the
+    heartbeat's stale write silently undid the completion and then launched a fire."""
+    marker = project.root / "fired"
+    _install_driver(project, f"#!/bin/sh\ntouch {marker}\n")
+    real = lifecycle.resolve.resolve
+
+    def read_then_complete(**kwargs):
+        resolution = real(**kwargs)
+        project.status("awaiting-team-merge")
+        return resolution
+
+    monkeypatch.setattr(lifecycle.resolve, "resolve", read_then_complete)
+    assert project.verb("heartbeat", "--run", project.run_key) == 1
+    assert "no write occurred" in capsys.readouterr().err
+    assert project.run["status"] == "awaiting-team-merge"
+    assert not marker.exists()
+
+
+def test_heartbeat_does_not_launch_a_run_that_left_work_before_ownership(
+    project, monkeypatch, capsys
+) -> None:
+    """Between the heartbeat's reconciliation write and its ownership, the run leaves the
+    work-capable set. The fire it launches must be judged on the status it holds ownership of."""
+    marker = project.root / "fired"
+    _install_driver(project, f"#!/bin/sh\ntouch {marker}\n")
+    real = lifecycle.runhost.resolve
+
+    def complete_then_resolve(root):
+        project.status("awaiting-team-merge")
+        return real(root)
+
+    monkeypatch.setattr(lifecycle.runhost, "resolve", complete_then_resolve)
+    assert project.verb("heartbeat", "--run", project.run_key) == 1
+    assert "awaiting-team-merge" in capsys.readouterr().err
+    assert project.run["status"] == "awaiting-team-merge"
+    assert not marker.exists()
+    assert ownership.read(project.state_root, project.run_key) is None
+
+
 # --- finish ---------------------------------------------------------------------------------
 
 
