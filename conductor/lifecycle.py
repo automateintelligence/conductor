@@ -591,6 +591,26 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
         return EXIT_OK
     assert status in _WORK_CAPABLE
     script = resume_script.driver_script_path(resolution.repo_root)
+    # THE BINDING CHECK AND THE LAUNCH ARE ONE CRITICAL SECTION. Every writer of the driver
+    # script (`driver install`, `resume-script write`) takes `install_lock_for(script)`; checking
+    # the binding and then launching without it let an install for another run rewrite the
+    # script in between, and the rewritten script ran under THIS run's ownership. It is held for
+    # the whole fire, not just the spawn, because the writer rewrites the file IN PLACE and bash
+    # reads its script as it executes: a rewrite mid-fire changes the running driver. A writer
+    # arriving during a fire waits `INSTALL_LOCK_TIMEOUT_S` and then fails loudly having changed
+    # nothing. Lock order: this is a `project`-rank lock on its own file, taken before
+    # `_commit`'s project.lock and ownership's owner.lock; no script writer takes either of those,
+    # so no cycle exists.
+    lock = resume_script.install_lock_for(script)
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    with locks.hold(lock, kind="project", timeout=resume_script.INSTALL_LOCK_TIMEOUT_S):
+        return _fire_bound_driver(resolution, script)
+
+
+def _fire_bound_driver(resolution: resolve.RunResolution, script: str) -> int:
+    """``heartbeat``'s launch half, under the driver script's install lock."""
+    run, state_root, key = resolution.run, resolution.state_root, resolution.run_key
+    status = run["status"]
     if not os.access(script, os.X_OK):
         print(
             f"run {key!r} is {status} but its durable driver {script} is missing or not "

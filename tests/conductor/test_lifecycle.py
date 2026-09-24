@@ -632,6 +632,53 @@ def test_heartbeat_refuses_a_driver_that_names_no_run_worktree(project, capsys) 
     assert not marker.exists()
 
 
+def test_a_concurrent_install_cannot_rebind_the_driver_between_check_and_launch(
+    project, monkeypatch
+) -> None:
+    """The binding is checked, then the script is launched. A ``driver install`` for another
+    run landing in between used to swap in a script bound elsewhere, which then ran under THIS
+    run's ownership. Every writer of the script takes ``install_lock_for(script)``; the heartbeat
+    holds it across the check and the launch, so the rewrite waits (here: is refused)."""
+    from conductor import resume_script
+
+    ours, stolen = project.root / "fired", project.root / "stolen"
+    script = _install_driver(project, f"#!/bin/sh\ntouch {ours}\n")
+    other = _run_worktree(project, "conductor/run-some-other-run-0123abcd", "other")
+    lock = resume_script.install_lock_for(str(script))
+    rebinder = (
+        "import fcntl, os, sys\n"
+        "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "try:\n"
+        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "except BlockingIOError:\n"
+        "    sys.exit(3)\n"
+        "open(sys.argv[2], 'w').write(sys.argv[3])\n"
+    )
+    attempts: list[int] = []
+    real = lifecycle.runhost.resolve
+
+    def install_lands_now(root):
+        attempts.append(
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    rebinder,
+                    lock,
+                    str(script),
+                    f"#!/bin/sh\nWORKTREE={other}\ntouch {stolen}\n",
+                ],
+                timeout=30,
+            ).returncode
+        )
+        return real(root)
+
+    monkeypatch.setattr(lifecycle.runhost, "resolve", install_lands_now)
+    assert project.verb("heartbeat", "--run", project.run_key) == 0
+    assert attempts == [3], attempts
+    assert ours.exists() and not stolen.exists()
+
+
 def test_heartbeat_refuses_a_same_branch_checkout_of_another_repository(
     project, tmp_path, capsys
 ) -> None:
