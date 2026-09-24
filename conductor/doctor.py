@@ -12,10 +12,19 @@ WHAT IT ASKS, AND WHY IN TWO CLASSES
 predicates, and this command keeps the split because the two halves gate different events on
 different schedules:
 
-* **Quiesce conditions** — a live owner process, an installed schedule, a registered linked
-  worktree. These ask *is anything using this path right now*. They gate the MOVE, they are
-  checked inside a declared quiesce window, and a failure is rescheduled rather than remediated.
-  They are what this command refuses on by default, and they are what A-DH-5 governs.
+* **Quiesce conditions** — a live owner process, a held driver fire lock, an installed schedule
+  (crontab OR harness scheduled task), a registered linked worktree. These ask *is anything using
+  this path right now*. They gate the MOVE, they are checked inside a declared quiesce window,
+  and a failure is rescheduled rather than remediated. They are what this command refuses on by
+  default, and they are what A-DH-5 governs.
+
+  EACH OF THE TWO "SOMETHING IS RUNNING" PREDICATES SEES ONLY HALF, WHICH IS WHY THERE ARE TWO.
+  ``live-owner`` reads ``owner.json``, and only ``conductor heartbeat`` writes one — a driver
+  fired straight from cron records no ownership at all and was invisible to it.
+  ``driver-fire-lock`` reads the kernel's lock table for the ``flock`` that driver holds for the
+  whole of its fire. Likewise ``installed-schedule`` used to read the crontab alone, so a run
+  driven by a harness scheduled task had no installed schedule this scan could see. With a fire
+  lock actively held, no owner record and no cron line, the scan printed CLEAR.
 * **Loss-risk gates** — a commit carried by no remote, untracked or ignored content with no
   second copy. These ask *would anything be destroyed that exists in no second place*. They gate
   DELETION of the quarantined copy, which the design puts a week after the move. They are
@@ -44,7 +53,9 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -52,11 +63,32 @@ from typing import NamedTuple
 
 from conductor import resume_script
 from conductor.core import ownership, resolve
+from conductor.hosts import base as hostbase
+from conductor.hosts import proc
 
 _GIT_TIMEOUT = 120.0
 
 QUIESCE = "quiesce"
 LOSS_RISK = "loss-risk"
+
+#: The lock the generated driver holds — `flock -n 9` on `$PROJECT/.conductor/resume.lock` — for
+#: the WHOLE of one fire, so that a second cron tick exits 0 rather than double-driving. It is the
+#: only durable "something is running here right now" signal a CRON-LAUNCHED driver leaves: that
+#: path writes no ownership record at all, so `live-owner` cannot see it.
+FIRE_LOCK_NAME = "resume.lock"
+
+#: The kernel's own lock table. Read, never opened for locking: taking the lock to test it would
+#: contend with the holder this scan exists to detect, and `flock` on a free file would briefly
+#: exclude a driver that was about to start.
+PROC_LOCKS = "/proc/locks"
+
+#: Keys a harness scheduled-task entry uses for the directory it runs in. Same set
+#: `conductor.driver` reads, for the same reason: an entry that names a path is an entry that
+#: fires at that path.
+_TASK_DIR_FIELDS = ("cwd", "project", "workingDirectory", "working_directory")
+
+#: Shapes a scheduled-task file may take: a bare list, or a mapping under one of these keys.
+_TASK_LIST_KEYS = ("tasks", "scheduled_tasks", "schedules")
 
 
 class Finding(NamedTuple):
@@ -189,31 +221,231 @@ def linked_worktrees(checkout: str) -> Predicate:
     )
 
 
-def installed_schedules(checkout: str) -> Predicate:
-    """Crontab lines naming a path at or beneath the checkout.
+def scheduled_task_files() -> list[str]:
+    """Every host's harness scheduled-task file, deduplicated, in host order.
 
-    Read through ``resume_script`` so the "no crontab for this user" absence rule is the same one
-    install and uninstall use. Nothing here can write a crontab.
+    ALL hosts, not the project's recorded one. ``conductor driver status`` asks a narrower
+    question — "is THIS project's run durably driven" — and rightly consults only the run's own
+    host. This asks "would anything still fire out of this path", and a Claude scheduled task
+    left over from before a project was repointed at Codex fires just the same.
     """
+    files: list[str] = []
+    for host_id in hostbase.HOST_IDS:
+        try:
+            path = hostbase.load(host_id).scheduled_tasks_file()
+        except Exception:  # a host this build cannot construct contributes no leg
+            continue
+        if path and path not in files:
+            files.append(path)
+    return files
+
+
+def _task_entries(doc: object) -> list[dict] | None:
+    """The entry list inside a scheduled-task document, or ``None`` when its shape is unknown.
+
+    ``None`` is not "empty": an unrecognised shape means the file may well carry a task naming
+    this checkout and this build cannot see it, which is a refusal rather than a clearance."""
+    if isinstance(doc, list):
+        return [entry for entry in doc if isinstance(entry, dict)]
+    if isinstance(doc, dict):
+        for key in _TASK_LIST_KEYS:
+            value = doc.get(key)
+            if isinstance(value, list):
+                return [entry for entry in value if isinstance(entry, dict)]
+    return None
+
+
+def _task_names_checkout(entry: dict, roots: tuple[str, ...]) -> str | None:
+    """The path in this entry that sits under the checkout, or ``None``.
+
+    Two ways an entry names a path, and both count. Its directory field IS a path, so it is
+    resolved (``~`` expanded, made absolute) before comparison. Its prompt or command is free
+    text that may merely CONTAIN one, so the checkout's own spellings are looked for inside it —
+    a task whose prompt is the host's own rendering of the autodev skill, aimed at the old path,
+    is as live as one whose cwd field says so. (How each host spells that prompt is the adapter
+    layer's business and is deliberately not repeated here: this predicate matches on the PATH,
+    which is the same in either spelling.)"""
+    for field in _TASK_DIR_FIELDS:
+        value = entry.get(field)
+        if isinstance(value, str) and value:
+            resolved = os.path.abspath(os.path.expanduser(value))
+            if _under(resolved, roots):
+                return resolved
+    for value in entry.values():
+        if not isinstance(value, str):
+            continue
+        for root in roots:
+            if _text_names_path(value, root):
+                return root
+    return None
+
+
+#: One word of free text, quote-aware without a shell's all-or-nothing parse: a balanced
+#: double-, single- or back-quoted string is ONE word (spaces and all), anything else runs to the
+#: next whitespace. A lone apostrophe (``don't``) is just a character in its word.
+_FREE_WORD = re.compile(r'"([^"]*)"|\'([^\']*)\'|`([^`]*)`|(\S+)')
+
+#: Shell control operators that separate words even with no space around them (``cd /x&&go``).
+_CONTROL = re.compile(r"&&|\|\||[;&|()<>]")
+
+#: Wrappers and trailing sentence punctuation around a path word.
+_WRAPPERS = "\"'`([{"
+_TRAILERS = "\"'`)]}.,;:!?"
+
+
+def _lexed_words(text: str, *, comments: bool) -> list[str] | None:
+    """``text`` split the way a shell would, or ``None`` when shlex cannot parse it."""
+    try:
+        lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        if not comments:
+            lexer.commenters = ""
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def _free_words(text: str) -> list[str]:
+    """``text`` split by ``_FREE_WORD``: never fails, and never cuts a balanced quoted path."""
+    words: list[str] = []
+    for match in _FREE_WORD.finditer(text):
+        quoted = next((g for g in match.groups()[:3] if g is not None), None)
+        if quoted is not None:
+            words.append(quoted)
+        else:
+            words.extend(w for w in _CONTROL.split(match.group(4)) if w)
+    return words
+
+
+def _trimmed(word: str) -> str:
+    """Strip wrappers and trailing punctuation until nothing more comes off, so the ORDER they
+    appear in (`` `/p`. `` vs ``(/p),``) cannot leave one behind."""
+    while True:
+        stripped = word.lstrip(_WRAPPERS).rstrip(_TRAILERS)
+        if stripped == word:
+            return word
+        word = stripped
+
+
+def _text_path_tokens(text: str) -> list[str]:
+    """The absolute paths free text names, as whole words.
+
+    A SCAN MUST NOT MISS ONE, so the words are the UNION of three readings: shlex with ``#`` as
+    a comment, shlex with ``#`` as an ordinary character, and ``_free_words`` — the reading that
+    cannot fail. Each shlex reading can raise on text a shell would reject (``# don't …`` has an
+    unbalanced quote once comments are off); the failing reading contributes nothing and the
+    others still answer. No reading splits on bare whitespace, so a quoted ``"/projects/my app"``
+    is never cut down to ``/projects/my``. Every word is then split on ``=`` and trimmed; a
+    candidate matches only as a whole path (``_under``), so the extra readings add no false
+    matches."""
+    words: list[str] = []
+    for reading in (
+        _lexed_words(text, comments=True),
+        _lexed_words(text, comments=False),
+        _free_words(text),
+    ):
+        words.extend(reading or ())
+    paths: list[str] = []
+    for word in words:
+        for part in word.split("="):
+            part = _trimmed(part)
+            if part.startswith(("/", "~")):
+                path = os.path.abspath(os.path.expanduser(part))
+                if path not in paths:
+                    paths.append(path)
+    return paths
+
+
+def _text_names_path(text: str, root: str) -> bool:
+    """Does free text name ``root`` or a path beneath it?
+
+    A WHOLE PATH WORD, compared with ``_under``: equal to the checkout, or continuing past it
+    only with the path separator. A substring or character-class test read ``/projects/app``
+    inside ``/projects/app-backup``, ``/projects/app+backup`` and ``/mirror/projects/app``, so
+    one checkout's scan was blocked by every sibling that happened to extend its name."""
+    return any(_under(path, (root,)) for path in _text_path_tokens(text))
+
+
+def _scheduled_task_findings(checkout: str, roots: tuple[str, ...]) -> list[Finding]:
+    """Harness scheduled tasks that fire at or beneath the checkout, plus the files that could
+    not be read — a file this build cannot parse is not evidence that it holds no task."""
+    findings: list[Finding] = []
+    for path in scheduled_task_files():
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as handle:
+                doc = json.load(handle)
+        except (OSError, ValueError) as exc:
+            findings.append(
+                Finding(
+                    "installed-schedule",
+                    path,
+                    "a harness scheduled-task file could not be read, so whether a task still "
+                    f"fires out of this checkout is unknown: {exc}",
+                    f"read {shlex.quote(path)} by hand, then re-run {_recheck(checkout)}",
+                )
+            )
+            continue
+        entries = _task_entries(doc)
+        if entries is None:
+            findings.append(
+                Finding(
+                    "installed-schedule",
+                    path,
+                    "a harness scheduled-task file is in a shape this build does not "
+                    f"recognise ({type(doc).__name__}), so whether a task still fires out of "
+                    "this checkout is unknown",
+                    f"read {shlex.quote(path)} by hand, then re-run {_recheck(checkout)}",
+                )
+            )
+            continue
+        for entry in entries:
+            named = _task_names_checkout(entry, roots)
+            if named is None:
+                continue
+            findings.append(
+                Finding(
+                    "installed-schedule",
+                    named,
+                    f"a scheduled task registered in {path} names this checkout and would keep "
+                    "firing at the old path after a move:\n      "
+                    + json.dumps(entry, sort_keys=True),
+                    f"remove that entry from {shlex.quote(path)} through the harness that owns "
+                    f"it — conductor never writes it — then re-run {_recheck(checkout)}",
+                )
+            )
+    return findings
+
+
+def installed_schedules(checkout: str) -> Predicate:
+    """Every installed schedule naming a path at or beneath the checkout.
+
+    TWO LEGS, because there are two schedulers. The crontab is read through ``resume_script`` so
+    the "no crontab for this user" absence rule is the same one install and uninstall use. The
+    harness scheduled-task files are the second leg, and omitting them was a false CLEAR: a run
+    driven by a Claude scheduled task rather than a cron line has no crontab entry at all, and
+    ``conductor driver status`` has always treated the two as interchangeable evidence of a
+    durable driver. Nothing here can write either one.
+    """
+    roots = _spellings(checkout)
+    findings: list[Finding] = []
+    table = ""
     try:
         table = resume_script.read_crontab()
     except resume_script.CrontabReadError as exc:
-        return Predicate(
-            "installed-schedule",
-            QUIESCE,
-            (
-                Finding(
-                    "installed-schedule",
-                    os.path.abspath(checkout),
-                    f"the installed crontab could not be read, so whether a schedule still "
-                    f"fires out of this checkout is unknown: {exc}",
-                    "crontab -l",
-                ),
-            ),
-            "",
+        # Not an early return. An unreadable crontab already blocks, but the OTHER leg still has
+        # to be reported: an operator told only "crontab unreadable" would fix that and re-run,
+        # and a scheduled task naming this checkout would surface only on the second pass.
+        findings.append(
+            Finding(
+                "installed-schedule",
+                os.path.abspath(checkout),
+                f"the installed crontab could not be read, so whether a schedule still "
+                f"fires out of this checkout is unknown: {exc}",
+                "crontab -l",
+            )
         )
-    roots = _spellings(checkout)
-    findings: list[Finding] = []
     for raw in table.splitlines():
         line = raw.strip()
         if not line:
@@ -237,11 +469,149 @@ def installed_schedules(checkout: str) -> Predicate:
                 f"conductor resume-script uninstall-cron --project {shlex.quote(checkout)}",
             )
         )
+    findings.extend(_scheduled_task_findings(checkout, roots))
     return Predicate(
         "installed-schedule",
         QUIESCE,
         tuple(findings),
-        "no crontab line names this checkout",
+        "no crontab line and no harness scheduled task names this checkout ("
+        + ", ".join(scheduled_task_files() or ["no scheduled-task file on this host"])
+        + ")",
+    )
+
+
+def _state_root(checkout: str) -> str:
+    """This checkout's canonical state root, falling back to the literal path when git cannot
+    answer — the same fallback both state-reading predicates need."""
+    try:
+        return resolve.state_root(checkout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return os.path.join(os.path.abspath(checkout), ".conductor")
+
+
+def flock_holders(path: str) -> list[tuple[str, int]] | None:
+    """``(lock-type, pid)`` for every kernel lock held on ``path``, or ``None`` when this
+    platform cannot answer.
+
+    READ-ONLY, AND IT NEVER TAKES THE LOCK. The obvious test — ``flock(fd, LOCK_EX | LOCK_NB)``
+    and see whether it fails — acquires the lock whenever it is free, which briefly excludes a
+    driver that was about to start, and is a write to shared kernel state from a scan whose whole
+    contract is that it mutates nothing. ``/proc/locks`` is the kernel's own table: it names the
+    inode and the holding pid, and reading it disturbs nobody.
+
+    A line is ``<n>: [-> ]<TYPE> <ADVISORY|MANDATORY> <READ|WRITE> <pid> <maj:min:inode> …``,
+    with ``maj``/``min`` in hex and the inode in decimal. A ``->`` marks a process BLOCKED on the
+    lock rather than holding it — it is counted too, because something waiting to drive out of
+    this checkout is as much a reason not to move it as something already driving.
+
+    ``None`` (rather than ``[]``) on a platform with no ``/proc/locks``: "I cannot tell" must not
+    read as "nobody is there".
+    """
+    try:
+        info = os.stat(path)
+        with open(PROC_LOCKS, encoding="utf-8") as handle:
+            table = handle.read()
+    except OSError:
+        return None
+    want = (os.major(info.st_dev), os.minor(info.st_dev), info.st_ino)
+    holders: list[tuple[str, int]] = []
+    for line in table.splitlines():
+        tokens = line.split()
+        if len(tokens) < 6:
+            continue
+        tokens = tokens[1:]  # the leading "<n>:" index
+        if tokens and tokens[0] == "->":
+            tokens = tokens[1:]
+        if len(tokens) < 5:
+            continue
+        parts = tokens[4].split(":")
+        if len(parts) != 3:
+            continue
+        try:
+            found = (int(parts[0], 16), int(parts[1], 16), int(parts[2]))
+            pid = int(tokens[3])
+        except ValueError:
+            continue
+        if found == want and (tokens[0], pid) not in holders:
+            holders.append((tokens[0], pid))
+    # `/proc/locks` omits a lock whose recorded pid has exited — which is every lock the driver
+    # takes, since `flock -n 9` is a helper process that exits at once while the shell keeps the
+    # descriptor (#95). The descriptors themselves still say so: add every process whose fdinfo
+    # shows a FLOCK held on this inode.
+    for pid in proc.flock_holder_pids(info):
+        if not any(held_pid == pid for _, held_pid in holders):
+            holders.append(("FLOCK", pid))
+    return sorted(holders)
+
+
+def held_fire_locks(checkout: str) -> Predicate:
+    """Contention on the driver's fire lock — the signal a CRON-LAUNCHED driver is the only one
+    to leave.
+
+    ``live-owner`` reads ``owner.json``, which the heartbeat verb writes. The generated driver
+    fired straight from cron writes no such record: its exclusion is ``flock -n 9`` on
+    ``.conductor/resume.lock``, held for the whole fire. So a checkout with a driver mid-fire, no
+    owner record and no cron line visible to this user reported CLEAR — the exact false negative
+    this scan exists to prevent, since the operator then moves the tree out from under a running
+    process.
+
+    A lock file that does not exist blocks nothing: it is created by the first fire, and its mere
+    presence afterwards means only that a fire once ran.
+    """
+    lock = os.path.join(_state_root(checkout), FIRE_LOCK_NAME)
+    if not os.path.exists(lock):
+        return Predicate(
+            "driver-fire-lock",
+            QUIESCE,
+            (),
+            f"no driver fire lock exists at {lock}",
+        )
+    holders = flock_holders(lock)
+    if holders is None:
+        return Predicate(
+            "driver-fire-lock",
+            QUIESCE,
+            (
+                Finding(
+                    "driver-fire-lock",
+                    lock,
+                    "this driver fire lock exists but whether a process holds it cannot be "
+                    f"determined here ({PROC_LOCKS} is unreadable, and testing the lock by "
+                    "taking it would disturb the holder), so whether a fire is running under "
+                    "this checkout is unknown",
+                    f"confirm no driver is running, then re-run {_recheck(checkout)}",
+                ),
+            ),
+            "",
+        )
+    if not holders:
+        return Predicate(
+            "driver-fire-lock",
+            QUIESCE,
+            (),
+            f"{lock} exists and no process holds it",
+        )
+    return Predicate(
+        "driver-fire-lock",
+        QUIESCE,
+        tuple(
+            Finding(
+                "driver-fire-lock",
+                lock,
+                f"process {pid} holds a {kind} lock on this checkout's driver fire lock, so a "
+                "driver fire is running out of it right now. A cron-launched driver records no "
+                "ownership, so this is the only trace it leaves.",
+                (
+                    f"let the fire finish, or stop process {pid}, then re-run "
+                    f"{_recheck(checkout)}"
+                    if pid > 0
+                    else "let the fire finish — the kernel names no pid for this lock — then "
+                    f"re-run {_recheck(checkout)}"
+                ),
+            )
+            for kind, pid in holders
+        ),
+        "",
     )
 
 
@@ -251,11 +621,12 @@ def live_owners(checkout: str) -> Predicate:
     The record is the durable statement that something is executing this run; a process with a
     cwd here is not. An uninterpretable record blocks as well — "I cannot tell whether anyone is
     working on this run" is not clearance.
+
+    This is HALF the "something is executing here" question and the narrower half: only the
+    ``conductor heartbeat`` path writes an ownership record. ``held_fire_locks`` above covers the
+    cron-launched driver, which writes none.
     """
-    try:
-        state_root = resolve.state_root(checkout)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        state_root = os.path.join(os.path.abspath(checkout), ".conductor")
+    state_root = _state_root(checkout)
     findings: list[Finding] = []
     inspected = 0
     for record in sorted(
@@ -278,7 +649,7 @@ def live_owners(checkout: str) -> Predicate:
             continue
         if owner is None:
             continue
-        live = ownership.identity_is_live(owner.wrapper_identity)
+        live = ownership.identity_is_live(owner)
         if live is False:
             continue
         state = "is alive" if live else "cannot be checked"
@@ -290,8 +661,13 @@ def live_owners(checkout: str) -> Predicate:
                 f"{owner.wrapper_identity}, which {state}. Relocating the checkout under a "
                 f"running owner moves the state it is writing to.\n"
                 f"      record: {record}",
-                f"let the run finish, or stop process {owner.wrapper_identity} and re-run "
-                f"{_recheck(checkout)}",
+                # NOT "stop process <identity>": an identity is a (pid, start-time, boot) tuple
+                # or a Codex thread id, not something an operator can pass to `kill`. Naming the
+                # supported verb is what makes the recovery runnable — and it is the only thing
+                # standing between an operator and deleting owner.json by hand.
+                f"let the run finish; or, once you have confirmed nothing is still working on "
+                f"it, clear the record with conductor run disown --run {run_key} --force and "
+                f"re-run {_recheck(checkout)}",
             )
         )
     return Predicate(
@@ -416,6 +792,7 @@ def scan(checkout: str) -> list[Predicate]:
         linked_worktrees(checkout),
         installed_schedules(checkout),
         live_owners(checkout),
+        held_fire_locks(checkout),
         unpushed_commits(checkout),
         unpreserved_state(checkout),
     ]

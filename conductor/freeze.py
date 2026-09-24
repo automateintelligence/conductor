@@ -16,11 +16,17 @@ import glob
 import hashlib
 import json
 import os
-import re
 import shlex
 import sys
 
-from conductor.paths import project_root, resolve_gate
+from conductor.paths import (
+    AmbiguousSpecReference,
+    InvalidSpecRoots,
+    project_root,
+    resolve_gate,
+    spec_from_goal_text,
+    spec_roots,
+)
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_ROOT = os.path.dirname(
@@ -105,13 +111,108 @@ def _referenced_files(entry: dict, repo_root: str) -> dict:
     return files
 
 
+def _source_candidates(spec_path: str) -> list[str]:
+    """The accepted assertions-source spellings for a spec path, PREFERRED FIRST.
+
+    spec-craft (the `spec-craft:executable-assertions` skill) WRITES
+    `docs/specs/<stem>.assertions.md` and conductor only READS it, so the stem form is the
+    binding one and is tried first. The
+    legacy `<spec>.md.assertions.md` form — what conductor demanded when it appended
+    `.assertions.md` to a path that already ended in `.md` — stays accepted so repos that
+    bridged the mismatch with a committed file or symlink keep resolving and keep verifying.
+
+    Preference alone does NOT decide when both are present — see `_pick_source`.
+
+    A path that already names an `.assertions.md` file is taken verbatim."""
+    if spec_path.endswith(".assertions.md"):
+        return [spec_path]
+    stem = spec_path[:-3] if spec_path.endswith(".md") else spec_path
+    candidates = [stem + ".assertions.md"]
+    legacy = spec_path + ".assertions.md"
+    if legacy not in candidates:
+        candidates.append(legacy)
+    return candidates
+
+
 class AmbiguousAssertionsSource(RuntimeError):
-    """Multiple docs/specs/*.assertions.md and no goal names one — fail closed."""
+    """Multiple ``<spec-root>/*.assertions.md`` across ``paths.spec_roots()`` and no goal names
+    one — fail closed."""
 
 
 class MissingAssertionsSource(RuntimeError):
     """The goal names a spec but its `.assertions.md` sibling is absent — fail
     closed: freezing without the done-definition reopens the integrity hole."""
+
+
+class DivergentAssertionsSource(RuntimeError):
+    """Both accepted spellings of one spec's assertions source exist and say DIFFERENT
+    things, so the repo holds two disagreeing done-definitions and preference order would
+    pick one of them blind — fail closed."""
+
+
+class UnreadableAssertionsSource(RuntimeError):
+    """A candidate assertions source EXISTS but cannot be read, so its bytes are unknown.
+
+    Its own condition, deliberately not folded into ``DivergentAssertionsSource``: divergence
+    is a claim that two done-definitions disagree, and nothing here compared them. The remedy
+    differs too — fix the mode or the ownership, versus reconcile two files — and a freeze
+    refusal that names the wrong one sends the operator to the wrong repair. Unreadable is also
+    not "absent" (``MissingAssertionsSource``): deleting the file would make the freeze
+    succeed against the remaining spelling, while a mode change must not."""
+
+
+def _source_digest(path: str, repo_root: str) -> str:
+    """``_sha256_file`` for an assertions-source candidate, with an unreadable file turned into
+    a domain refusal. The raw ``OSError`` escaped ``record()`` as a traceback: ``freeze.main``
+    catches domain errors only, so ``gate freeze`` crashed instead of refusing. It did fail
+    closed — no baseline was written — but nothing greppable said why."""
+    try:
+        return _sha256_file(path)
+    except OSError as exc:
+        rel = os.path.relpath(path, repo_root)
+        raise UnreadableAssertionsSource(
+            f"unreadable-assertions-source: {rel} exists but could not be read ({exc}); "
+            "the done-definition cannot be frozen without its bytes — fix the file's "
+            "permissions (removing it is a different decision, and a louder one)"
+        ) from exc
+
+
+def _pick_source(candidates: list[str], repo_root: str) -> str | None:
+    """THE assertions-source choice among `_source_candidates`' spellings, or None when none
+    exists.
+
+    Preference order alone is only safe while the spellings AGREE. The sequence that breaks it
+    is the one repos actually took: spec-craft wrote `<stem>.assertions.md`, conductor could
+    not consume it, the repo copied or symlinked it to `<spec>.md.assertions.md` and
+    MAINTAINED that copy, and both are committed. Preferring the stem form there freezes the
+    ABANDONED file, and every later edit to the maintained one is invisible to the baseline —
+    the done-definition stops being tamper-evident exactly where it matters.
+
+    So: same file (equal realpath — the committed-symlink bridge) or same bytes (the committed
+    copy) means the disagreement is not real, and the preferred spelling is taken silently.
+    Genuinely different bytes are two done-definitions with no way to tell which one the human
+    confirmed; refuse and name both rather than freeze either. A candidate whose bytes cannot be
+    READ is neither case and raises ``UnreadableAssertionsSource`` (see ``_source_digest``)."""
+    present = [p for p in candidates if os.path.isfile(p)]
+    if not present:
+        return None
+    chosen = present[0]
+    chosen_real = os.path.realpath(chosen)
+    chosen_digest = None
+    for other in present[1:]:
+        if os.path.realpath(other) == chosen_real:
+            continue
+        if chosen_digest is None:
+            chosen_digest = _source_digest(chosen, repo_root)
+        if _source_digest(other, repo_root) == chosen_digest:
+            continue
+        a, b = (os.path.relpath(p, repo_root) for p in (chosen, other))
+        raise DivergentAssertionsSource(
+            f"divergent-assertions-source: {a} and {b} are both present and their "
+            "contents differ, so this spec has two disagreeing done-definitions; delete "
+            "or reconcile one before freezing the gate"
+        )
+    return chosen
 
 
 #: Gate-local, TRACKED pointer naming the spec whose `.assertions.md` this gate's baseline
@@ -137,7 +238,15 @@ def _read_pointer(gate_dir: str) -> str | None:
 def _assertions_source(
     repo_root: str, manifest_path: str | None = None
 ) -> tuple[dict, str]:
-    """({relpath: sha256}, via) for the human-authored `<spec>.assertions.md` —
+    """``(sources, via)`` — see ``_resolve_assertions_source``."""
+    sources, via, _spec = _resolve_assertions_source(repo_root, manifest_path)
+    return sources, via
+
+
+def _resolve_assertions_source(
+    repo_root: str, manifest_path: str | None = None
+) -> tuple[dict, str, str | None]:
+    """({relpath: sha256}, via, spec) for the human-authored `<spec>.assertions.md` —
     the done-DEFINITION, made tamper-evident alongside the manifest and test
     files. `via` is "env", "gate", "goal", "glob", or "none" (how it was discovered).
 
@@ -153,28 +262,40 @@ def _assertions_source(
     run: a fresh clone re-resolves to something else (or to nothing) and `verify` reports
     TAMPERED. The pointer is committed next to the manifest it describes, so the baseline
     binds to the same document on every checkout, and stays unambiguous no matter how many
-    other specs the repo later grows.
+    other specs the repo later grows. A pointer naming a spec `.md` resolves under the same
+    two spellings as every other tier (`_source_candidates`).
 
     Else, precise path: parse `<project>/.conductor/goal.md` for a
-    `docs/specs/<name>.md` path and take its `.assertions.md` sibling; a goal
-    whose named spec has no `.assertions.md` sibling — or that names no spec at
-    all — fails closed. Glob `docs/specs/*.assertions.md` ONLY when no goal file
+    `<spec-root>/<name>.md` path and take its assertions sibling under either
+    accepted spelling (`_source_candidates`: spec-craft's `<stem>.assertions.md`
+    first, then the legacy `<spec>.md.assertions.md`); a goal whose named spec has
+    NEITHER — or that names no spec at all — fails closed. Glob
+    `<spec-root>/*.assertions.md` (which matches both spellings) ONLY when no goal file
     exists: exactly one match -> use it; multiple -> fail closed (freezing every
     spec's assertions silently would let an edit to an UNRELATED spec's
-    assertions break this run's gate); none -> no source entry (old behavior)."""
+    assertions break this run's gate); none -> no source entry (old behavior).
+
+    Both the prose parse and the glob search `paths.spec_roots()`, which is `docs/specs`
+    unless `$CONDUCTOR_SPEC_ROOTS` says otherwise. They MUST stay the same set: a goal that
+    resolves through one root while the glob searches another would freeze one spec's
+    done-definition and verify against a different one's."""
     override = os.environ.get("CONDUCTOR_ASSERTIONS_SOURCE")
     if override:
-        path = (
+        base = (
             override if os.path.isabs(override) else os.path.join(repo_root, override)
         )
-        if not path.endswith(".assertions.md"):
-            path += ".assertions.md"
-        if not os.path.isfile(path):
-            raise MissingAssertionsSource(
-                f"missing-assertions-source: CONDUCTOR_ASSERTIONS_SOURCE names "
-                f"{override} but {path} does not exist"
+        candidates = _source_candidates(base)
+        path = _pick_source(candidates, repo_root)
+        if path:
+            return (
+                {os.path.relpath(path, repo_root): _source_digest(path, repo_root)},
+                "env",
+                os.path.relpath(base, repo_root),
             )
-        return {os.path.relpath(path, repo_root): _sha256_file(path)}, "env"
+        raise MissingAssertionsSource(
+            f"missing-assertions-source: CONDUCTOR_ASSERTIONS_SOURCE names "
+            f"{override} but none of {', '.join(candidates)} exist"
+        )
     gate_dir = (
         os.path.dirname(manifest_path)
         if manifest_path
@@ -182,39 +303,66 @@ def _assertions_source(
     )
     declared = _read_pointer(gate_dir)
     if declared:
-        path = (
+        base = (
             declared if os.path.isabs(declared) else os.path.join(repo_root, declared)
         )
-        if not path.endswith(".assertions.md"):
-            path += ".assertions.md"
-        if not os.path.isfile(path):
-            raise MissingAssertionsSource(
-                f"missing-assertions-source: {os.path.join(gate_dir, SOURCE_POINTER)} "
-                f"names {declared} but {path} does not exist"
+        candidates = _source_candidates(base)
+        path = _pick_source(candidates, repo_root)
+        if path:
+            return (
+                {os.path.relpath(path, repo_root): _source_digest(path, repo_root)},
+                "gate",
+                os.path.relpath(base, repo_root),
             )
-        return {os.path.relpath(path, repo_root): _sha256_file(path)}, "gate"
+        raise MissingAssertionsSource(
+            f"missing-assertions-source: {os.path.join(gate_dir, SOURCE_POINTER)} "
+            f"names {declared} but none of {', '.join(candidates)} exist"
+        )
     goal_path = os.path.join(repo_root, ".conductor", "goal.md")
     if os.path.isfile(goal_path):
         with open(goal_path, encoding="utf-8") as f:
             goal = f.read()
-        m = re.search(r"docs/specs/[^\s`'\"]+?\.md", goal)
-        if m:
-            rel = m.group(0) + ".assertions.md"
-            path = os.path.join(repo_root, rel)
-            if os.path.isfile(path):
-                return {rel: _sha256_file(path)}, "goal"
+        spec = spec_from_goal_text(goal)
+        if spec:
+            rels = _source_candidates(spec)
+            path = _pick_source([os.path.join(repo_root, r) for r in rels], repo_root)
+            if path:
+                return (
+                    {os.path.relpath(path, repo_root): _source_digest(path, repo_root)},
+                    "goal",
+                    os.path.relpath(os.path.join(repo_root, spec), repo_root),
+                )
             raise MissingAssertionsSource(
                 f"missing-assertions-source: the goal names "
-                f"{m.group(0)} but {rel} does not exist"
+                f"{spec} but none of {', '.join(rels)} exist"
             )
         # a goal that names no spec must not silently glob an unrelated spec's
         # assertions — fail closed
+        roots = ", ".join(f"{r}/<name>.md" for r in spec_roots())
         raise MissingAssertionsSource(
             "unidentifiable-assertions-source: .conductor/goal.md exists but "
-            "names no docs/specs/<name>.md path"
+            f"names no {roots} path (and no `spec:` line); set CONDUCTOR_SPEC_ROOTS "
+            "if this project keeps specs elsewhere"
         )
+    # The DIRECTORY half is escaped; only the trailing `*.assertions.md` is a pattern. A root
+    # names ONE directory — the prose scan `re.escape`s it for exactly that reason — but the
+    # glob honoured `*`, `?` and `[...]`, so `CONDUCTOR_SPEC_ROOTS='docs/spec?'` searched
+    # `docs/specs/` and froze an unconfigured directory's `.assertions.md` as this run's
+    # done-definition. The two scans MUST agree on which directories a root names (see this
+    # function's docstring), and escaping is what keeps them agreeing. `repo_root` is inside
+    # the escaped span too: a checkout path containing a bracket (pytest's `tmp_path` can) is
+    # a literal directory for the same reason.
     matches = sorted(
-        glob.glob(os.path.join(repo_root, "docs", "specs", "*.assertions.md"))
+        {
+            match
+            for root in spec_roots()
+            for match in glob.glob(
+                os.path.join(
+                    glob.escape(os.path.join(repo_root, *root.split("/"))),
+                    "*.assertions.md",
+                )
+            )
+        }
     )
     if len(matches) > 1:
         rels = ", ".join(os.path.relpath(p, repo_root) for p in matches)
@@ -224,8 +372,9 @@ def _assertions_source(
         )
     if matches:
         rel = os.path.relpath(matches[0], repo_root)
-        return {rel: _sha256_file(matches[0])}, "glob"
-    return {}, "none"
+        # no spec was named, so there is none to resolve the spelling equivalence against
+        return {rel: _source_digest(matches[0], repo_root)}, "glob", None
+    return {}, "none", None
 
 
 def gate_state(manifest_path: str, repo_root: str) -> dict:
@@ -253,6 +402,61 @@ def record(
     with open(baseline_path, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=2, sort_keys=True)
     return baseline_path
+
+
+_SOURCE_SUFFIX = ".assertions.md"
+
+
+def _possible_owners(rel: str) -> set[str]:
+    """Every spec path whose `_source_candidates` include the assertions file ``rel``.
+
+    One filename can belong to two specs: ``X.md.assertions.md`` is the legacy spelling for
+    spec ``X.md`` AND the stem spelling for spec ``X.md.md``. Which one a baseline meant is not
+    in the file name, and ``.frozen`` records only the file."""
+    if not rel.endswith(_SOURCE_SUFFIX):
+        return set()
+    base = rel[: -len(_SOURCE_SUFFIX)]
+    owners = {base + ".md"}  # stem spelling: `<stem>.assertions.md` for `<stem>.md`
+    if base.endswith(".md"):
+        owners.add(base)  # legacy spelling: `<spec>.md.assertions.md` for `<spec>.md`
+    return owners
+
+
+def _same_sources(
+    current: dict, recorded: dict, spec: str | None, repo_root: str
+) -> bool:
+    """Whether the CURRENT assertions-source selection is the one the baseline recorded.
+
+    Raw path keys are not enough across the naming upgrade. Every baseline written before
+    ``_source_candidates`` existed records the legacy ``<spec>.md.assertions.md`` key, and a
+    repo that bridged spec-craft's stem spelling with a committed copy or symlink now has both
+    present — so ``_pick_source`` returns the STEM path for a gate nobody touched.
+
+    The equivalence is granted per SPEC, derived from ``spec`` — the path the current source
+    was resolved FROM — never by folding filenames onto a key (a ``foo.md.md`` spec's stem
+    file is ``foo.md``'s legacy file, #97). It holds only when both recorded and current files
+    are spellings of ``spec``, the selected bytes equal the recorded bytes, and no OTHER spec
+    on disk could own the recorded file. The baseline does not record which spec it was
+    frozen for, so an ambiguous owner refuses the equivalence and falls back to the strict
+    comparison: fail closed. ``_pick_source`` has already refused if the two spellings of
+    ``spec`` disagree with each other, and a changed recorded file is reported on its own."""
+    if set(current) == set(recorded):
+        return True
+    if spec is None or len(current) != 1 or len(recorded) != 1:
+        return False
+    (cur_rel, cur_dig), (rec_rel, rec_dig) = (
+        next(iter(current.items())),
+        next(iter(recorded.items())),
+    )
+    spellings = {
+        os.path.normpath(c) for c in _source_candidates(os.path.normpath(spec))
+    }
+    if os.path.normpath(cur_rel) not in spellings:
+        return False
+    if os.path.normpath(rec_rel) not in spellings or cur_dig != rec_dig:
+        return False
+    others = _possible_owners(os.path.normpath(rec_rel)) - {os.path.normpath(spec)}
+    return not any(os.path.isfile(os.path.join(repo_root, o)) for o in others)
 
 
 def verify(
@@ -330,16 +534,21 @@ def verify(
                 "the frozen assertions source) was removed"
             )
         else:
+            current_spec: str | None = None
             try:
-                current_sources, _via = _assertions_source(repo_root, manifest_path)
-                current_set: set | None = set(current_sources)
+                current_sources: dict | None
+                current_sources, _via, current_spec = _resolve_assertions_source(
+                    repo_root, manifest_path
+                )
             except Exception as exc:  # ambiguous/missing now -> fail closed
-                current_set = None
+                current_sources = None
                 tampered.append(f"assertions-source-unresolvable: {exc}")
-            if current_set is not None and current_set != set(base_sources):
+            if current_sources is not None and not _same_sources(
+                current_sources, base_sources, current_spec, repo_root
+            ):
                 tampered.append(
                     "assertions-source-set-changed "
-                    f"(recorded {sorted(base_sources)}, current {sorted(current_set)})"
+                    f"(recorded {sorted(base_sources)}, current {sorted(current_sources)})"
                 )
     return {"ok": not tampered, "tampered": tampered, "frozen": True}
 
@@ -351,6 +560,14 @@ def main(argv: list | None = None) -> int:
         from conductor import gate_lint
 
         return gate_lint.main()
+    # A typo'd $CONDUCTOR_SPEC_ROOTS must REFUSE, not end in a traceback. Checked before
+    # resolve_gate because that parses .conductor/goal.md through the very same roots, so the
+    # crash would otherwise escape upstream of the domain-error handler around `record` below.
+    try:
+        spec_roots()
+    except InvalidSpecRoots as exc:
+        print(f"[GATE] {exc}", file=sys.stderr)
+        return 1
     # Per-spec gate (multi-spec safety): freeze/verify the manifest+baseline resolve_gate()
     # points at — assertions/<slug>/ for a namespaced run, else flat — with the same §5
     # fail-closed verdict the done-gate runner uses (single-sourced in paths.resolve_gate).
@@ -368,7 +585,14 @@ def main(argv: list | None = None) -> int:
                 "[GATE] froze done-gate baseline -> "
                 + record(gate.manifest, gate.baseline, root)
             )
-        except (AmbiguousAssertionsSource, MissingAssertionsSource) as exc:
+        except (
+            AmbiguousAssertionsSource,
+            DivergentAssertionsSource,
+            MissingAssertionsSource,
+            UnreadableAssertionsSource,
+            AmbiguousSpecReference,
+            InvalidSpecRoots,
+        ) as exc:
             print(f"[GATE] {exc}", file=sys.stderr)
             return 1
         return 0

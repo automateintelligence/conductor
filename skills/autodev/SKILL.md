@@ -29,6 +29,27 @@ step 3b's terminal crontab removal.
 > two levels up** — `<root>/skills/autodev/SKILL.md` means `<root>/bin/conductor`. That second form
 > works on every host and never goes stale, because you already know the path you read this from.
 
+0. **REGISTER OWNERSHIP — before any product work, and before step 1.**
+   `conductor run own` (add `--run <run-key>` when more than one run is active). It records
+   THIS SESSION as the run's owner in `.conductor/runs/<run-key>/owner.json`, and the cron
+   driver refuses to fire while that record names something live — so the twenty-minute tick
+   cannot start a headless phase underneath you while you are working in the same checkout.
+
+   **It can refuse, and a refusal is not something to work around.**
+   - *"is owned by … (live)"* — someone or something else is already executing this run.
+     **Stop.** Do not register, do not do product work. `conductor status` names the owner.
+   - *"exposes no session identity"* — your host did not give this session a durable handle
+     (`$CLAUDE_PID` on Claude, `$CODEX_THREAD_ID` on Codex; both are undocumented and a host
+     upgrade can withdraw either). **Stop and escalate.** Registering something weaker is worse
+     than not registering: a record nothing can verify blocks the run permanently.
+   - *"already owned by the wrapper that launched this session"* — you were started BY a
+     conductor fire that already holds the record. That is success; continue to step 1.
+
+   **Release it when you exit:** `conductor run disown`. If you crash instead, the record is
+   still recoverable without a timer — your session's exit is provable, so the next fire clears
+   it (`conductor run disown --force` is only for a record that cannot be interpreted at all).
+   Never delete `owner.json` by hand.
+
 1. **RE-LOAD GOAL (fresh context).** Done only when `conductor assert run --level spec` exits 0.
    Re-read goal + paths from the durable handoff/ledger; trust git/issues, not memory. Read the
    run branch from `<project>/.conductor/run_branch`; file missing → recompute the EXACT name
@@ -244,4 +265,6 @@ step 3b's terminal crontab removal.
    (dogfood: 0/27 checkboxes, labels never maintained). Phase incomplete this fire: renew the
    lease and commit progress.
 9. **WRITE HANDOFF (§4)** (`conductor.handoff.write`) to `.conductor/` (gitignored — local resume
-   scratch only); then commit + **push** the code changes and ledger state. EXIT.
+   scratch only); then commit + **push** the code changes and ledger state. **Release ownership
+   with `conductor run disown`** — last, after the push, because until the push lands you are
+   still the thing the next fire must not race. Then EXIT.

@@ -60,3 +60,26 @@ codex plugin list --json </dev/null \
   | sed "s|$W/home|__CODEX_HOME__|g; s|$W|__FIXTURE_ROOT__|g" \
   > tests/conductor/fixtures/codex-plugin-list-0.147.0.json
 ```
+
+## `codex-app-server-skills-list-0.155.0.jsonl` and `codex-plugin-list-0.155.0.json`
+
+Recorded on **codex-cli 0.155.0** on 2026-09-23 from a throwaway `$CODEX_HOME` that had
+`spec-craft@automateintelligence` installed from its git marketplace, run on a machine where
+`~/.agents/skills/superpowers` links to a superpowers checkout carrying a plugin manifest.
+
+* The `.jsonl` is the `codex app-server` stdout for `initialize`, then `skills/list`, one
+  JSON-RPC line each. A `remoteControl/status/changed` notification between them is kept
+  verbatim. Codex lists the plugin's skills as `spec-craft:<skill>` (with `pluginId`) and the
+  `~/.agents` ones as `superpowers:<skill>` (with no `pluginId`).
+* The `.json` is `codex plugin list --json` from the same home. It includes the
+  `openai-curated-remote` plugins Codex installs by itself.
+
+Placeholders: `__CODEX_HOME__` (the scratch `$CODEX_HOME`), `__HOME__` (the user's `$HOME`) and
+`__CWD__` (the directory `skills/list` was asked about). `tests/conductor/codex_stub.py` fills
+them in and replays the lines to conductor over stdio.
+
+To re-record, run `codex app-server` in that home, write the three requests
+(`conductor.hosts.codex._skills_list_request`), read until the reply with `"id": 1`, then close
+stdin. Replace the three paths with their placeholders. `tests/conductor/hosts/test_codex_live.py`
+(`CONDUCTOR_LIVE_CODEX=1`) runs a real Codex's `skills/list` and checks that every SKILL.md the
+namer's strict subset accepts, Codex loads under the same name.

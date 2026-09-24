@@ -4,6 +4,16 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # HERE = the plugin dir (tool code only). The PROJECT owns run state + the done-gate:
 # $CONDUCTOR_HOME, else the git repo of the current directory, else cwd. Resolve once and
 # export it so assertions/run.py and conductor.freeze agree with this and with each other.
+#
+# THIS EXPORT IS A DEFAULT, NOT AN AUTHORITY. It is computed from the CALLER'S cwd, before any
+# argument has been parsed — so for every verb that takes `--project` (status/resume/heartbeat/
+# finish) or `--checkout` (doctor relocation), $CONDUCTOR_HOME names the project the operator was
+# STANDING IN, which need not be the one they asked about. Those verbs must resolve every
+# repository fact from the path they were given and must not read this variable behind the
+# operator's back; `conductor.lifecycle._repo_context` and `_project_env` are where that is
+# enforced, and a child process a verb launches gets $CONDUCTOR_HOME re-anchored onto the
+# resolved project rather than this one. Bash cannot make that decision here: it would have to
+# know each verb's option grammar.
 PROJECT="${CONDUCTOR_HOME:-$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || pwd)}"
 export CONDUCTOR_HOME="$PROJECT"
 case "${1:-}" in
@@ -37,7 +47,12 @@ case "${1:-}" in
   resume-script) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.resume_script "$@" ;;
   driver) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.driver "$@" ;;
   remote) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.remote "$@" ;;
-  doctor) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.doctor "$@" ;;
+  # -B / PYTHONDONTWRITEBYTECODE: `doctor relocation` promises it "moves nothing, renames nothing,
+  # and writes nothing anywhere", and every git call inside it carries --no-optional-locks to keep
+  # that promise. Python broke it one level up: importing conductor.doctor wrote __pycache__/ into
+  # the very checkout being judged, so the scan created untracked-and-ignored content and then
+  # `--strict` refused on the files it had just made, under a report saying nothing was written.
+  doctor) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" PYTHONDONTWRITEBYTECODE=1 exec python3 -B -m conductor.doctor "$@" ;;
   status) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.lifecycle status "$@" ;;
   resume) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.lifecycle resume "$@" ;;
   heartbeat) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.lifecycle heartbeat "$@" ;;
@@ -76,5 +91,5 @@ case "${1:-}" in
     fi
     ;;
   gate) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.freeze "$@" ;;
-  *) printf "usage:\n  conductor assert run [--level spec|phase|task]\n  conductor ledger {generate <plan.json>|convert <plan.md>|align <plan.md> [--apply]|reconcile <issue#> [--from-gate|flags]|phase-done <issue#> [--plan plan.md] [--no-gate-check]}\n  conductor plan-lint <plan.md> [--spec <spec.md>]\n  conductor plan-lint <plan.md> --phase <title>   (that phase's **ADRs:** line only)\n  conductor authority preview <plan.md>\n  conductor goal {set <text...>|get}\n  conductor preflight\n  conductor merge <pr>            (gate + merge, refuses base=default)\n  conductor merge-gate <pr>\n  conductor run-packet <run-branch> [--base main] [--milestone TITLE]\n  conductor resume-script {write|verify} --project <root> --worktree <path> [--out <path> [--force]|--script <path>]\n  conductor resume-script {install-cron|uninstall-cron} --project <root>\n  conductor driver {install --worktree <path>|status}\n  conductor remote\n  conductor doctor relocation [--checkout <path>] [--strict]   (read-only; refuses while run artifacts are live)\n  conductor run-branch name <spec.md>\n  conductor default-branch\n  conductor gate-dir <spec.md> | --run <run-key>    (the run's done-gate dir)\n  conductor run new <spec.md> [--new-run]\n  conductor run list [--all] [--json]\n  conductor run show --run <run-key>\n  conductor run resolve [--run <run-key>]\n  conductor run gate-dir [--run <run-key>]\n  conductor run repoint-spec --run <run-key> <new-path>\n  conductor status [--run <run-key>] [--json]      (read-only; never migrates)\n  conductor resume --run <run-key> [--reactivate]  (eligible run -> active)\n  conductor heartbeat --run <run-key>              (one fire, under owner.lock)\n  conductor finish --run <run-key> [--pr <n>]      (refuses until the TEAM merges the final PR)\n  conductor gate {lint|freeze|verify}\n" >&2; exit 64 ;;
+  *) printf "usage:\n  conductor assert run [--level spec|phase|task]\n  conductor ledger {generate <plan.json>|convert <plan.md>|align <plan.md> [--apply]|reconcile <issue#> [--from-gate|flags]|phase-done <issue#> [--plan plan.md] [--no-gate-check]}\n  conductor plan-lint <plan.md> [--spec <spec.md>]\n  conductor plan-lint <plan.md> --phase <title>   (that phase's **ADRs:** line only)\n  conductor authority preview <plan.md>\n  conductor goal {set <text...>|get}\n  conductor preflight\n  conductor merge <pr>            (gate + merge, refuses base=default)\n  conductor merge-gate <pr>\n  conductor run-packet <run-branch> [--base main] [--milestone TITLE]\n  conductor resume-script {write|verify} --project <root> --worktree <path> [--out <path> [--force]|--script <path>]\n  conductor resume-script {install-cron|uninstall-cron} --project <root>\n  conductor driver {install --worktree <path>|status}\n  conductor remote\n  conductor doctor relocation [--checkout <path>] [--strict]   (read-only; refuses while run artifacts are live)\n  conductor run-branch name <spec.md>\n  conductor default-branch\n  conductor gate-dir <spec.md> | --run <run-key>    (the run's done-gate dir)\n  conductor run new <spec.md> [--new-run]\n  conductor run list [--all] [--json]\n  conductor run show --run <run-key>\n  conductor run resolve [--run <run-key>]\n  conductor run gate-dir [--run <run-key>]\n  conductor run repoint-spec --run <run-key> <new-path>\n  conductor run own [--run <run-key>] [--host claude|codex]   (register this session as owner, BEFORE product work)\n  conductor run owner-busy [--run <run-key>]       (exit 0 = a live/unverifiable owner holds it, 11 = provably free)\n  conductor run disown [--run <run-key>] [--force] (clear a record whose owner is provably gone)\n  conductor status [--run <run-key>] [--json]      (read-only; never migrates)\n  conductor resume --run <run-key> [--reactivate]  (eligible run -> active)\n  conductor heartbeat --run <run-key>              (one fire, under owner.lock)\n  conductor finish --run <run-key> [--pr <n>]      (refuses until the TEAM merges the final PR)\n  conductor gate {lint|freeze|verify}\n" >&2; exit 64 ;;
 esac

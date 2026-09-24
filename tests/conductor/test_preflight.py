@@ -7,7 +7,9 @@ import sys
 import pytest
 
 from conductor import preflight
+from conductor.hosts import base
 from conductor.hosts import codex as codex_host
+from tests.conductor import codex_stub
 from tests.conductor.conftest import stale_version_siblings
 
 _ALL = {
@@ -52,7 +54,7 @@ def test_discovers_plugin_dir_install(tmp_path, monkeypatch):  # dogfood: --plug
     (plug / ".claude-plugin" / "plugin.json").write_text('{"name": "spec-craft"}')
     skill = plug / "skills" / "expectations"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    (skill / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
     monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty"))
     avail = preflight.available_commands()
@@ -137,19 +139,42 @@ def _plugin_list_json(sources, disabled=()):
     )
 
 
-def _stub_codex_on_path(tmp_path, monkeypatch, sources, disabled=()):
+def _stub_codex_on_path(tmp_path, monkeypatch, sources, disabled=(), catalog=None):
     """A `codex` on PATH reporting `sources` (name -> `source.path`) as its installed plugins.
+
+    `catalog` is what its `app-server` answers `skills/list` with: `(name, path, pluginId)`
+    triples, the skills Codex itself would list for the tree the caller built. None means the
+    server gives no catalog, and discovery then has only on-disk evidence.
 
     `git` is carried across because host resolution shells out to it (`runhost._common_root`);
     a PATH without it would silently degrade every derivation test to the literal-path branch.
     """
     bindir = tmp_path / "stub-bin"
-    bindir.mkdir(exist_ok=True)
-    codex = bindir / "codex"
-    codex.write_text(
-        f"#!/bin/sh\nprintf '%s' '{_plugin_list_json(sources, disabled)}'\nexit 0\n",
+    app_server = None
+    if catalog is not None:
+        home = os.environ.get("CODEX_HOME", str(tmp_path))
+        initialize = codex_stub.recorded_app_server(
+            codex_home=home, cwd=str(tmp_path), home=str(tmp_path)
+        )[0]
+        skills = [
+            {
+                "name": name,
+                "description": "d",
+                "path": str(path),
+                "scope": "user",
+                "enabled": True,
+                "pluginId": plugin_id,
+            }
+            for name, path, plugin_id in catalog
+        ]
+        answer = {
+            "id": 1,
+            "result": {"data": [{"cwd": str(tmp_path), "skills": skills}]},
+        }
+        app_server = [initialize, json.dumps(answer)]
+    codex_stub.install(
+        bindir, plugin_list=_plugin_list_json(sources, disabled), app_server=app_server
     )
-    os.chmod(codex, 0o755)
     _link_git(bindir)
     monkeypatch.setenv("PATH", str(bindir))
     return bindir
@@ -185,6 +210,7 @@ def _codex_install(
     without=(),
     pin_host=True,
     roots_missing=(),
+    env_dir_prefix="",
 ):
     """A Codex machine with the conducted stack installed the way Codex installs it.
 
@@ -192,9 +218,9 @@ def _codex_install(
     reports — that is what makes `spec-craft:expectations` attributable at all. Environment-
     provided ones are flat under `$CODEX_HOME/skills/`, which is where a user skill lives.
 
-    `flat_only` is the machine where someone copied the skill directories in by hand: every
-    name resolves, and not one of them can be attributed to the plugin that is supposed to
-    own it.
+    `flat_only` is the machine where someone copied the skill directories in by hand: each is
+    invocable under its bare name only, so none answers to the `<plugin>:<skill>` name Codex
+    gives a plugin's skill.
 
     Each plugin gets TWO trees, as it does on a real Codex: the installed copy Codex loads, and
     the marketplace source `source.path` names. The source tree is left EMPTY here, so a
@@ -209,6 +235,10 @@ def _codex_install(
     install root is not on disk — the machine where the cache moved under a version bump, or an
     install landed half-written. It is a distinct state from both "installed" and "absent", and
     no fixture could express it while every listed plugin's root was unconditionally created.
+
+    `env_dir_prefix` is the gstack layout: its Codex installer links each environment-provided
+    skill in as `$CODEX_HOME/skills/gstack-<name>/` while the SKILL.md still declares
+    `name: <name>` — so the directory name and the skill's name disagree.
     """
     if pin_host:
         monkeypatch.setenv("CONDUCTOR_HOST", "codex")
@@ -218,10 +248,12 @@ def _codex_install(
     home = tmp_path / "codex-home"
     monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    catalog = []  # what Codex's own `skills/list` lists for the tree built below
     for name in ("code-review", review_wrapper, "document-release"):
-        d = home / "skills" / name
+        d = home / "skills" / f"{env_dir_prefix}{name}"
         d.mkdir(parents=True)
-        (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
+        (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n")
+        catalog.append((name, d / "SKILL.md", None))
     sources = {}
     for plugin, skills in _PLUGIN_SKILLS.items():
         root = _installed_root(home, plugin)
@@ -239,14 +271,22 @@ def _codex_install(
         for stale in stale_version_siblings(root.name):
             d = root.parent / stale / "skills" / "stale-decoy"
             d.mkdir(parents=True)
-            (d / "SKILL.md").write_text("---\nname: stale-decoy\n---\n")
+            (d / "SKILL.md").write_text("---\nname: stale-decoy\ndescription: d\n---\n")
         for name in skills:
             if name in without:
                 continue
             d = (home / "skills" / name) if flat_only else (root / "skills" / name)
             d.mkdir(parents=True)
-            (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
-    _stub_codex_on_path(tmp_path, monkeypatch, {} if flat_only else sources)
+            (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n")
+            if flat_only:
+                catalog.append((name, d / "SKILL.md", None))
+            else:
+                catalog.append(
+                    (f"{plugin}:{name}", d / "SKILL.md", f"{plugin}@{_MARKET}")
+                )
+    _stub_codex_on_path(
+        tmp_path, monkeypatch, {} if flat_only else sources, catalog=catalog
+    )
     return home
 
 
@@ -256,19 +296,22 @@ def test_preflight_succeeds_against_a_codex_install(tmp_path, monkeypatch):
     assert out["ok"], out
 
 
-def test_a_hand_copied_codex_stack_is_reported_unverifiable_not_healthy(
+def test_a_hand_copied_codex_stack_does_not_answer_to_the_plugin_qualified_names(
     tmp_path, monkeypatch
 ):
-    """Every skill is present and invocable, so nothing is missing — but no plugin claims any
-    of them, so preflight cannot say the conducted stack is the conducted stack."""
+    """Codex exposes a plugin's skill only as `<plugin>:<skill>`, and a `$` mention matches the
+    exact name (codex-cli 0.155.0: `$spec-craft:expectations` injected the skill, a bare
+    `$expectations` injected nothing). A flat `$CODEX_HOME/skills/expectations/` copy is
+    `$expectations` and nothing else, so every invocation the recipe writes resolves to nothing:
+    missing, with the plugin to install named."""
     _codex_install(tmp_path, monkeypatch, flat_only=True)
     out = preflight.check(project_root=str(tmp_path / "project"))
     assert not out["ok"], out
-    assert out["missing"] == []
-    assert "$expectations" in out["unverified"]
-    assert "$writing-plans" in out["unverified"]
-    # environment-provided skills claim no plugin, so they are not in question
-    assert "$document-release" not in out["unverified"]
+    assert out["unverified"] == [], out
+    assert "$spec-craft:expectations" in out["missing"]
+    assert "$superpowers:writing-plans" in out["missing"]
+    # environment-provided skills claim no plugin, and the flat copies are exactly them
+    assert "$document-release" not in out["missing"]
 
 
 def test_a_plugin_codex_lists_but_cannot_locate_is_unverified_never_missing(
@@ -283,30 +326,28 @@ def test_a_plugin_codex_lists_but_cannot_locate_is_unverified_never_missing(
     out = preflight.check(project_root=str(tmp_path / "project"))
 
     assert not out["ok"], out
-    assert "$expectations" in out["unverified"], out
-    assert "$executable-assertions" in out["unverified"], out
+    assert "$spec-craft:expectations" in out["unverified"], out
+    assert "$spec-craft:executable-assertions" in out["unverified"], out
     assert out["missing"] == [], out
     # the other plugins are still fine — this is per-plugin, not a whole-machine degrade
-    assert "$writing-plans" not in out["unverified"], out
+    assert "$superpowers:writing-plans" not in out["unverified"], out
     advice = "\n".join(out["advice"]).lower()
     assert "install it" not in advice, advice
     assert "not on disk" in advice, advice
     assert "spec-craft" in advice
 
 
-def test_the_unverified_advice_says_which_of_the_two_causes_it_is(
+def test_a_hand_copied_stack_is_advised_as_missing_not_as_a_broken_install(
     tmp_path, monkeypatch
 ):
-    """`unverified` has two causes and one remedy each, so one shared sentence is wrong for
-    whichever case it is not: a hand-copied flat skill IS installed and just unattributable
-    (install the plugin), while a listed-but-unlocatable root is a broken install (repair it,
-    do not treat it as absent). Reporting the first wording for the second is what would make
-    an owner reinstall a plugin that is already there."""
+    """A flat copy answers to none of the qualified names, so its remedy is the missing one —
+    install the plugin — and never the listed-but-unlocatable wording, which would send the
+    owner to repair a plugin install that does not exist."""
     _codex_install(tmp_path, monkeypatch, flat_only=True)
     flat = "\n".join(
         preflight.check(project_root=str(tmp_path / "p"))["advice"]
     ).lower()
-    assert "unattributed skill" in flat
+    assert "install it" in flat
     assert "not on disk" not in flat
 
 
@@ -359,6 +400,144 @@ def test_a_codex_install_missing_the_claude_wrapper_fails_closed(tmp_path, monke
     assert "$claude" in out["missing"]
 
 
+# ------------------------------------------- Codex names a skill by its frontmatter `name`
+#
+# These read `codex_skill_names`, the rule conductor applies to the trees Codex's catalog does not
+# speak for (its own checkout, the dev roots) and to on-disk evidence.
+#
+# Measured against codex-cli 0.155.0's own `skills/list` (app-server): a SKILL.md that declares
+# `name: alpha` in a directory called `dir-a` is listed as `alpha`; a quoted `name: "beta"` is
+# `beta`; a SKILL.md with no `name` falls back to its directory name. gstack depends on the first
+# rule — it installs `gstack-claude/` declaring `name: claude` — so a discovery that reads only
+# directory names reports `$claude` missing on a machine where `$claude` is what Codex lists.
+
+
+def test_a_gstack_style_codex_install_resolves_the_environment_provided_skills(
+    tmp_path, monkeypatch
+):
+    _codex_install(tmp_path, monkeypatch, env_dir_prefix="gstack-")
+    out = preflight.check(project_root=str(tmp_path / "project"))
+    assert out["ok"], out
+
+
+def _codex_home_with(tmp_path, monkeypatch, skills):
+    """`$CODEX_HOME/skills/<dir>/SKILL.md` with the given text each, and no plugins."""
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    for dirname, text in skills.items():
+        d = home / "skills" / dirname
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(text)
+    _stub_codex_on_path(tmp_path, monkeypatch, {})
+    return home
+
+
+def test_codex_discovery_reports_the_declared_name_not_the_directory(
+    tmp_path, monkeypatch
+):
+    home = _codex_home_with(
+        tmp_path,
+        monkeypatch,
+        {
+            "gstack-claude": "---\nname: claude\ndescription: x\n---\nbody\n",
+            "quoted": '---\nname: "beta"\ndescription: x\n---\n',
+            "single-quoted": "---\nname: 'gamma'\ndescription: x\n---\n",
+            "nameless": "---\ndescription: no name\n---\n",  # outside the subset
+        },
+    )
+    found = codex_host.codex_skill_names(f"{home}/skills/*/SKILL.md")
+    assert {"claude", "beta", "gamma"} <= found
+    assert not {"gstack-claude", "quoted", "single-quoted", "nameless"} & found
+
+
+def test_a_codex_directory_named_after_a_requirement_does_not_satisfy_it(
+    tmp_path, monkeypatch
+):
+    """Name, not directory, is what Codex resolves `$claude` against. A directory called
+    `claude` that declares another name is not `$claude`, and a `gstack-claude` directory that
+    declares `gstack-claude` is not either: there is no prefix or suffix matching."""
+    home = _codex_home_with(
+        tmp_path,
+        monkeypatch,
+        {
+            "claude": "---\nname: something-else\ndescription: d\n---\n",
+            "gstack-claude": "---\nname: gstack-claude\ndescription: d\n---\n",
+        },
+    )
+    assert "claude" not in codex_host.codex_skill_names(f"{home}/skills/*/SKILL.md")
+
+
+def test_a_name_line_outside_the_frontmatter_is_not_a_declared_name(
+    tmp_path, monkeypatch
+):
+    home = _codex_home_with(
+        tmp_path,
+        monkeypatch,
+        {
+            "no-frontmatter": "name: claude\n",
+            "body-only": "---\ndescription: x\n---\nname: claude\n",
+            "nested": "---\ndescription: x\nmetadata:\n  name: claude\n---\n",
+            "empty-name": '---\nname: ""\ndescription: x\n---\n',
+        },
+    )
+    found = codex_host.codex_skill_names(f"{home}/skills/*/SKILL.md")
+    assert "claude" not in found
+    # codex-cli 0.155.0 lists each of these under its directory name
+    # Each of these is also outside conductor's strict subset, so none is read at all.
+    assert not {"body-only", "nested", "empty-name"} & found
+
+
+def test_a_codex_name_outside_the_flat_subset_is_not_read(tmp_path, monkeypatch):
+    """A trailing comment is valid YAML that Codex loads, but it is outside the subset
+    conductor reads exactly, so the file reads as not loadable: the safe direction."""
+    home = _codex_home_with(
+        tmp_path,
+        monkeypatch,
+        {
+            "commented": "---\nname: delta # trailing\ndescription: x\n---\n",
+            "crlf": "---\r\nname: eps\r\ndescription: x\r\n---\r\n",
+        },
+    )
+    found = codex_host.codex_skill_names(f"{home}/skills/*/SKILL.md")
+    assert "eps" in found
+    assert not {"delta", "commented"} & found
+
+
+def test_a_codex_plugin_skill_is_qualified_by_its_declared_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    plug = tmp_path / "spec-craft"
+    (plug / ".codex-plugin").mkdir(parents=True)
+    (plug / ".codex-plugin" / "plugin.json").write_text('{"name": "spec-craft"}')
+    skill = plug / "skills" / "spec-craft-expectations"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
+    _stub_codex_on_path(tmp_path, monkeypatch, {})
+    monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
+    found = preflight.available_commands(
+        host_id="codex", project_root=str(tmp_path / "project")
+    )
+    assert "spec-craft:expectations" in found
+    assert "spec-craft:spec-craft-expectations" not in found
+
+
+def test_claude_discovery_still_names_a_user_skill_by_its_directory(
+    tmp_path, monkeypatch
+):
+    """Claude Code's rule is the other one: a user skill is invoked by its directory name
+    (`~/.claude/skills/connect-chrome/` declaring `name: open-gstack-browser` is
+    `/connect-chrome`). Codex's rule must not leak into the Claude adapter."""
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    d = home / "skills" / "connect-chrome"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: open-gstack-browser\ndescription: d\n---\n")
+    found = preflight.available_commands(host_id="claude")
+    assert "connect-chrome" in found
+    assert "open-gstack-browser" not in found
+
+
 def test_required_commands_swap_only_the_opposite_host_wrapper():
     claude = preflight.required_commands("claude")
     codex = preflight.required_commands("codex")
@@ -372,14 +551,13 @@ def test_missing_names_are_rendered_in_the_hosts_own_invocation_form():
     on_codex = preflight.check(available=set(), host_id="codex")["missing"]
     assert "/spec-craft:expectations" in on_claude
     assert "/document-release" in on_claude
-    # Codex skill dirs are flat, so the plugin qualifier is dropped, not transliterated into
-    # a `$spec-craft:expectations` that resolves to nothing.
-    assert "$expectations" in on_codex
+    # Codex names an installed plugin's skill `<plugin>:<skill>` and matches a `$` mention
+    # exactly, so the qualifier is kept; a bare `$expectations` resolves to nothing.
+    assert "$spec-craft:expectations" in on_codex
     assert "$document-release" in on_codex
-    assert not any(":" in name for name in on_codex)
 
 
-def test_a_codex_run_resolves_a_plugin_qualified_skill_from_a_flat_dir(
+def test_a_codex_run_does_not_resolve_a_plugin_qualified_skill_from_a_flat_dir(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("CONDUCTOR_HOST", "codex")
@@ -387,9 +565,12 @@ def test_a_codex_run_resolves_a_plugin_qualified_skill_from_a_flat_dir(
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
     d = tmp_path / "codex-home" / "skills" / "expectations"
     d.mkdir(parents=True)
-    (d / "SKILL.md").write_text("---\n---\n")
+    (d / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
+    _stub_codex_on_path(
+        tmp_path, monkeypatch, {}, catalog=[("expectations", d / "SKILL.md", None)]
+    )
     out = preflight.check(project_root=str(tmp_path / "project"))
-    assert "$expectations" not in out["missing"]
+    assert "$spec-craft:expectations" in out["missing"]
 
 
 def test_a_same_named_skill_from_another_plugin_is_not_the_required_one_on_either_host():
@@ -407,24 +588,25 @@ def test_a_same_named_skill_from_another_plugin_is_not_the_required_one_on_eithe
     )
     assert not on_claude["ok"]
     assert not on_codex["ok"], on_codex
-    assert on_codex["missing"] == ["$expectations"]
+    assert on_codex["missing"] == ["$spec-craft:expectations"]
 
 
-def test_a_flat_codex_skill_is_reported_unverifiable_never_as_a_pass():
-    """Codex skill dirs are flat, so a bare `expectations` under $CODEX_HOME/skills/ carries no
-    plugin identity at all. It IS invocable as `$expectations`, so it is not missing — but
-    preflight cannot justify calling it spec-craft's, and a gate that greens on what it cannot
-    check is worth nothing."""
+@pytest.mark.parametrize("host_id", ["claude", "codex"])
+def test_a_bare_same_named_skill_is_not_the_plugin_skill_on_either_host(host_id):
+    """A bare `expectations` answers to `/expectations` or `$expectations`, never to the
+    qualified name the recipe invokes. Both hosts now agree: the requirement is missing, and the
+    advice names the plugin that ships it."""
     out = preflight.check(
         required=["spec-craft:expectations"],
         available={"expectations"},
-        host_id="codex",
+        host_id=host_id,
     )
+    rendered = base.load(host_id).native_invocation("spec-craft:expectations")
     assert not out["ok"], out
-    assert out["unverified"] == ["$expectations"]
-    assert out["missing"] == []
-    line = next(a for a in out["advice"] if a.startswith("$expectations"))
-    assert "cannot verify" in line and "spec-craft" in line
+    assert out["missing"] == [rendered]
+    assert out["unverified"] == []
+    line = next(a for a in out["advice"] if a.startswith(rendered))
+    assert "`spec-craft` plugin" in line
 
 
 def test_a_codex_skill_attributed_to_the_required_plugin_is_a_clean_pass():
@@ -437,13 +619,24 @@ def test_a_codex_skill_attributed_to_the_required_plugin_is_a_clean_pass():
     assert out["unverified"] == []
 
 
-def test_an_unqualified_requirement_is_satisfied_by_any_plugins_copy_on_codex():
+def test_an_unqualified_requirement_is_satisfied_by_any_plugins_copy_on_claude():
     """`code-review` is environment-provided: the requirement names no plugin, so no plugin
-    identity is being claimed and there is nothing to verify."""
+    identity is being claimed and there is nothing to verify. Claude resolves a bare slash
+    command to a plugin's skill of that name."""
+    out = preflight.check(
+        required=["code-review"], available={"gstack:code-review"}, host_id="claude"
+    )
+    assert out["ok"] and out["unverified"] == []
+
+
+def test_an_unqualified_requirement_needs_an_exact_name_on_codex():
+    """Codex matches a `$` mention against the exact skill name, and a plugin's skill is named
+    `<plugin>:<skill>`, so `$code-review` does not reach `gstack:code-review`."""
     out = preflight.check(
         required=["code-review"], available={"gstack:code-review"}, host_id="codex"
     )
-    assert out["ok"] and out["unverified"] == []
+    assert not out["ok"]
+    assert out["missing"] == ["$code-review"]
 
 
 def test_codex_recovers_plugin_identity_from_the_installed_plugin_list(
@@ -451,20 +644,22 @@ def test_codex_recovers_plugin_identity_from_the_installed_plugin_list(
 ):
     """Identity IS recoverable for a plugin-installed skill: `codex plugin list --json` reports
     each installed plugin's identity, the install root derives from it, and its skills live
-    under that root. Discovery must use it rather than flattening every skill into an
-    unattributable bare name."""
+    under that root. The on-disk evidence discovery reports when Codex's catalog is missing
+    must use it rather than flattening every skill into an unattributable bare name — and it
+    stays evidence: nothing found this way is counted as invocable."""
     home = tmp_path / "codex-home"
     monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
     skill = _installed_root(home, "spec-craft") / "skills" / "expectations"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    (skill / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
     _stub_codex_on_path(
         tmp_path, monkeypatch, {"spec-craft": tmp_path / "marketplace" / "spec-craft"}
     )
-    avail = preflight.available_commands(host_id="codex")
-    assert "spec-craft:expectations" in avail
-    assert "expectations" not in avail
+    snapshot = codex_host.CodexAdapter().host_skills(project_root=str(tmp_path / "p"))
+    assert "spec-craft:expectations" in snapshot.on_disk
+    assert "expectations" not in snapshot.on_disk
+    assert "spec-craft:expectations" not in snapshot.commands
 
 
 def test_a_second_marketplace_shipping_a_same_named_plugin_greens_nothing(
@@ -478,10 +673,16 @@ def test_a_second_marketplace_shipping_a_same_named_plugin_greens_nothing(
     home = tmp_path / "codex-home"
     monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    catalog = []
     for market in ("evil-market", _MARKET):
         skill = _installed_root(home, "spec-craft", market) / "skills" / "expectations"
         skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text("---\n---\n")
+        (skill / "SKILL.md").write_text(
+            "---\nname: expectations\ndescription: d\n---\n"
+        )
+        catalog.append(
+            ("spec-craft:expectations", skill / "SKILL.md", f"spec-craft@{market}")
+        )
     _stub_codex_on_path(
         tmp_path,
         monkeypatch,
@@ -489,6 +690,7 @@ def test_a_second_marketplace_shipping_a_same_named_plugin_greens_nothing(
             ("spec-craft", "evil-market"): tmp_path / "evil" / "spec-craft",
             ("spec-craft", _MARKET): tmp_path / "curated" / "spec-craft",
         },
+        catalog=catalog,
     )
 
     out = preflight.check(
@@ -498,12 +700,15 @@ def test_a_second_marketplace_shipping_a_same_named_plugin_greens_nothing(
     )
 
     assert not out["ok"], out
-    assert out["unverified"] == ["$expectations"], out
+    assert out["unverified"] == ["$spec-craft:expectations"], out
+    line = next(a for a in out["advice"] if a.startswith("$spec-craft:expectations"))
+    assert "more than one installed plugin" in line, line
+    assert "install it" not in line.lower(), line
 
 
 def test_a_disabled_spec_craft_is_not_a_healthy_conducted_stack(tmp_path, monkeypatch):
     """`codex plugin list` still reports a disabled plugin as installed, and its tree is still
-    on disk — but the loader stops before its skills, so every `$expectations` call in the run
+    on disk — but the loader stops before its skills, so every `spec-craft:expectations` call
     resolves to nothing. Preflight must report that, not green on a directory listing."""
     home = tmp_path / "codex-home"
     monkeypatch.setenv("CODEX_HOME", str(home))
@@ -590,7 +795,10 @@ def test_available_commands_uses_the_requested_hosts_root(tmp_path, monkeypatch)
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
     d = tmp_path / "codex-home" / "skills" / "only-on-codex"
     d.mkdir(parents=True)
-    (d / "SKILL.md").write_text("---\n---\n")
+    (d / "SKILL.md").write_text("---\ndescription: d\n---\n")
+    _stub_codex_on_path(
+        tmp_path, monkeypatch, {}, catalog=[("only-on-codex", d / "SKILL.md", None)]
+    )
     assert "only-on-codex" in preflight.available_commands(host_id="codex")
     assert "only-on-codex" not in preflight.available_commands(host_id="claude")
 
@@ -613,8 +821,8 @@ def test_a_codex_install_without_spec_craft_fails_closed(tmp_path, monkeypatch):
     )
     out = preflight.check(project_root=str(tmp_path / "project"))
     assert not out["ok"]
-    assert "$expectations" in out["missing"]
-    assert "$executable-assertions" in out["missing"]
+    assert "$spec-craft:expectations" in out["missing"]
+    assert "$spec-craft:executable-assertions" in out["missing"]
 
 
 def test_the_advice_for_a_missing_plugin_skill_names_the_plugin(tmp_path, monkeypatch):
@@ -623,7 +831,7 @@ def test_the_advice_for_a_missing_plugin_skill_names_the_plugin(tmp_path, monkey
     # The SKILL'S OWN line must name it, not merely the trailing NOTE. Asserting against the
     # joined text passes with the per-skill half deleted, because the NOTE repeats the plugin
     # names — a needle that survives its own fix is the hole this repo keeps falling into.
-    line = next(a for a in advice if a.startswith("$expectations"))
+    line = next(a for a in advice if a.startswith("$spec-craft:expectations"))
     assert "spec-craft" in line
 
 
@@ -710,7 +918,7 @@ def test_check_discovers_the_projects_own_codex_skills_not_the_current_directory
     proj = tmp_path / "proj"
     skill = proj / ".codex" / "skills" / "expectations"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    (skill / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-codex-home"))
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
     _bin_dir_without_codex(tmp_path, monkeypatch)
@@ -719,7 +927,9 @@ def test_check_discovers_the_projects_own_codex_skills_not_the_current_directory
         required=["expectations"], host_id="codex", project_root=str(proj)
     )
 
-    assert out["ok"], out
+    # No Codex to confirm it, so not a pass — but the project's own tree was the one scanned.
+    assert out["unverified"] == ["$expectations"], out
+    assert any("is on disk" in line for line in out["advice"]), out
 
 
 def test_a_cached_plugin_is_named_by_its_cache_path_not_by_its_manifest(
@@ -758,7 +968,7 @@ def test_a_manifestless_plugin_dir_contributes_nothing_on_either_host(
     plug = tmp_path / "spec-craft"
     skill = plug / "skills" / "expectations"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    (skill / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
     monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty-claude-home"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-codex-home"))
@@ -786,7 +996,7 @@ def test_a_project_recorded_as_codex_is_preflighted_against_the_codex_root(
 
     out = preflight.check(project_root=str(proj))
 
-    assert out["missing"] == ["$expectations"], out
+    assert out["missing"] == ["$spec-craft:expectations"], out
 
 
 # ------------------------------------------- a host that cannot be asked is not a host with nothing
@@ -834,8 +1044,8 @@ def test_an_unanswerable_plugin_probe_degrades_to_unverified_never_missing(
 
     assert not out["ok"], out
     assert out["missing"] == [], out
-    assert "$expectations" in out["unverified"], out
-    assert "$writing-plans" in out["unverified"], out
+    assert "$spec-craft:expectations" in out["unverified"], out
+    assert "$superpowers:writing-plans" in out["unverified"], out
 
 
 def test_the_expiry_advice_names_the_probe_instead_of_prescribing_a_reinstall(
@@ -862,7 +1072,7 @@ def test_the_expiry_keeps_the_names_that_were_established_before_the_probe(
     tmp_path, monkeypatch
 ):
     """Anti-over-correction: degrading must not also discard what discovery already knew.
-    `$autodev` resolves from conductor's own checkout and never depended on the probe, so a
+    `conductor:autodev` resolves from conductor's own checkout and never depended on the probe, so a
     degrade that reports it unresolved has thrown away a fact that was never in doubt."""
     _codex_install(tmp_path, monkeypatch)
     _codex_that_never_answers(tmp_path, monkeypatch)

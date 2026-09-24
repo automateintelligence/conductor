@@ -264,6 +264,21 @@ The consequences, which are the part that matters to Plan 04:
    a reserved slot alongside the empty `.agents/`. Both are invisible to git today (see
    [Verification status](#verification-status)).
 
+> **Correction, 2026-09-23 (codex-cli 0.155.0).** Points 1 and 2 no longer hold, and neither
+> does the reading taken from them that Codex has no plugin namespace. In 0.155.0, `$name` is
+> resolved by the host itself: Codex keeps a skill catalog and injects the matching `SKILL.md`
+> when a prompt mentions `$<exact name>`. That catalog namespaces skills. An installed plugin's
+> skills are listed as `<plugin>:<skill>`, and so is a user skill whose nearest plugin manifest
+> names a plugin, for example `~/.agents/skills/superpowers/<skill>` is listed as
+> `superpowers:<skill>`. Verified live: with spec-craft installed in a scratch `CODEX_HOME`,
+> `codex exec` injected the skill for `$spec-craft:expectations` and injected nothing for
+> `$expectations`. The catalog comes from `codex app-server` `skills/list`. The rules behind
+> it are `resolve_skill_roots` and `SkillNamespaceResolver` in `codex-rs/ext/skills/src` at
+> tag `rust-v0.155.0`. The Recommendation in point 4 still stands for the launch: the driver
+> names the `SKILL.md` path, so it depends on neither mechanism. Conductor's Codex adapter now
+> keeps the plugin qualifier and asks Codex for its catalog
+> (`conductor/hosts/codex.py`, `native_invocation` and `skills_list`).
+
 ### Skill file format is compatible across hosts
 
 **Verified** at `~/.codex/skills/code-review/SKILL.md`: Codex skills use the **same
@@ -276,6 +291,15 @@ This format compatibility means conductor's existing `skills/*/SKILL.md` files a
 reusable across both hosts with no rewrite**. Worth stating plainly, because it materially
 reduces Plan 04's estimated size: the Codex work concentrates in launch, argv construction,
 result capture, and packaging — not in porting skill content.
+
+> **Correction, 2026-09-23 (codex-cli 0.155.0).** The file format is the same, but the two
+> hosts name skills differently and accept different files. Codex names a skill by its declared
+> frontmatter `name` and uses the directory name only when none is declared. gstack installs
+> `~/.codex/skills/gstack-claude/` with `name: claude`, so Codex lists it as `claude`. Claude
+> Code names a user skill by its directory. Codex also refuses to load a `SKILL.md` that has no
+> closing `---` frontmatter, an empty or missing `description`, or a `name` longer than 64
+> characters (`parse_skill_frontmatter_metadata`, `codex-rs/skills/src/parser.rs` at
+> `rust-v0.155.0`).
 
 ## Environment notes
 

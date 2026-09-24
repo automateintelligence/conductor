@@ -40,6 +40,22 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    and preflight prints the right one on that line. Pass it on verbatim. Only an `ok` result
    proceeds (fail-closed, amendment E). Do not launch a loop that dies at the first conducted
    call, and do not launch one whose conducted skills are not the ones they claim to be.
+0b. **REGISTER OWNERSHIP — only when this run ALREADY EXISTS.** `conductor run owner-busy`
+   first; exit 11 means nothing owns it and you may proceed, exit 0 means something does — read
+   the line it printed, **stop**, and tell the user rather than starting work in a checkout
+   another worker is writing to.
+
+   Then `conductor run own` and release with `conductor run disown` at the end of step 6.
+
+   **Skip both on a genuinely first run** — there is no run record to own yet, and no cron
+   driver either, so nothing can collide. The case this exists for is the RE-INVOCATION this
+   skill is designed to support: `/conductor:start` is reconcile-first and idempotent, so it is
+   normal to run it again on a live run — and by then step 6 has installed a crontab line that
+   fires every twenty minutes. Steps 4 and 5 dispatch subagents that write plans, gate tests and
+   issue state; a fire landing in the middle of that is two workers editing one checkout.
+   `owner-busy` printing `state=free reason=no-run` is the first-run case answering for itself,
+   so running the check unconditionally costs nothing.
+
 1. **Detect spec source**; load spec + Expectations. The **executable-assertion specs** live in
    `<spec>.assertions.md` — the sibling file `/spec-craft:executable-assertions` writes — **not**
    inline in the spec; load them from there if it exists.
@@ -223,10 +239,15 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      hand-written generation-time-pinned path did (live-run silent stall 2026-07-05, see
      `docs/reviews/2026-07-05-conductor-tier-b-driver-robustness.md`). It fires `claude -p
      "/conductor:autodev"` from the RUN WORKTREE (never the owner's checkout; autodev, not start —
-     a headless one-shot must do a phase, not register a cron that dies with it), guarding: (a)
-     exit if a claude process already holds the worktree/project cwd (never double-drive); (b)
-     exit once `conductor assert run --level spec` is green; (c) `flock -n
-     <project>/.conductor/resume.lock` for the whole fire.
+     a headless one-shot must do a phase, not register a cron that dies with it), guarding: (a) one
+     driver at a time — `flock -n <project>/.conductor/resume.lock`, held by the driver (never
+     inherited by the worker or its descendants) for the whole fire, which is the ONLY thing that
+     decides it (never a `pgrep` for the host's name: that matched nothing on Codex and matched
+     the driver's own command line on Claude); a lock that cannot be taken for any reason other
+     than contention fails LOUD (`lock-unavailable`, exit 101) instead of skipping; (a2) skip
+     while the run's ownership record names a live worker (`conductor run owner-busy`); (b) exit
+     once `conductor assert run --level spec` is green. Every skip logs `fire-skipped
+     reason=...`, so an exit 0 can never mean "permanently blocked" with nothing on the record.
    - **Machine/run-specific env goes in `<main-root>/.conductor/resume-env.sh`** (gitignored),
      which the driver sources — NEVER inline in the driver, so regeneration can't clobber it. Put
      the owner-owned `CONDUCTOR_MERGE_VERIFY` there (plus any dev-mode `CONDUCTOR_PLUGIN_DIRS` or
@@ -284,8 +305,10 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      `<main-root>/.conductor/resume-autodev.log` show `driver-unresolved`, `plugin-list-timeout`
      (a Codex plugin lookup cut off at its bound — logged before the fire ever starts),
      `fire-timeout` (the fire showed no progress for its whole silence window and was killed),
-     `fire-unsupervised` (no `ps` on the machine, so nothing bounded the fire) or
-     `fire-end rc=` non-zero (the generated driver logs all five) — those offending log lines are NAMED verbatim.
+     `fire-unsupervised` (no `ps` on the machine, so nothing bounded the fire),
+     `lock-unavailable` (the driver could not lock at all — not contention),
+     `fire-unkillable` (part of a fire survived SIGKILL; the driver exited anyway) or
+     `fire-end rc=` non-zero (the generated driver logs all seven) — those offending log lines are NAMED verbatim.
      On a non-zero status, WARN the owner loudly — the run has been failing to make
      headless progress. (The driver already fails loud per-fire; the tested status command makes
      a repeated failure visible at the next owner check-in instead of accumulating unnoticed.)
@@ -302,10 +325,15 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    `experiments/E5-end-to-end/recovery.md`).
    **Tell the user one limit:** recurring in-session crons **auto-expire after 7 days** —
    re-invoke `/conductor:start` to extend a longer run (the Tier-B heartbeat does this itself).
-   **Tell the user one gap:** when you resume from the owner's main checkout with a live session
-   open, the Tier-B driver's guard (a) no-ops on every fire (a claude process holds the cwd), so
-   the run makes **zero headless progress until this session goes idle or closes**. Say so
-   explicitly rather than leaving the owner to assume it is progressing.
+   **Tell the user one gap:** an open session does not by itself stop a Tier-B fire — the
+   driver never looks at process names. What stops one is the run's ownership record: while
+   ANY worker holds it (this skill from step 0b to the end of step 6, or an in-session
+   `/conductor:autodev` tick mid-phase), each fire logs `fire-skipped reason=owner-busy` and
+   exits without working, and while another driver fire holds `.conductor/resume.lock` it logs
+   `fire-skipped reason=lock-held`. So the run makes **no headless progress while a session
+   owns it**; fires resume on the first tick after the record is released (`conductor run
+   disown`, or the owner's exit is proven). Say so explicitly rather than leaving the owner to
+   assume it is progressing.
 7. **(Phase 2 only)** start the dispatcher loop — the supervisor that caps concurrency and assigns
    eligible phases to parallel workers. Single-loop needs no cap (`CronCreate` can't overlap fires);
    controlled parallelism is the dispatcher's job, not the cron cadence.

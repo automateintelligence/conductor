@@ -275,6 +275,35 @@ def test_status_recent_fire_unsupervised_flips_nonzero_and_is_named(
     assert bad in capsys.readouterr().out
 
 
+def test_status_recent_lock_unavailable_flips_nonzero_and_is_named(
+    tmp_path, monkeypatch, capsys
+):
+    """A driver that cannot LOCK (no flock, an unopenable lock file, a filesystem that cannot
+    lock) exits loud on every fire and never works. Unlike `lock-held`, which is contention and
+    therefore evidence, this is a fault that only an operator can clear."""
+    proj = _durable(tmp_path, monkeypatch)
+    bad = f"{_now()} lock-unavailable rc=127 lock={proj}/.conductor/resume.lock"
+    (proj / ".conductor" / "resume-autodev.log").write_text(
+        f"{bad}\n{_now()} fire-skipped reason=lock-held lock=x\n"
+    )
+    assert driver.status(str(proj)) == 1
+    out = capsys.readouterr().out
+    assert bad in out
+    assert "reason=lock-held" not in out, "contention is evidence, not a failure"
+
+
+def test_status_recent_fire_unkillable_flips_nonzero_and_is_named(
+    tmp_path, monkeypatch, capsys
+):
+    """Part of a fire survived SIGKILL and the driver exited anyway (it must stay bounded), so
+    the lock is free while something of the old fire may still be writing to the worktree."""
+    proj = _durable(tmp_path, monkeypatch)
+    bad = f"{_now()} fire-unkillable pgid=4242 pids=4243 grace=10s"
+    (proj / ".conductor" / "resume-autodev.log").write_text(f"{bad}\n")
+    assert driver.status(str(proj)) == 1
+    assert bad in capsys.readouterr().out
+
+
 def test_status_clean_recent_log_stays_zero(tmp_path, monkeypatch, capsys):
     proj = _durable(tmp_path, monkeypatch)
     (proj / ".conductor" / "resume-autodev.log").write_text(
@@ -953,3 +982,39 @@ def test_the_end_to_end_status_message_carries_the_hosts_prompt(
     renderings = _autodev_renderings()
     assert renderings["claude"] in out, out
     assert renderings["codex"] not in out, out
+
+
+def test_install_during_a_fire_waits_then_fails_naming_the_lock_and_the_retry(
+    tmp_path, monkeypatch, capsys
+):
+    """A heartbeat holds the driver's install lock for its whole fire. An operator's install in
+    that window waits, then fails having written nothing, and says what to do."""
+    import fcntl
+    import time
+
+    proj, root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    monkeypatch.setattr(driver, "INSTALL_LOCK_TIMEOUT_S", 0.2)
+    lock = driver.install_lock_path(root)
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    # A separate open file description: flock conflicts between descriptions, even in one
+    # process, exactly as it does against a heartbeat's.
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        started = time.monotonic()
+        assert driver.install(str(proj), str(wt)) == 1
+        waited = time.monotonic() - started
+        # It WAITED the configured bound rather than failing on the first attempt.
+        assert waited >= driver.INSTALL_LOCK_TIMEOUT_S, waited
+        err = capsys.readouterr().err
+        assert lock in err and "fire" in err and "no write occurred" in err.lower(), err
+        assert "re-run" in err.lower(), err
+        log = os.path.join(root, ".conductor", "resume-autodev.log")
+        assert f"tail -n 3 {log}" in err, err
+        assert "conductor driver status" not in err, err
+        assert not (proj / ".conductor" / "resume-autodev.sh").exists()
+    finally:
+        os.close(fd)

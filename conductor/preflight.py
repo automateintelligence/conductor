@@ -7,19 +7,23 @@ are derived rather than written down:
   flat skill dirs, ``prompts/``, and a project-local ``./.codex/skills/``. Each adapter's
   ``discovered_commands`` owns its own roots.
 * **How a name is written.** The requirement ``spec-craft:expectations`` keeps its plugin
-  qualifier and gains a slash prefix under Claude; under Codex it becomes a bare
-  ``$expectations`` — the plugin qualifier has no Codex counterpart, so it is dropped for both
-  matching and reporting by the one function that knows the rule, ``native_invocation``.
+  qualifier on both hosts — each names an installed plugin's skill ``<plugin>:<skill>`` — and
+  gains the host's sigil (``/`` or ``$``) from the one function that knows the rule,
+  ``native_invocation``. Matching and reporting both go through it.
+* **Whether a bare name reaches a plugin.** Claude resolves ``/code-review`` to a plugin's
+  ``code-review`` skill; Codex matches a ``$`` mention against the exact name only. Each adapter
+  states which through ``resolves_unqualified_plugin_skills``.
 * **Who reviews.** The opposite-host review wrapper is ``codex`` on a Claude-hosted run and
   ``claude`` on a Codex-hosted one. This is the requirement that actually flips, and getting it
   wrong greens a machine that can only ever produce a same-host review.
 
-One genuine asymmetry, stated rather than papered over: on Claude the opposite-host wrapper is
-gstack's ``/codex`` skill, which exists. On Codex the mirror image is a ``claude`` wrapper,
-which nothing in the conducted stack ships today. A Codex machine without one therefore fails
-this gate — correctly. The run cannot get an opposite-host review, and reporting ``$claude``
-missing is the honest answer; silently accepting ``$codex`` would set up the same-host review
-the policy exists to forbid.
+Both wrappers ship in gstack: ``/codex`` on Claude, and on Codex a ``claude`` skill that gstack's
+Codex installer links in as ``$CODEX_HOME/skills/gstack-claude/``. The directory carries a
+``gstack-`` prefix but the SKILL.md declares ``name: claude``, and Codex resolves the declared
+name — which is why the Codex adapter's discovery reads it. No prefix is stripped and no suffix
+is matched: a skill satisfies ``$claude`` only by declaring that exact name. A Codex machine
+without one still fails this gate, correctly: silently accepting ``$codex`` would set up the
+same-host review the policy exists to forbid.
 """
 
 import os
@@ -33,16 +37,15 @@ from conductor.hosts.base import HostProbeTimeout, opposite
 class CheckResult(TypedDict):
     ok: bool
     missing: list[str]
-    #: Required, present under the required NAME, and impossible to attribute to the plugin the
-    #: requirement names. A third outcome exists because the two-valued one forced a lie: on a
-    #: host that drops the plugin qualifier, "present under this name" and "this is the required
-    #: plugin's skill" are different facts, and reporting the second when only the first was
-    #: checked is how preflight greens a machine whose spec-craft is absent — or hostile.
+    #: Required, and the host has made a claim about it that could not be checked: its plugin is
+    #: listed but not on disk, or more than one installed plugin carries its name. A third
+    #: outcome exists because the two-valued one forced a lie either way — `missing` sends the
+    #: owner to install what they have, and `ok` greens a machine whose spec-craft is absent,
+    #: or hostile.
     unverified: list[str]
     #: One actionable line per missing or unverifiable skill, plus a trailing note when this
-    #: host does not resolve plugin dependencies. "Missing" alone is not actionable:
-    #: `$expectations` does not tell a Codex user that the thing to install is called
-    #: `spec-craft`.
+    #: host does not resolve plugin dependencies. "Missing" alone is not actionable: an
+    #: owner reading a skill name still has to learn which plugin to install.
     advice: list[str]
 
 
@@ -90,39 +93,41 @@ def _resolve(
     adapter: discovery.CommandDiscovery,
     avail: set[str],
     unlocatable: frozenset[str],
+    contested: frozenset[str] = frozenset(),
 ) -> str:
     """One required skill -> ``ok`` | ``unverified`` | ``missing``.
 
-    The name is matched AS THIS HOST RESOLVES IT, and the plugin qualifier is evidence that is
-    checked wherever it survives:
+    The name is matched AS THIS HOST RESOLVES IT. Both hosts keep the plugin qualifier, so a
+    plugin-qualified requirement is one rule everywhere:
 
-    * Claude keeps the qualifier, so ``spec-craft:expectations`` is an exact match or nothing.
-    * Codex drops it, so ``$expectations`` may be satisfied by ``spec-craft:expectations`` —
-      a plugin skill Codex itself attributed. That is a clean pass.
-    * A skill of the required name attributed to some OTHER plugin is not the required skill.
-      It is missing, on either host: "spec-craft is not installed" is not a host-specific fact,
-      and accepting a same-named skill is an invitation to ship one.
-    * A skill of the required name with NO attribution — a flat ``$CODEX_HOME/skills/`` dir —
-      is invocable, so it is not missing, but its identity is not recoverable from a directory
-      name. That is ``unverified``: reported, never counted as a pass.
-    * A skill whose plugin the host LISTS as installed but cannot locate on disk is also
-      ``unverified``, and for the same reason the state exists: the host has made a claim that
-      could not be checked. Calling it ``missing`` says "this plugin is not installed", which is
-      not what the host reported, and sends the owner to reinstall something they already have.
+    * A plugin MORE THAN ONE installed root claims (``contested``) is ``unverified`` even though
+      its qualified name resolves: which root answers is not something conductor can establish,
+      and a second marketplace only has to ship a same-named plugin to be invoked in its place.
+    * Otherwise the exact qualified name is a pass.
+    * A skill of the required bare name, or one attributed to some OTHER plugin, is not the
+      required skill: it does not answer to the qualified invocation the recipe writes. That is
+      ``missing``, on either host.
+    * A skill whose plugin the host LISTS as installed but cannot locate on disk is
+      ``unverified``: the host has made a claim that could not be checked. Calling it
+      ``missing`` says "this plugin is not installed", which is not what the host reported, and
+      sends the owner to reinstall something they already have.
 
-    A requirement that names no plugin claims no identity, so a plugin's copy satisfies it.
+    A requirement that names no plugin claims no identity. An exact bare skill satisfies it on
+    any host, and a plugin's copy does too where the host routes a bare name to one.
     """
     rendered = adapter.native_invocation(name).lstrip("/$")
-    if ":" in rendered:  # this host keeps the qualifier: exact match or nothing
-        return "ok" if rendered in avail else "missing"
     if ":" in name:
         plugin = name.split(":", 1)[0]
-        if f"{plugin}:{rendered}" in avail:
-            return "ok"
-        if rendered in avail or plugin in unlocatable:
+        if plugin in contested:
             return "unverified"
-        return "missing"
-    if rendered in avail or any(a.endswith(f":{rendered}") for a in avail):
+        if rendered in avail:
+            return "ok"
+        return "unverified" if plugin in unlocatable else "missing"
+    if rendered in avail:
+        return "ok"
+    if adapter.resolves_unqualified_plugin_skills and any(
+        a.endswith(f":{rendered}") for a in avail
+    ):
         return "ok"
     return "missing"
 
@@ -133,6 +138,8 @@ def _advice(
     unverified: list[str],
     unlocatable: frozenset[str] = frozenset(),
     expired: str | None = None,
+    contested: frozenset[str] = frozenset(),
+    on_disk: frozenset[str] = frozenset(),
 ) -> list[str]:
     """One actionable line per missing skill, one per unverifiable one, then the dependency
     note when it applies.
@@ -142,12 +149,15 @@ def _advice(
     gate. What is missing is the plugin's claim on it.
 
     ``unverified`` has THREE causes and they do not share a remedy, so they do not share a
-    sentence. A flat, hand-copied skill is installed and merely unattributable — install the
-    plugin properly. A plugin the host lists but cannot locate is a BROKEN install: the owner
-    has it, the tree the host named is not there, and telling them to install it points at the
-    one thing that is not wrong. And an expired probe (``expired``) is neither: the host was
-    never able to answer, so NOTHING is known about any of them, and the only honest line names
-    the probe that expired rather than guessing at a remedy per skill.
+    sentence. A plugin more than one installed root claims is installed twice, and the owner
+    has to remove the copy they do not trust. A plugin the host lists but cannot locate is a
+    BROKEN install: the owner has it, the tree the host named is not there, and telling them to
+    install it points at the one thing that is not wrong. And an expired probe (``expired``) is
+    neither: the host was never able to answer, so NOTHING is known about any of them, and the
+    only honest line names the probe that expired rather than guessing at a remedy per skill.
+    A host that answered without its list of loadable skills (``HostSkills.unconfirmed``) is
+    handled the same way, with its own reason in place of the expiry. ``on_disk`` names what a
+    filesystem scan found: it earns a sentence in the line, never a pass.
 
     The note is the Track A answer to a packaging fact A3 verified against codex-cli 0.147.0:
     ``.codex-plugin/plugin.json`` has no ``dependencies`` field — the 180 manifests in the
@@ -173,13 +183,26 @@ def _advice(
             )
     for name in unverified:
         if expired is not None:
+            seen = adapter.native_invocation(name).lstrip("/$") in on_disk
             lines.append(
                 f"{adapter.native_invocation(name)} — {adapter.id} could not be asked what is "
                 f"installed, so this is neither confirmed present nor confirmed absent."
+                + (
+                    " A skill of this name is on disk, but only the host's own answer says "
+                    "whether it loads."
+                    if seen
+                    else ""
+                )
             )
             continue
         plugin = name.split(":", 1)[0]
-        if plugin in unlocatable:
+        if plugin in contested:
+            lines.append(
+                f"{adapter.native_invocation(name)} — more than one installed plugin is named "
+                f"`{plugin}`, so {adapter.id} cannot establish which one answers. Uninstall "
+                f"every `{plugin}` but the one you trust, then re-run preflight."
+            )
+        else:  # `_resolve` reaches `unverified` only through `contested` or `unlocatable`
             lines.append(
                 f"{adapter.native_invocation(name)} — {adapter.id} lists the `{plugin}` plugin "
                 f"as installed and enabled, but the install root that identity implies is NOT "
@@ -187,12 +210,6 @@ def _advice(
                 f"install, not a missing plugin: check "
                 f"`$CODEX_HOME/plugins/cache/<marketplace>/{plugin}/<version>` against "
                 f"`codex plugin list --json` before reinstalling."
-            )
-        else:
-            lines.append(
-                f"{adapter.native_invocation(name)} — present, but {adapter.id} cannot verify it "
-                f"is the `{plugin}` plugin's: it resolves as an unattributed skill. Install "
-                f"`{plugin}` as a {adapter.id} plugin so its identity is recoverable."
             )
     if expired is not None:
         lines.append(f"NOTE: {expired}")
@@ -219,6 +236,8 @@ def check(
     # different moments. A caller that supplies `available` has supplied a set of names and
     # nothing else, so it knows of no unlocatable plugin — never a leftover from another host.
     expired: str | None = None
+    contested: frozenset[str] = frozenset()
+    on_disk: frozenset[str] = frozenset()
     if available is not None:
         avail, unlocatable = available, frozenset()
     else:
@@ -236,10 +255,18 @@ def check(
                 else discovery.HostSkills(set(), frozenset())
             )
         avail, unlocatable = snapshot.commands, snapshot.unverifiable_plugins
+        contested = snapshot.contested_plugins
+        on_disk = snapshot.on_disk
+        # The host answered, but not with its own list of loadable skills. Same policy as an
+        # expiry: what was found on disk is evidence, not a pass.
+        if expired is None and snapshot.unconfirmed is not None:
+            expired = snapshot.unconfirmed
     # Match on the name AS THIS HOST RESOLVES IT: `native_invocation` is the single place that
-    # knows Claude keeps the plugin qualifier and Codex drops it, so matching and reporting
-    # cannot drift apart into a preflight that greens on a name it then prints differently.
-    outcomes = [(name, _resolve(name, adapter, avail, unlocatable)) for name in names]
+    # knows how this host writes a skill name, so matching and reporting cannot drift apart
+    # into a preflight that greens on a name it then prints differently.
+    outcomes = [
+        (name, _resolve(name, adapter, avail, unlocatable, contested)) for name in names
+    ]
     if expired is not None:
         # "Not in the set" does not mean "not installed" when the set could not be enumerated.
         # Every plugin-provided name is absent from `avail` for a reason that has nothing to do
@@ -257,7 +284,9 @@ def check(
         "ok": not unresolved and not unverified,
         "missing": [adapter.native_invocation(name) for name in unresolved],
         "unverified": [adapter.native_invocation(name) for name in unverified],
-        "advice": _advice(adapter, unresolved, unverified, unlocatable, expired),
+        "advice": _advice(
+            adapter, unresolved, unverified, unlocatable, expired, contested, on_disk
+        ),
     }
 
 

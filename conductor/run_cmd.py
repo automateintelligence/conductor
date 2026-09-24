@@ -20,6 +20,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from conductor.core import (
     hygiene,
     locks,
     names,
+    ownership,
     registry,
     repoint,
     resolve,
@@ -37,12 +39,31 @@ from conductor.core import (
     transaction,
     workstation,
 )
+from conductor.hosts import base as hostbase
+from conductor.hosts import runhost
 
 EXIT_OK = 0
 EXIT_FAIL = 1
 EXIT_AMBIGUOUS = 2
 EXIT_NO_RUN = 3
 EXIT_USAGE = 64
+
+#: `run owner-busy` answers one question with exactly two codes, and the split is deliberately
+#: NOT "0 success / non-zero failure". The caller is a cron driver deciding whether to launch a
+#: worker into a checkout, so the only safe shape is one where EVERY unplanned outcome means
+#: "do not launch".
+#:
+#: * `EXIT_OK` (0) — the condition the verb is named for HOLDS: a live, or unverifiable, owner
+#:   is on this run. Do not proceed. This is the `grep`/`test` convention: 0 means the predicate
+#:   matched.
+#: * `EXIT_OWNER_FREE` (11) — proven that nothing owns this run. Proceed.
+#:
+#: 11 rather than 1 because 1, 2, 3, 64 and 0 are all reachable from this module's generic
+#: failure paths — an argparse error, a lock timeout, an unrecoverable journal, an uncaught
+#: exception. If "proceed" were spelled with any of those, a crash in this verb would become a
+#: licence to fire into an occupied worktree. Only the one code that no generic path can produce
+#: means proceed, so every way this check can break lands on "do not launch".
+EXIT_OWNER_FREE = 11
 
 
 def spec_digest(repo_root: str, relative: str) -> str:
@@ -366,6 +387,239 @@ def cmd_gate_dir(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# --- ownership: register, consult, recover ---------------------------------------------------
+#
+# ONE RECORD, THREE VERBS, NO PROCESS-NAME MATCHING ANYWHERE. `own` is what an interactive
+# worker calls before it touches product code; `owner-busy` is what the cron driver and the
+# heartbeat consult; `disown` is the supported recovery. All three read and write the same
+# `owner.json` through `conductor.core.ownership`, and the liveness answer under all of them
+# comes from the kernel — `/proc/<pid>/stat` field 22 plus `boot_id` on Claude, an `flock` in
+# `/proc/locks` on Codex — never from a process name. The `pgrep -f 'claude'` guard this
+# replaces matched Conductor's own shells and missed every real session; it does not come back
+# in a narrower form either.
+
+
+def _session_identity(repo_root: str, host_override: str | None) -> tuple[str, str]:
+    """``(host_id, identity)`` for the SESSION running this command.
+
+    The host comes from what Conductor recorded for this project, or from an explicit
+    ``--host``. It is never inferred from which environment variables are present, and that is
+    a measured hazard rather than a principle: a Codex session started from inside a Claude
+    session inherits ``CLAUDECODE``, ``CLAUDE_PID`` and ``CLAUDE_CODE_SESSION_ID`` wholesale and
+    exports ``CODEX_THREAD_ID`` on top of them. A worker that sniffed the environment would
+    register the outer Claude session's pid and block every fire for as long as that session
+    lives.
+
+    Raises ``OwnerUnidentified`` naming the variable when the host offers no identity. Refusing
+    to register is the fail-SAFE direction: the alternative is a record whose liveness nothing
+    can check, which does not degrade to "no protection" but to a permanent block.
+    """
+    host = host_override or runhost.resolve(repo_root)
+    adapter = hostbase.load(host)
+    identity = adapter.session_identity(os.environ)
+    if identity is None:
+        raise ownership.OwnerUnidentified(
+            f"host {host!r} exposes no session identity in this environment, so ownership "
+            "cannot be registered and no write occurred.\n"
+            "  On claude this needs $CLAUDE_PID (exported into every tool shell) plus a "
+            "readable /proc/<pid>/stat and /proc/sys/kernel/random/boot_id.\n"
+            "  On codex it needs $CODEX_THREAD_ID (exported into every tool shell, TUI "
+            "included) or an ancestor holding exactly one lock in "
+            "$CODEX_HOME/thread-writer-locks/.\n"
+            "Both variables are UNDOCUMENTED and can be withdrawn by a host release. If this "
+            "started after a host upgrade, that is the first thing to check."
+        )
+    return host, identity
+
+
+def cmd_own(args: argparse.Namespace) -> int:
+    """Register this session as the owner of the run, before it does any product work."""
+    resolution = resolve.resolve(run_key=args.run, start=args.project)
+    state_root, key = resolution.state_root, resolution.run_key
+    host, identity = _session_identity(resolution.repo_root, args.host)
+    existing = ownership.read(state_root, key)
+    if existing is not None and ownership.is_inherited(existing, os.environ):
+        # Our own wrapper already holds it. Overwriting would be worse than a no-op: the
+        # wrapper releases only a record still naming ITS identity, so a rewrite here would
+        # orphan the record and leave the run owned by a session that has since exited.
+        print(
+            f"run {key} is already owned by the wrapper that launched this session "
+            f"({existing.host} identity {existing.wrapper_identity}, tier {existing.tier}); "
+            "no write occurred."
+        )
+        return EXIT_OK
+    record = ownership.claim(
+        state_root, key, host=host, wrapper_identity=identity, tier=args.tier
+    )
+    print(
+        f"run {key} owned by {record.host} identity {record.wrapper_identity} "
+        f"(tier {record.tier}). Release it with: conductor run disown --run {key}"
+    )
+    return EXIT_OK
+
+
+def _git_detail(exc: subprocess.SubprocessError) -> str:
+    if isinstance(exc, subprocess.CalledProcessError):
+        detail = (exc.stderr or "").strip() if isinstance(exc.stderr, str) else ""
+        return " ".join(detail.split()) or f"exit {exc.returncode}"
+    return " ".join(str(exc).split())
+
+
+#: git's answer when discovery walked the whole tree and found NO repository: the parenthesised
+#: "(or any of the parent directories)" form, or the "(or any parent up to mount point …)" form
+#: that a filesystem boundary produces. Anchored on the first line of stderr.
+_NO_REPOSITORY = re.compile(
+    r"\Afatal: not a git repository \(or any (?:of the parent directories|parent up to "
+    r"mount point [^)]*)\)"
+)
+
+
+def _definitely_no_repository(exc: subprocess.SubprocessError) -> bool:
+    """Did git ANSWER that there is no repository here? Exit 128 with git's discovery-failed
+    message, and nothing else.
+
+    NOT the bare substring "not a git repository": git prints ``fatal: not a git repository:
+    /path/.git/worktrees/x`` for a linked worktree whose gitdir pointer is broken, and that
+    names a repository that existed here, with run state that may still be live. That form, a
+    localized message and anything unfamiliar all stay on the refusing side."""
+    return (
+        isinstance(exc, subprocess.CalledProcessError)
+        and exc.returncode == 128
+        and isinstance(exc.stderr, str)
+        and _NO_REPOSITORY.match(exc.stderr.lstrip()) is not None
+    )
+
+
+def _owner_busy_unanswerable(
+    project: str | None, exc: subprocess.SubprocessError
+) -> str:
+    """``owner-busy``'s fail-closed line when git could not say where the run state lives."""
+    base = (
+        project
+        if project is not None
+        else (os.environ.get("CONDUCTOR_HOME") or os.getcwd())
+    )
+    what = (
+        "timed out"
+        if isinstance(exc, subprocess.TimeoutExpired)
+        else f"failed ({_git_detail(exc)})"
+    )
+    return (
+        f"owner-busy state=unreadable reason=repository-unresolved project={base} "
+        f"detail=git rev-parse --git-common-dir {what}, so whether a run here is owned cannot "
+        f"be read; no write occurred. Check it with: git -C {shlex.quote(base)} rev-parse "
+        "--git-common-dir"
+    )
+
+
+def cmd_owner_busy(args: argparse.Namespace) -> int:
+    """Is a live owner on this run? See ``EXIT_OWNER_FREE`` for the two-code contract.
+
+    Prints ONE line to stdout carrying a ``state=`` token, so a shell caller can put the reason
+    in its log without re-deriving it. ``state=live`` is evidence that the contract worked;
+    ``state=unreadable`` is a fault an operator has to clear.
+    """
+    try:
+        resolution = resolve.resolve(run_key=args.run, start=args.project)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print(_owner_busy_unanswerable(args.project, exc))
+        return EXIT_OK
+    except resolve.RunNotFound:
+        # No run here means no ownership record, which means nothing is claiming this checkout.
+        # This is the condition every project was in before ownership existed, and reporting it
+        # as "cannot tell" would turn a driver that has always fired into one that never does.
+        print("owner-busy state=free reason=no-run")
+        return EXIT_OWNER_FREE
+    state_root, key = resolution.state_root, resolution.run_key
+    try:
+        record = ownership.read(state_root, key)
+    except ownership.OwnerAmbiguous as exc:
+        print(f"owner-busy state=unreadable run={key} detail={exc}")
+        return EXIT_OK
+    if record is not None and ownership.is_inherited(record, os.environ):
+        print(
+            f"owner-busy state=free run={key} reason=inherited "
+            f"identity={record.wrapper_identity}"
+        )
+        return EXIT_OWNER_FREE
+    live = None if record is None else ownership.identity_is_live(record)
+    if record is None or live is False:
+        # No live RECORDED owner. The run is free only if no fire outlives it either.
+        fire = ownership.running_fire(state_root)
+        if fire:
+            print(f"owner-busy state=live run={key} reason=fire-running detail={fire}")
+            return EXIT_OK
+    if record is None:
+        print(f"owner-busy state=free run={key} reason=no-record")
+        return EXIT_OWNER_FREE
+    if live is False:
+        print(
+            f"owner-busy state=free run={key} reason=owner-exited "
+            f"identity={record.wrapper_identity}"
+        )
+        return EXIT_OWNER_FREE
+    state = "live" if live else "unreadable"
+    recovery = (
+        ""
+        if live
+        else " recover=confirm no process is working on this run, then: conductor run "
+        f"disown --run {key} --force"
+    )
+    print(
+        f"owner-busy state={state} run={key} host={record.host} tier={record.tier} "
+        f"identity={record.wrapper_identity} since={record.acquired_at}{recovery}"
+    )
+    return EXIT_OK
+
+
+def cmd_disown(args: argparse.Namespace) -> int:
+    """Release this session's own ownership, or clear a record whose owner is provably gone.
+
+    RELEASING YOUR OWN IS THE COMMON CASE AND IT IS NOT THE SAME OPERATION. A worker that
+    finishes its phase is still running when it lets go, so it can never satisfy the exit proof
+    ``disown`` demands of a stranger — and an early version of this verb refused every worker
+    that tried to release itself, which would have left an ownership record behind after every
+    single fire and blocked the run until a human forced it. Ownership one holds is one's own to
+    drop; ``ownership.release`` is the same "only if it is still mine" write the wrapper tier
+    makes when its ``with`` block ends.
+
+    A DESCENDANT DOES NOT RELEASE ITS ANCESTOR. A worker launched by a wrapper that holds the
+    record must leave it alone: the wrapper is still supervising the fire and will release it
+    itself. Dropping it here would hand the run to the next cron tick while the fire is running.
+    """
+    resolution = resolve.resolve(run_key=args.run, start=args.project)
+    state_root, key = resolution.state_root, resolution.run_key
+    try:
+        current = ownership.read(state_root, key)
+    except ownership.OwnerAmbiguous:
+        current = None  # only --force can clear it; `disown` below says so.
+    if current is not None:
+        if ownership.is_inherited(current, os.environ):
+            print(
+                f"run {key} is owned by the wrapper that launched this session "
+                f"({current.wrapper_identity}); it releases its own ownership. Nothing was "
+                "removed."
+            )
+            return EXIT_OK
+        try:
+            _host, identity = _session_identity(resolution.repo_root, args.host)
+        except ownership.OwnerUnidentified:
+            identity = None
+        if identity is not None and identity == current.wrapper_identity:
+            refusal = ownership.release(state_root, key, wrapper_identity=identity)
+            if refusal:
+                print(refusal, file=sys.stderr)
+                return EXIT_FAIL
+            print(f"run {key}: released this session's own ownership ({identity}).")
+            return EXIT_OK
+    outcome, detail = ownership.disown(state_root, key, force=args.force)
+    if outcome == "refused":
+        print(detail, file=sys.stderr)
+        return EXIT_FAIL
+    print(detail)
+    return EXIT_OK
+
+
 def cmd_repoint_spec(args: argparse.Namespace) -> int:
     root = resolve.repo_root(args.project)
     doc = repoint.repoint(
@@ -419,6 +673,53 @@ def _parser() -> argparse.ArgumentParser:
     gate.add_argument("--run", default=None, help="run key (optional)")
     gate.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
+    own = sub.add_parser(
+        "own", help="register this session as the run's owner, before any product work"
+    )
+    own.add_argument("--run", default=None, help="run key (optional)")
+    own.add_argument(
+        "--host",
+        default=None,
+        choices=hostbase.HOST_IDS,
+        help="the invoking skill's own host id (default: the project's recorded host). "
+        "NEVER inferred from the environment: a Codex session nested in a Claude one sees "
+        "both hosts' variables.",
+    )
+    own.add_argument(
+        "--tier",
+        default="in-session",
+        choices=ownership.TIERS,
+        help="in-session (a fire inside a live host REPL, the default) or wrapper (a process "
+        "that outlives the fire it supervises)",
+    )
+    own.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+
+    busy = sub.add_parser(
+        "owner-busy",
+        help="exit 0 if a live or unverifiable owner holds the run, 11 if it is provably free",
+    )
+    busy.add_argument("--run", default=None, help="run key (optional)")
+    busy.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+
+    gone = sub.add_parser(
+        "disown", help="clear an ownership record whose owner is provably gone"
+    )
+    gone.add_argument("--run", default=None, help="run key (optional)")
+    gone.add_argument(
+        "--host",
+        default=None,
+        choices=hostbase.HOST_IDS,
+        help="the invoking skill's own host id, for releasing ownership this session holds "
+        "(default: the project's recorded host)",
+    )
+    gone.add_argument(
+        "--force",
+        action="store_true",
+        help="clear a record that CANNOT be proven exited (a foreign host, an unloadable "
+        "adapter, a refused schema, hidepid). Confirm nothing is working on the run first.",
+    )
+    gone.add_argument("--project", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+
     move = sub.add_parser("repoint-spec", help="point a run at a moved spec")
     move.add_argument("--run", required=True, help="run key")
     move.add_argument("new_path", help="the spec's new repository-relative path")
@@ -444,6 +745,9 @@ _HANDLERS = {
     "resolve": cmd_resolve,
     "gate-dir": cmd_gate_dir,
     "repoint-spec": cmd_repoint_spec,
+    "own": cmd_own,
+    "owner-busy": cmd_owner_busy,
+    "disown": cmd_disown,
 }
 
 
@@ -509,11 +813,33 @@ def main(argv: list[str] | None = None) -> int:
         # command then resolves to a different run and lands work on the wrong branch.
         # `recover_pending` returns [] cheaply when no journal is pending and creates nothing
         # when the project has no state root, so this is safe on a first-ever `run new`.
-        resolve.recover_pending(
-            os.path.join(
+        try:
+            state_root = os.path.join(
                 resolve.repo_root(getattr(args, "project", None)), ".conductor"
             )
-        )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            # NO REPOSITORY RESOLVES. For every other verb this is a failure and falls through
+            # to the handler below. For `owner-busy` a DEFINITIVE "not a git repository" is an
+            # ANSWER: run state is anchored at the git common dir, so where there is no
+            # repository there is no `.conductor/runs/<key>/owner.json` and nothing can be
+            # claiming this checkout — the same fact `reason=no-run` reports one level in.
+            # Answering "cannot tell" there would be a REGRESSION dressed as caution: a driver
+            # installed against a directory that is not a git checkout fired before this
+            # contract existed and would now skip every tick forever.
+            #
+            # ONLY that answer. A timeout, or git failing for any other reason (a dubious-
+            # ownership refusal, a corrupt repository, a missing binary), is git NOT answering,
+            # and reading it as free fires a driver past a record nobody could consult.
+            if args.cmd != "owner-busy":
+                raise
+            if _definitely_no_repository(exc):
+                print(
+                    f"owner-busy state=free reason=no-repository detail={_git_detail(exc)}"
+                )
+                return EXIT_OWNER_FREE
+            print(_owner_busy_unanswerable(getattr(args, "project", None), exc))
+            return EXIT_OK
+        resolve.recover_pending(state_root)
         return _HANDLERS[args.cmd](args)
     except resolve.RunAmbiguous as exc:
         print(str(exc), file=sys.stderr)
@@ -521,6 +847,12 @@ def main(argv: list[str] | None = None) -> int:
     except resolve.RunNotFound as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_NO_RUN
+    except ownership.OwnerBusy as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_FAIL
+    except ownership.OwnerAmbiguous as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_FAIL
     except (
         hygiene.TrackedStateError,
         locks.LockTimeout,

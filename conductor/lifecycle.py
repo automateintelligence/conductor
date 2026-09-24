@@ -53,9 +53,11 @@ production caller, so a project whose runs all ended kept a permanently wrong ``
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import json
 import os
+import shlex
 import subprocess
 import sys
 
@@ -108,13 +110,21 @@ def _commit(
     run_key: str,
     *,
     status: str,
+    expect_revision: int,
     mutate=lambda doc: doc,
 ) -> dict:
     """Write ``run.json`` and ``project.json``'s status mirror as ONE journalled transaction.
 
     ``status`` may equal the current status — ``schema.assert_transition`` allows same-to-same —
     which is how a reconciliation that only records evidence gets the same durability guarantee
-    as a status change without pretending to be one."""
+    as a status change without pretending to be one.
+
+    COMPARE-AND-SET ON ``expect_revision``, the revision the caller DECIDED on. Every verb here
+    reads the run, decides, and writes later; a transition check alone does not protect that
+    window, because ``awaiting-team-merge -> active`` is legal — a heartbeat that read ``active``
+    would otherwise silently undo a completion that landed after its read. The revision is
+    checked again under ``state.lock``, because ``runstate.commit`` writers take only that lock
+    and can advance the record after the ``project.lock`` read."""
     with locks.hold(registry.lock_path(state_root), kind="project"):
         transaction.recover(state_root)
         project_doc = registry.load(state_root)
@@ -129,6 +139,7 @@ def _commit(
                 f"no run record at {runstate.run_path(state_root, run_key)}; no write occurred. "
                 "List known runs with: conductor run list --all"
             )
+        _expect(state_root, run_key, current, expect_revision)
         schema.assert_transition(current["status"], status)
         after = mutate(schema.clone(current))
         after["status"] = status
@@ -150,6 +161,9 @@ def _commit(
         with locks.hold(
             runstate.state_lock_path(state_root, run_key), kind="state", run_key=run_key
         ):
+            _expect(
+                state_root, run_key, runstate.load(state_root, run_key), expect_revision
+            )
             txn_id = f"lifecycle-{run_key}"
             transaction.prepare(
                 state_root,
@@ -178,6 +192,20 @@ def _commit(
     return after
 
 
+def _expect(
+    state_root: str, run_key: str, current: dict | None, expect_revision: int
+) -> None:
+    if current is None or current["revision"] != expect_revision:
+        found = "no record" if current is None else f"revision {current['revision']}"
+        status = "" if current is None else f" ({current['status']})"
+        raise runstate.RevisionConflict(
+            f"run {run_key!r} was read at revision {expect_revision} but "
+            f"{runstate.run_path(state_root, run_key)} now holds {found}{status}; no write "
+            f"occurred. Something else changed the run since this verb decided. Inspect it "
+            f"with: conductor status --run {run_key}"
+        )
+
+
 def _stamp_reconciled(doc: dict) -> dict:
     doc["last_reconciled_at"] = _now()
     return doc
@@ -191,11 +219,12 @@ def _live_owner(state_root: str, run_key: str) -> str | None:
     holding ownership across the write would be a lock-order violation. ``ownership.read`` is
     lock-free by construction and answers the only question a refusal needs."""
     record = ownership.read(state_root, run_key)
-    if record is None:
-        return None
-    live = ownership.identity_is_live(record.wrapper_identity)
-    if live is False:
-        return None
+    live = None if record is None else ownership.identity_is_live(record)
+    if record is None or live is False:
+        fire = ownership.running_fire(state_root)
+        return (
+            f"run {run_key!r} is not free: {fire}; no write occurred." if fire else None
+        )
     return (
         f"run {run_key!r} is owned by {record.host} identity {record.wrapper_identity} "
         + ("(live)" if live else "(liveness unknown)")
@@ -205,19 +234,55 @@ def _live_owner(state_root: str, run_key: str) -> str | None:
 
 
 def _repo_context(repo_root: str) -> tuple[str, str, str]:
-    """``(repo, remote, default_branch)`` — all three fail closed.
+    """``(repo, remote, default_branch)`` for THE PROJECT AT ``repo_root`` — all three fail closed.
 
     ``branches.default_branch`` never substitutes a literal (A-DH-6), so an unresolvable default
-    branch propagates as a refusal here rather than becoming a guessed pull-request base."""
-    repo = _resolve_repo()
-    default = branches.default_branch()
+    branch propagates as a refusal here rather than becoming a guessed pull-request base.
+
+    EVERY REPOSITORY FACT COMES FROM ``repo_root``, NEVER FROM THE AMBIENT PROJECT. This function
+    used to ignore its argument: ``gh repo view`` resolved the repository from the process cwd,
+    and ``default_branch``/``remote`` resolved theirs from ``$CONDUCTOR_HOME`` — which
+    ``bin/conductor`` exports from the CALLER'S cwd, before ``--project`` has been parsed. So
+    ``conductor finish --project /repo/B`` run from inside repo A read A's repository name, asked
+    ``gh pr view -R <A>`` whether A's pull request was merged, and then removed B's worktrees,
+    deleted B's branches and marked B terminal on the strength of that answer. Forks sharing an
+    audited head SHA make that a realistic false positive rather than a theoretical one."""
+    repo = _resolve_repo(root=repo_root)
+    default = branches.default_branch(repo_root)
     try:
-        remote = remote_mod.resolve()
+        remote = remote_mod.resolve(repo_root)
     except (
         Exception
     ):  # discovery failure degrades to the historical default, never to empty
         remote = "origin"
     return repo, remote, default
+
+
+def _project_env(
+    repo_root: str, *, owner_identity: str | None = None
+) -> dict[str, str]:
+    """This process's environment with ``CONDUCTOR_HOME`` re-anchored onto ``repo_root``.
+
+    ``owner_identity`` is the ownership this process has ALREADY taken, handed to the child so
+    the child does not block on it. Without it the heartbeat deadlocks against itself: it
+    acquires ownership, launches the driver, and the driver's whole job is to refuse to fire
+    while this run has a live owner — which is now the heartbeat that launched it. Every fire
+    would be skipped, forever, logging the most correct-looking reason available.
+
+    An explicit token, never an inference: the child either carries the exact string its parent
+    recorded or it does not. Nothing compares process names or guesses at ancestry.
+
+    ``bin/conductor`` exports ``CONDUCTOR_HOME`` from the caller's cwd before any verb has parsed
+    ``--project``, so a child launched from a ``--project``-scoped verb would otherwise inherit
+    the WRONG project as its ambient one — a driver fired for run B resolving B's state root from
+    the environment of repo A. The child's cwd is already ``repo_root``; this makes the variable
+    agree with it."""
+    env = {**os.environ, "CONDUCTOR_HOME": repo_root}
+    if owner_identity:
+        env[ownership.INHERITED_IDENTITY_ENV] = owner_identity
+    else:
+        env.pop(ownership.INHERITED_IDENTITY_ENV, None)
+    return env
 
 
 # --- status -------------------------------------------------------------------------------
@@ -230,7 +295,7 @@ def _owner_report(state_root: str, run_key: str) -> dict:
         return {"state": "ambiguous", "detail": str(exc)}
     if record is None:
         return {"state": "none"}
-    live = ownership.identity_is_live(record.wrapper_identity)
+    live = ownership.identity_is_live(record)
     return {
         "state": {True: "live", False: "exited", None: "unknown"}[live],
         "host": record.host,
@@ -390,7 +455,13 @@ def cmd_resume(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return EXIT_FAIL
-    after = _commit(state_root, key, status="active", mutate=_stamp_reconciled)
+    after = _commit(
+        state_root,
+        key,
+        status="active",
+        expect_revision=run["revision"],
+        mutate=_stamp_reconciled,
+    )
     print(f"run {key} resumed: {status} -> active (revision {after['revision']})")
     # The per-run schedule is NOT reinstalled here. Design §"Heartbeat and autodev" wants
     # resume to restore it, but per-run heartbeat artifacts (`.conductor/runs/<key>/heartbeat.sh`
@@ -399,13 +470,95 @@ def cmd_resume(args: argparse.Namespace) -> int:
     print(
         "Reinstall this project's durable driver if it is not scheduled:\n"
         f"  conductor driver status\n"
-        f"  conductor driver install --worktree {resolution.repo_root}",
+        f"  {_driver_install_hint(run)}",
         file=sys.stderr,
     )
     return EXIT_OK
 
 
 # --- heartbeat ----------------------------------------------------------------------------
+
+
+def _driver_install_hint(run: dict) -> str:
+    """The install command for THIS run's driver. The driver fires in a run worktree, never the
+    owner checkout, so the hint names the worktree run.json records, or says which one to name."""
+    recorded = run.get("integration_worktree")
+    if isinstance(recorded, str) and recorded:
+        return f"conductor driver install --worktree {shlex.quote(recorded)}"
+    return (
+        "conductor driver install --worktree <the worktree with "
+        f"{run.get('integration_branch')} checked out>"
+    )
+
+
+def _driver_unbound(repo_root: str, script: str, run: dict) -> str | None:
+    """A refusal sentence unless the installed driver fires in THIS run's worktree, else ``None``.
+
+    The project has one driver script (``resume_script.driver_script_path``) and it is rendered
+    for one run worktree. ``--run`` selects the run whose ownership this verb takes, but the
+    script it launches drives whichever worktree it was installed for — so a heartbeat fired for
+    run A would launch run B's worker under A's ownership. Launching is allowed only when the
+    script's binding is provably this run's: the worktree ``run.json`` records for it, or a
+    checkout of this run's integration or phase branch. Anything else, including a binding this
+    build cannot read, launches nothing."""
+    key = run["run_key"]
+    reinstall = f"  {_driver_install_hint(run)}"
+    worktree = resume_script.installed_worktree(script)
+    if worktree is None:
+        return (
+            f"run {key!r}: the durable driver {script} names no run worktree this build can "
+            "read, so which run it would drive is unknown; no fire was launched and no write "
+            f"occurred. Reinstall it for this run:\n{reinstall}"
+        )
+    real = os.path.realpath(worktree)
+    recorded = {
+        os.path.realpath(path)
+        for path in (run.get("integration_worktree"), run.get("phase_worktree"))
+        if isinstance(path, str) and path
+    }
+    if real in recorded:
+        return None
+    branches_of_run = [
+        name
+        for name in (run.get("integration_branch"), run.get("phase_branch"))
+        if isinstance(name, str) and name
+    ]
+    # A branch NAME is evidence only inside THIS repository: a clone elsewhere with the same
+    # branch checked out is another repository's work tree. The worktree must share this
+    # project's git common dir before its branch counts.
+    common = _git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    common_dir = (common.stdout or "").strip() if common.returncode == 0 else ""
+    if not common_dir or os.path.realpath(
+        os.path.dirname(common_dir)
+    ) != os.path.realpath(repo_root):
+        where = (
+            f"belongs to the repository at {os.path.dirname(common_dir)}"
+            if common_dir
+            else f"is not a git work tree git could resolve (exit {common.returncode}: "
+            f"{(common.stderr or '').strip() or 'no output'})"
+        )
+        return (
+            f"run {key!r}: the durable driver {script} fires in {worktree}, which {where}, "
+            f"not this project ({repo_root}); no fire was launched and no write occurred. "
+            f"Reinstall the driver for this run:\n{reinstall}"
+        )
+    head = _git(worktree, "symbolic-ref", "--quiet", "--short", "HEAD")
+    checked_out = (head.stdout or "").strip() if head.returncode == 0 else None
+    if checked_out and checked_out in branches_of_run:
+        return None
+    found = (
+        f"branch {checked_out!r}"
+        if checked_out
+        else f"no branch git could name (exit {head.returncode}: "
+        f"{(head.stderr or '').strip() or 'no output'})"
+    )
+    return (
+        f"run {key!r}: the durable driver {script} fires in {worktree}, which has {found} "
+        f"checked out — not this run's {' or '.join(map(repr, branches_of_run))} — and is not "
+        "a worktree run.json records for it. Launching it would drive another run under this "
+        "run's ownership; no fire was launched and no write occurred. Reinstall the driver for "
+        f"this run:\n{reinstall}"
+    )
 
 
 def cmd_heartbeat(args: argparse.Namespace) -> int:
@@ -425,7 +578,13 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
         )
         return EXIT_FAIL
     if status == "blocked":
-        _commit(state_root, key, status="blocked", mutate=_stamp_reconciled)
+        _commit(
+            state_root,
+            key,
+            status="blocked",
+            expect_revision=run["revision"],
+            mutate=_stamp_reconciled,
+        )
         print(
             f"run {key} is blocked: reconciled and reported only, no phase advanced. "
             f"Advancing it requires: conductor resume --run {key}"
@@ -433,20 +592,78 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
         return EXIT_OK
     assert status in _WORK_CAPABLE
     script = resume_script.driver_script_path(resolution.repo_root)
+    # THE BINDING CHECK AND THE LAUNCH ARE ONE CRITICAL SECTION. Every writer of the driver
+    # script (`driver install`, `resume-script write`) takes `install_lock_for(script)`; checking
+    # the binding and then launching without it let an install for another run rewrite the
+    # script in between, and the rewritten script ran under THIS run's ownership. It is held for
+    # the whole fire, not just the spawn, because the writer rewrites the file IN PLACE and bash
+    # reads its script as it executes: a rewrite mid-fire changes the running driver.
+    #
+    # TAKEN NON-BLOCKING. A held lock means a fire or an install is in progress right now — the
+    # ordinary overlap of a */20 schedule with a long fire — and this tick has nothing to add:
+    # it skips successfully and at once, the same outcome as a live owner, with no wait before
+    # it. (An operator's `driver install` DOES wait for it, `INSTALL_LOCK_TIMEOUT_S`, then fails
+    # naming the lock: an explicit action should be told, a cron tick should not queue.)
+    #
+    # Lock order: a `project`-rank lock on its own file, taken before `_commit`'s project.lock
+    # and ownership's owner.lock; no script writer takes either of those, so no cycle exists.
+    lock = resume_script.install_lock_for(script)
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(locks.hold(lock, kind="project", timeout=0))
+        except locks.LockTimeout:
+            print(
+                f"run {key} fire skipped: the driver's install lock {lock} is held, so a fire "
+                "or a driver install is in progress; nothing was launched and no write "
+                "occurred.",
+                file=sys.stderr,
+            )
+            return EXIT_OK
+        return _fire_bound_driver(resolution, script)
+
+
+def _fire_bound_driver(resolution: resolve.RunResolution, script: str) -> int:
+    """``heartbeat``'s launch half, under the driver script's install lock."""
+    run, state_root, key = resolution.run, resolution.state_root, resolution.run_key
+    status = run["status"]
     if not os.access(script, os.X_OK):
         print(
             f"run {key!r} is {status} but its durable driver {script} is missing or not "
             "executable, so this fire has nothing to launch; no write occurred. Install it "
-            f"with:\n  conductor driver install --worktree {resolution.repo_root}",
+            f"with:\n  {_driver_install_hint(run)}",
             file=sys.stderr,
         )
         return EXIT_FAIL
+    unbound = _driver_unbound(resolution.repo_root, script, run)
+    if unbound:
+        print(unbound, file=sys.stderr)
+        return EXIT_FAIL
     # Stamped BEFORE ownership is taken: `_commit` acquires project.lock, which ranks ahead of
     # owner.lock, so doing it inside `ownership.acquire` would be a lock-order violation.
-    _commit(state_root, key, status=status, mutate=_stamp_reconciled)
+    reconciled = _commit(
+        state_root,
+        key,
+        status=status,
+        expect_revision=run["revision"],
+        mutate=_stamp_reconciled,
+    )
     host = runhost.resolve(resolution.repo_root)
     try:
         with ownership.acquire(state_root, key, host=host) as record:
+            # Judged again UNDER ownership: the reconciliation write above had to happen before
+            # it (lock order), so the run may have left the work-capable set in between — and
+            # a fire is launched for the status ownership was taken over, not a remembered one.
+            now = runstate.load(state_root, key)
+            if now is None or now["status"] not in _WORK_CAPABLE:
+                print(
+                    f"run {key!r} moved to "
+                    f"{'(no record)' if now is None else now['status']} after this heartbeat "
+                    f"reconciled it at revision {reconciled['revision']}; no fire was launched "
+                    f"and no write occurred. Inspect it with: conductor status --run {key}",
+                    file=sys.stderr,
+                )
+                return EXIT_FAIL
             print(
                 f"run {key} fire: {host} owner {record.wrapper_identity}, launching {script}",
                 file=sys.stderr,
@@ -456,7 +673,13 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
             # FIRE_STARTUP_TIMEOUT_S / FIRE_IDLE_TIMEOUT_S) because a legitimate phase runs for
             # hours; a ceiling here would kill working phases or bound nothing.
             fire = subprocess.run(
-                [script], cwd=resolution.repo_root, check=False, timeout=None
+                [script],
+                cwd=resolution.repo_root,
+                env=_project_env(
+                    resolution.repo_root, owner_identity=record.wrapper_identity
+                ),
+                check=False,
+                timeout=None,
             )
     except ownership.OwnerBusy as exc:
         # A skipped fire caused by a live owner is a SUCCESSFUL fire and must not create a
@@ -530,11 +753,24 @@ def _audited_head(repo_root: str, remote: str, run: dict) -> tuple[str | None, s
     return None, "nothing"
 
 
+class WorktreeListUnavailable(RuntimeError):
+    """git could not say which worktrees this run has, so cleanup cannot be called complete."""
+
+
 def _run_worktrees(repo_root: str, run: dict) -> list[str]:
-    """Registered linked worktrees belonging to this run, from git's own registration list."""
+    """Registered linked worktrees belonging to this run, from git's own registration list.
+
+    FAILS CLOSED. Returning ``[]`` on a nonzero ``git worktree list`` read "this run has no
+    worktrees", and the caller went on to delete branches and mark the run TERMINAL — so one
+    transient git failure produced a successful ``finish`` that removed nothing, after which
+    every later call short-circuits on ``already terminal`` and the worktrees are stranded with
+    no verb left that would clean them up. An empty list must mean git ANSWERED and said none."""
     out = _git(repo_root, "worktree", "list", "--porcelain")
     if out.returncode != 0:
-        return []
+        raise WorktreeListUnavailable(
+            f"git could not list the worktrees of {repo_root} (exit {out.returncode}): "
+            f"{(out.stderr or '').strip() or 'no output'}"
+        )
     registered = [
         line.split(" ", 1)[1].strip()
         for line in (out.stdout or "").splitlines()
@@ -620,7 +856,42 @@ def cmd_finish(args: argparse.Namespace) -> int:
     if busy:
         print(busy, file=sys.stderr)
         return EXIT_FAIL
+    # RESERVE, DO NOT SAMPLE. The check above is a courtesy: it produces the better sentence,
+    # naming the record and its path, for the ordinary case where someone is already working.
+    # It cannot be the exclusion, because between it and the cleanup below sit `gh pr view`,
+    # `git ls-remote` and two journalled writes — seconds of wall clock in which a heartbeat can
+    # legitimately acquire ownership and launch a fire. Reproduced: finish returned success and
+    # removed the worktree while `identity_is_live()` was true for a heartbeat that had taken
+    # ownership inside that window. Holding the RECORD for the rest of the verb is what makes a
+    # concurrent `ownership.acquire` refuse, and it is the same mechanism a heartbeat uses, so
+    # whichever of the two arrives second is the one that backs off.
+    #
+    # Ownership is a record, not a held lock: `acquire` takes `owner.lock` only around the two
+    # record mutations and releases it before yielding, so `_commit`'s `project.lock` inside this
+    # block does not invert the global order (migration -> project -> owner -> state).
+    try:
+        with ownership.acquire(
+            state_root, key, host=runhost.resolve(resolution.repo_root)
+        ):
+            return _finish_reserved(args, resolution, run, status)
+    except ownership.OwnerBusy as exc:
+        print(
+            f"finish refused for run {key}: {exc} Nothing was removed and the run stays "
+            f"{status}. Wait for that fire to finish, then re-run finish.",
+            file=sys.stderr,
+        )
+        return EXIT_FAIL
 
+
+def _finish_reserved(
+    args: argparse.Namespace,
+    resolution: resolve.RunResolution,
+    run: dict,
+    status: str,
+) -> int:
+    """``finish``'s body, under this run's ownership record. Every write and every removal
+    below happens while a concurrent acquirer would be refused."""
+    state_root, key = resolution.state_root, resolution.run_key
     repo, remote, default = _repo_context(resolution.repo_root)
     if args.pr is not None:
         pull, recovered = (
@@ -641,7 +912,11 @@ def cmd_finish(args: argparse.Namespace) -> int:
         # below, and the pull request's URL and state, are printed either way.
         try:
             run = _commit(
-                state_root, key, status=status, mutate=_record_final_pr(pull.number)
+                state_root,
+                key,
+                status=status,
+                expect_revision=run["revision"],
+                mutate=_record_final_pr(pull.number),
             )
         except (
             locks.LockTimeout,
@@ -689,9 +964,18 @@ def cmd_finish(args: argparse.Namespace) -> int:
         )
         return EXIT_FAIL
 
-    removed, refused = _remove_worktrees(
-        resolution.repo_root, _run_worktrees(resolution.repo_root, run)
-    )
+    try:
+        owned = _run_worktrees(resolution.repo_root, run)
+    except WorktreeListUnavailable as exc:
+        print(
+            f"finish refused for run {key}: {pull.url} is {pull.state} but {exc}\n"
+            f"  Nothing was removed and the run stays {status} — marking it terminal on an "
+            "unanswered question would strand any worktree this run still has, since finish "
+            "then short-circuits on 'already terminal'. Retry once git answers.",
+            file=sys.stderr,
+        )
+        return EXIT_FAIL
+    removed, refused = _remove_worktrees(resolution.repo_root, owned)
     if refused:
         print(
             f"finish refused for run {key}: {pull.url} is {pull.state} but these worktrees "
@@ -701,7 +985,13 @@ def cmd_finish(args: argparse.Namespace) -> int:
         )
         return EXIT_FAIL
     deleted, kept = _delete_local_branches(resolution.repo_root, run, remote, default)
-    after = _commit(state_root, key, status="terminal", mutate=_stamp_completed)
+    after = _commit(
+        state_root,
+        key,
+        status="terminal",
+        expect_revision=run["revision"],
+        mutate=_stamp_completed,
+    )
     print(f"run {key} finished: {pull.url} merged into {default}")
     for path in removed:
         print(f"  removed worktree {path}")

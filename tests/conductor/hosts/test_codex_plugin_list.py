@@ -69,12 +69,14 @@ def _recorded(codex_home, *, keep=None, on_disk=None, junk=()):
         src = os.path.join(entry["source"]["path"], "skills", "start")
         os.makedirs(src, exist_ok=True)
         with open(os.path.join(src, "SKILL.md"), "w") as f:
-            f.write("---\nname: start\n---\n")
+            f.write("---\nname: start\ndescription: d\n---\n")
         if on_disk is not None and entry["pluginId"] not in on_disk:
             continue
         root = codex_home / _RECORDED_INSTALLED_ROOTS[entry["pluginId"]]
         (root / "skills" / "start").mkdir(parents=True, exist_ok=True)
-        (root / "skills" / "start" / "SKILL.md").write_text("---\nname: start\n---\n")
+        (root / "skills" / "start" / "SKILL.md").write_text(
+            "---\nname: start\ndescription: d\n---\n"
+        )
         # A STALE version directory either side of the listed one, both populated. An upgrade or
         # a half-cleaned cache leaves these behind, and with only ever one version directory per
         # plugin the version segment was unobservable: a parser that ignored the reported
@@ -85,7 +87,7 @@ def _recorded(codex_home, *, keep=None, on_disk=None, junk=()):
                 parents=True, exist_ok=True
             )
             (root.parent / stale / "skills" / "start" / "SKILL.md").write_text(
-                "---\nname: start\n---\n"
+                "---\nname: start\ndescription: d\n---\n"
             )
     # FIRST, so an entry that is not an entry cannot be skipped by luck of ordering: a parser
     # that stops at the first surprise never reaches the valid entries behind it.
@@ -323,6 +325,129 @@ def test_neither_parser_treats_an_unexpected_top_level_shape_as_an_installed_plu
         assert codex.plugin_roots_from_json(payload) == {}
 
 
+# --------------------------------------- an identity from the host is not a path from the host
+
+
+def _entry(**overrides):
+    """One `installed[]` element with the recorded shape, overridable field by field."""
+    entry = {
+        "pluginId": "conductor@trusted-market",
+        "name": "conductor",
+        "marketplaceName": "trusted-market",
+        "version": "1.0.0",
+        "installed": True,
+        "enabled": True,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _hostile_segments(tmp_path):
+    """Values for ONE component of `$CODEX_HOME/plugins/cache/<market>/<name>/<version>` that do
+    not stay in that component.
+
+    `os.path.join` drops everything before an absolute component outright, `..` climbs out, and a
+    value carrying a separator spends two levels of the layout at once. The derived path was then
+    handed to `isdir()`, which blesses whatever is really there — so a marketplace that controls
+    these three strings controls which `bin/conductor` the generated Codex driver execs.
+    """
+    return (
+        str(tmp_path / "escaped"),
+        "..",
+        "../escaped",
+        "sub/dir",
+        "",
+        ".",
+    )
+
+
+@pytest.mark.parametrize("field", ["marketplaceName", "name", "version"])
+def test_an_identity_field_that_leaves_its_path_component_is_refused(
+    codex_home, tmp_path, field
+):
+    """Codex validates these segments itself (`plugin/src/plugin_id.rs` at rust-v0.147.0), and
+    Conductor must not depend on an upstream check it cannot enforce: the JSON arrives over a
+    pipe from a binary this machine merely happens to have. Both parsers refuse — the Python one
+    and the driver's standalone mirror — and they are asked the same question here for the same
+    reason every other state in this module is."""
+    for hostile in _hostile_segments(tmp_path):
+        entry = _entry(**{field: hostile})
+        payload = json.dumps({"installed": [entry]})
+        target = os.path.normpath(
+            os.path.join(
+                str(codex_home),
+                "plugins",
+                "cache",
+                entry["marketplaceName"],
+                entry["name"],
+                entry["version"],
+            )
+        )
+        os.makedirs(os.path.join(target, "bin"), exist_ok=True)
+        with open(os.path.join(target, "bin", "conductor"), "w") as handle:
+            handle.write("#!/bin/sh\nexit 0\n")
+        assert os.path.isdir(target), (
+            f"the escaped root was never materialised, so `isdir` would refuse it for the wrong "
+            f"reason: {target}"
+        )
+
+        assert codex.plugin_roots_from_json(payload) == {}, (field, hostile, target)
+        assert codex.unverifiable_plugins_from_json(payload) == frozenset(), (
+            field,
+            hostile,
+        )
+        assert _snippet_state(payload, entry["name"], codex_home) == ("none", ""), (
+            field,
+            hostile,
+        )
+
+
+def test_a_hostile_entry_does_not_cost_the_valid_one_beside_it(codex_home, tmp_path):
+    """ANTI-STUB. "Refuse everything" satisfies the clause above and breaks every real install,
+    so the refusal has to be per-entry: a well-formed neighbour of a rejected identity still
+    resolves, through both parsers."""
+    good = _entry(
+        pluginId="superpowers@trusted-market", name="superpowers", version="2.3.1"
+    )
+    bad = _entry(marketplaceName=str(tmp_path / "escaped"))
+    payload = json.dumps({"installed": [bad, good]})
+    root = codex_home / "plugins" / "cache" / "trusted-market" / "superpowers" / "2.3.1"
+    root.mkdir(parents=True)
+    os.makedirs(str(tmp_path / "escaped" / "conductor" / "1.0.0"), exist_ok=True)
+
+    assert codex.plugin_roots_from_json(payload) == {"superpowers": str(root)}
+    assert _snippet_state(payload, "superpowers", codex_home) == ("root", str(root))
+    assert _snippet_state(payload, "conductor", codex_home) == ("none", "")
+
+
+def test_the_two_parsers_agree_on_every_identity_shape_either_could_meet(
+    codex_home, tmp_path
+):
+    """The anti-drift check, over identity SHAPES rather than over document shapes. The recorded
+    matrix above can only pose well-formed identities, so a validator added to one parser and not
+    the other would be invisible there — which is how the two came to disagree the last time."""
+    shapes = [
+        *[{"marketplaceName": v} for v in _hostile_segments(tmp_path)],
+        *[{"name": v} for v in _hostile_segments(tmp_path)],
+        *[{"version": v} for v in _hostile_segments(tmp_path)],
+        {"marketplaceName": None},
+        {"version": 1.0},
+        {"name": ["conductor"]},
+        {"marketplaceName": "Trusted-Market"},
+        {"version": "1.0.0-rc.1"},
+        {},  # the well-formed control
+    ]
+    root = codex_home / "plugins" / "cache" / "trusted-market" / "conductor" / "1.0.0"
+    root.mkdir(parents=True)
+    for overrides in shapes:
+        entry = _entry(**overrides)
+        payload = json.dumps({"installed": [entry]})
+        name = entry["name"] if isinstance(entry["name"], str) else "conductor"
+        assert _snippet_state(payload, name, codex_home) == _python_state(
+            payload, name
+        ), overrides
+
+
 # --------------------------------------------- a probe that never answers is its own answer
 
 #: `sleep`, resolved off the DEFAULT path rather than the ambient one. The fixtures below run
@@ -403,7 +528,7 @@ def test_codex_answering_nothing_still_returns_three_empties(tmp_path, monkeypat
         exe.write_text(script)
         os.chmod(exe, 0o755)
         monkeypatch.setenv("PATH", str(bindir))
-        assert codex.installed_plugins() == ({}, [], frozenset()), name
+        assert codex.installed_plugins() == ({}, {}, frozenset()), name
 
 
 def test_host_skills_propagates_the_expiry_carrying_what_it_had_already_established(
@@ -416,7 +541,7 @@ def test_host_skills_propagates_the_expiry_carrying_what_it_had_already_establis
     home = tmp_path / "codex-home"
     (home / "skills" / "flat-user-skill").mkdir(parents=True)
     (home / "skills" / "flat-user-skill" / "SKILL.md").write_text(
-        "---\nname: flat-user-skill\n---\n"
+        "---\nname: flat-user-skill\ndescription: d\n---\n"
     )
     monkeypatch.setenv(codex.CONFIG_DIR_ENV, str(home))
     _codex_that_never_answers(tmp_path, monkeypatch)
@@ -428,7 +553,9 @@ def test_host_skills_propagates_the_expiry_carrying_what_it_had_already_establis
     # The SHAPE is part of the contract: `preflight.check` degrades by using this in place of
     # the snapshot it did not get, so anything that is not a `HostSkills` is not usable there.
     assert isinstance(partial, discovery.HostSkills), partial
-    assert "flat-user-skill" in partial.commands
+    # Scanned, so kept as evidence; never counted, since Codex never said it loads it.
+    assert "flat-user-skill" in partial.on_disk
+    assert "flat-user-skill" not in partial.commands
     assert partial.unverifiable_plugins == frozenset()
 
 

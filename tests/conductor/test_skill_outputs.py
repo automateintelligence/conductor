@@ -33,6 +33,10 @@ _REGIONS: dict[str, list[tuple[str, str]]] = {
     "skills/autodev/SKILL.md": [
         ("@frontmatter", "name: autodev"),
         ("@preamble", "# /conductor:autodev — one phase per fire (§8)"),
+        (
+            "0-register-ownership",
+            "0. **register ownership — before any product work, and before step 1.**",
+        ),
         ("1-reload-goal", "1. **re-load goal (fresh context).**"),
         (
             "1b-run-branch-current",
@@ -64,6 +68,10 @@ _REGIONS: dict[str, list[tuple[str, str]]] = {
         ),
         ("@preamble", "# /conductor:start — preflight + set up + launch"),
         ("0-preflight", "0. **preflight (`conductor preflight`).**"),
+        (
+            "0b-register-ownership",
+            "0b. **register ownership — only when this run already exists.**",
+        ),
         ("1-detect-spec", "1. **detect spec source**"),
         ("2-assertions-present", "2. **precondition — assertion specs present?**"),
         ("3-gate-dir", "3. **resolve the per-spec gate dir first:**"),
@@ -114,6 +122,25 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             # A1: see the same needle on start — a worker that cannot resolve the CLI path
             # cannot do anything else in this file.
             "the directory this `skill.md` lives in",
+        ],
+        "0-register-ownership": [
+            # The register/consult/recover contract, pinned by the three verbs that carry it.
+            # Prose alone would let the step survive as a paragraph while the command that
+            # actually excludes a cron fire was dropped.
+            "conductor run own",
+            "conductor run disown",
+            # A refusal is not something to work around. Both refusals must stay named, with
+            # the instruction to STOP attached: a worker that registered "something weaker"
+            # after a live-owner refusal is two workers in one checkout, and one that invented
+            # an identity after an identity refusal blocks the run permanently.
+            "(live)",
+            "**stop.**",
+            "stop and escalate",
+            # The wrapper case must NOT read as a refusal, or the driver's own fire would
+            # halt on the record the wrapper that launched it just wrote.
+            "already owned by the wrapper that launched this session",
+            # Recovery is a verb, not a filesystem operation.
+            "never delete `owner.json` by hand",
         ],
         "1-reload-goal": [
             "re-load goal",
@@ -214,6 +241,20 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             "unverified",
             "unverified → stop",
         ],
+        "0b-register-ownership": [
+            # Consult BEFORE claiming: start is owner-supervised and re-invoked on live runs,
+            # so the first question is whether anything else is already working here.
+            "conductor run owner-busy",
+            "conductor run own",
+            "conductor run disown",
+            # The exit-code contract is the whole check. A reader who treats any non-zero as
+            # "fine" has inverted it.
+            "exit 11 means nothing owns it",
+            # Why it is conditional, and why running it anyway is free. Without this the step
+            # reads as a first-run prerequisite and gets skipped exactly when it matters.
+            "reconcile-first and idempotent",
+            "state=free reason=no-run",
+        ],
         "2-assertions-present": ["spec-craft:executable-assertions"],
         "3-gate-dir": [
             "conductor:assertions-to-tests",
@@ -307,6 +348,16 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             "conductor ledger align <plan.md> --apply",
             "conductor ledger convert <plan.md>",
             "never guess",
+            # align's gateless buckets. Reporting them and then running `convert` anyway
+            # is worse than not reporting them: the outcome is a DUPLICATE phase issue.
+            "gateless_phases",
+            "markerless_issues",
+            # ...and the gate keys on the REACHABLE one (codex round 2, finding 1)
+            "gateless_unpaired",
+            "gateless_pairs",
+            "do not run `convert`",
+            "rename the issue to the phase heading exactly",
+            "duplicate phase issue",
         ],
         "4-status-truth": [
             "--from-gate",
@@ -350,6 +401,42 @@ _FORBIDDEN: dict[str, list[str]] = {
         "$claude_plugin_root/bin/conductor",
     ],
 }
+
+
+# Claims about the Tier-B driver that describe the DELETED `pgrep -f 'claude'` + `/proc/<pid>/cwd`
+# guard. Prose a worker reads is executable, and the driver now does the opposite of each: an
+# open session does not stop a fire (only a registered ownership record does, and only while it
+# is held), and nothing the driver decides is keyed on a process name. Matched against
+# whitespace-normalized, lowercased text, so a re-wrap cannot smuggle one back in.
+_FORBIDDEN_STALE_DRIVER_CLAIMS: dict[str, list[tuple[str, str]]] = {
+    "skills/start/SKILL.md": [
+        (
+            "a claude process holds the cwd",
+            "the process-name/cwd guard is gone — a live claude session does not by itself "
+            "stop a Tier-B fire, so telling the owner it does sends them to wait out a stall "
+            "that is not happening",
+        ),
+        (
+            "no-ops on every fire",
+            "same deleted guard, other spelling: fires skip only while an ownership record is "
+            "held (`fire-skipped reason=owner-busy`) or the lock is busy, never for every fire",
+        ),
+    ],
+}
+
+
+@pytest.mark.parametrize("path", sorted(_FORBIDDEN_STALE_DRIVER_CLAIMS))
+def test_no_skill_describes_the_deleted_process_name_guard(path):
+    raw = open(os.path.join(ROOT, path), encoding="utf-8").read()
+    text = " ".join(raw.lower().split())
+    present = [
+        f"{needle!r}: {why}"
+        for needle, why in _FORBIDDEN_STALE_DRIVER_CLAIMS[path]
+        if needle in text
+    ]
+    assert not present, f"{path} still describes the deleted guard:\n  " + "\n  ".join(
+        present
+    )
 
 
 # A top-level step heading: `4.` / `4b.` at column 0. The executable spine of a skill.
@@ -525,6 +612,51 @@ def test_issue_syncs_cli_path_note_resolves_on_a_host_without_a_plugin_root_vari
     note = raw[raw.index("**conductor cli path:**") :].split("\n\n", 1)[0]
     assert "the directory this `skill.md` lives in" in note
     assert "bin/conductor" in note
+
+
+def test_prepare_gates_gateless_markerless_pairing_before_convert():
+    """codex production review, finding 3.
+
+    `align` gained `gateless_phases` + `markerless_issues`, `ledger align` exits nonzero
+    only for ambiguity, and step 3 ran `convert` regardless. `generate` resolves a phase
+    issue by EXACT title (`ledger/sync.py:116`), so a gateless `Phase 3 — Glue` whose
+    existing issue is titled `Glue work` is missed and a SECOND phase issue is created
+    (`ledger/sync.py:132`). Presence alone is not the contract — a resolution step printed
+    AFTER the convert command is one a worker reading top to bottom has already passed."""
+    step = _regions("skills/prepare/SKILL.md")["3-ledger-alignment"]
+    for needle in ("gateless_phases", "markerless_issues", "do not run `convert`"):
+        assert needle in step, needle
+    assert step.index("do not run `convert`") < step.index(
+        "conductor ledger convert <plan.md>"
+    ), "the pairing gate must be stated BEFORE the convert command it gates"
+
+
+def test_prepares_pairing_gate_is_a_reachable_precondition():
+    """codex production review round 2, finding 1.
+
+    The gate demanded `gateless_phases` AND `markerless_issues` be empty. Neither bucket can
+    empty: align lists every gateless phase by design, and every task sub-issue is markerless
+    by construction (`ledger/sync.py:171` creates them with `body=""`). Doing exactly what the
+    skill said — renaming an issue to the phase heading — changed neither, so the worker's only
+    options were to stop forever or to violate the gate. The precondition must be REACHABLE,
+    and where a human decision is genuinely required the skill must say to stop and ask rather
+    than loop."""
+    step = _regions("skills/prepare/SKILL.md")["3-ledger-alignment"]
+    for needle in (
+        # the reachable buckets, computed the way `convert` resolves a phase issue
+        "gateless_unpaired",
+        "gateless_pairs",
+        # markerless_issues is information for the pairing, never a precondition
+        "never expected to be empty",
+        # a decision only the owner can take stops the worker; it never spins
+        "stop and report",
+    ):
+        assert needle in step, needle
+    # the unsatisfiable form, spelled out so it cannot come back by paraphrase
+    assert "clear `gateless_phases` and `markerless_issues`" not in step
+    assert step.index("gateless_unpaired") < step.index(
+        "conductor ledger convert <plan.md>"
+    ), "the precondition must be stated BEFORE the convert command it gates"
 
 
 def test_adr_backfill_lives_in_prepares_plan_evaluation_step():

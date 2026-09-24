@@ -47,12 +47,14 @@ def run_branch_name(spec_path: str) -> str:
     return f"conductor/run-{spec_slug(spec_path)}"
 
 
-def _gh_default() -> str | None:
+def _gh_default(root: str | None = None) -> str | None:
     """gh knows the server truth; time-bounded, any failure → None (next probe).
 
-    Bound to `project_root()` (like `_git_default`) — gh resolves the repo from its cwd,
-    and the process cwd may be a DIFFERENT repo than `$CONDUCTOR_HOME`; both probes must
-    answer for the same project."""
+    Bound to `root`, defaulting to `project_root()` (like `_git_default`) — gh resolves the repo
+    from its cwd, and the process cwd may be a DIFFERENT repo than `$CONDUCTOR_HOME`; both probes
+    must answer for the same project. `$CONDUCTOR_HOME` is itself ambient when a verb was given
+    an explicit `--project`, which is why `root` is threaded rather than read from the
+    environment here."""
     out = subprocess.run(
         [
             "gh",
@@ -66,25 +68,30 @@ def _gh_default() -> str | None:
         capture_output=True,
         text=True,
         timeout=_GH_TIMEOUT,
-        cwd=project_root(),
+        cwd=root or project_root(),
     )
     if out.returncode != 0:
         return None
     return (out.stdout or "").strip() or None
 
 
-def _git_default() -> str | None:
+def _git_default(root: str | None = None) -> str | None:
     """The `refs/remotes/<remote>/HEAD` symbolic ref — local, no network. The remote comes
     from `conductor.remote`'s resolver (the same one the merge gate uses), falling back to
-    `origin` when discovery fails."""
+    `origin` when discovery fails.
+
+    `root` is passed on to that resolver as well as used for `-C`: asking repository A which
+    remote to look up and then reading the symbolic ref in repository B is the same ambient
+    mismatch in two halves."""
+    project = root or project_root()
     try:
         from conductor.remote import resolve
 
-        remote = resolve() or "origin"
+        remote = resolve(project) or "origin"
     except Exception:
         remote = "origin"
     out = subprocess.run(
-        ["git", "-C", project_root(), "symbolic-ref", f"refs/remotes/{remote}/HEAD"],
+        ["git", "-C", project, "symbolic-ref", f"refs/remotes/{remote}/HEAD"],
         capture_output=True,
         text=True,
         timeout=_GIT_TIMEOUT,
@@ -106,16 +113,20 @@ class DefaultBranchUnresolvable(RuntimeError):
     safe thing to do without one."""
 
 
-def default_branch() -> str:
+def default_branch(root: str | None = None) -> str:
     """The repo's default branch, from authoritative remote metadata only — fail CLOSED.
 
     Tries `gh repo view` (server truth), then the `refs/remotes/<remote>/HEAD` symbolic ref.
     If neither answers, raises `DefaultBranchUnresolvable` naming both probes. NEVER
     substitutes a literal (`main`/`master`/anything): A-DH-6 forbids a fallback default, and a
-    wrong-but-plausible branch name is undetectable downstream."""
+    wrong-but-plausible branch name is undetectable downstream.
+
+    `root` names WHICH repository is being asked. Omitted it is `$CONDUCTOR_HOME`/cwd, which is
+    the ambient project — right for a bare invocation and wrong for any verb given an explicit
+    `--project`, where the answer becomes that other repository's pull-request base."""
     for probe in (_gh_default, _git_default):
         try:
-            name = probe()
+            name = probe(root)
         except Exception:  # timeout/missing binary/bad repo → try the next probe
             name = None
         if name:

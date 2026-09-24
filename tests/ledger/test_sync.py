@@ -568,3 +568,44 @@ def test_generate_preserves_marker_when_assertions_key_absent():
     gh.get_body.return_value = "body\n\n<!-- conductor-assertions: A3 -->"
     sync.generate("o/r", plan, gh)
     gh.set_body.assert_not_called()
+
+
+# --- a fenced example is not a phase (agreement with plan-lint) ----------------------------
+# plan-lint skips an H2 inside a CLOSED fenced block; parse_plan_md used to split on every H2,
+# so a plan that linted clean still made `convert` create an issue for its fenced example, and
+# the worker could then claim that example as a real phase. One splitter now serves both.
+
+FENCED_EXAMPLE_PLAN = """\
+# Plan
+
+## Phase 1 — Real (A1)
+- [ ] do the thing
+
+```md
+## Phase 99 — Example only (A99)
+```
+
+- [ ] after the example
+
+## Phase 2 — Also real (A2)
+- [ ] other thing
+"""
+
+
+def test_parse_plan_md_skips_a_heading_inside_a_closed_fence():
+    phases = sync.parse_plan_md(FENCED_EXAMPLE_PLAN)["phases"]
+    assert [p["title"] for p in phases] == [
+        "Phase 1 — Real (A1)",
+        "Phase 2 — Also real (A2)",
+    ]
+    # the fenced heading no longer ends Phase 1's section early
+    assert phases[0]["tasks"] == ["do the thing", "after the example"]
+
+
+def test_parse_plan_md_keeps_headings_after_an_unterminated_fence():
+    # same asymmetry as plan-lint: an unclosed fence must not swallow the rest of the plan
+    text = (
+        "# P\n\n## Phase 1 — A (A1)\n- [ ] x\n\n```md\n## Phase 2 — B (A2)\n- [ ] y\n"
+    )
+    titles = [p["title"] for p in sync.parse_plan_md(text)["phases"]]
+    assert titles == ["Phase 1 — A (A1)", "Phase 2 — B (A2)"]

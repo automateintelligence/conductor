@@ -173,3 +173,17 @@ def test_plan_unwritable_is_best_effort_not_fatal(tmp_path):
         plan.chmod(0o600)
     assert out["ok"] is True and 10 in store["closed"]
     assert out["plan"]["error"].startswith("plan-unwritable")
+
+
+def test_tick_covers_the_whole_section_across_a_fenced_example_heading(tmp_path):
+    # a fenced `## Phase ...` example is not a heading, so it must not end the section: the
+    # tasks after it belong to the same phase and are ticked with it
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        "# P\n\n## Phase 1 — Real (A1)\n- [ ] before\n\n"
+        "```md\n## Phase 99 — Example (A99)\n```\n\n- [ ] after\n"
+    )
+    assert phase_done._tick_plan_section(str(plan), "Phase 1 — Real (A1)") == {
+        "ticked": 2
+    }
+    assert "- [ ] after" not in plan.read_text()
