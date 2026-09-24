@@ -259,21 +259,21 @@ def plugin_roots_from_json(text: str) -> dict[str, str]:
     }
 
 
-def contested_roots_from_json(text: str) -> list[str]:
-    """The installed roots of every name MORE THAN ONE of them claims, sorted.
+def contested_claims_from_json(text: str) -> dict[str, list[str]]:
+    """``{plugin name: its installed roots, sorted}`` for every name MORE THAN ONE root claims.
 
-    Their contents are still invocable — Codex's skill namespace is flat, so both plugins' skills
-    resolve by bare name — but no plugin claim survives the collision. Discovery contributes them
-    unqualified, which is what makes ``preflight`` report the requirement ``unverified`` rather
-    than ``missing``: the skill IS there, and telling an owner to install a plugin that is
-    already installed twice is advice that teaches them to ignore the gate.
+    Their contents are still invocable — Codex names each plugin's skills ``<name>:<skill>``, so
+    both roots answer to the same qualified name — but no plugin claim survives the collision.
+    Discovery reports the name as contested, which is what makes ``preflight`` report the
+    requirement ``unverified`` rather than ``missing``: the skill IS there, and telling an owner
+    to install a plugin that is already installed twice is advice that teaches them to ignore
+    the gate.
     """
-    return sorted(
-        root
-        for roots in _claims_from_json(text).values()
+    return {
+        name: sorted(roots)
+        for name, roots in _claims_from_json(text).items()
         if len(roots) > 1
-        for root in roots
-    )
+    }
 
 
 def unverifiable_plugins_from_json(text: str) -> frozenset[str]:
@@ -325,8 +325,8 @@ def _claims_from_json(text: str) -> dict[str, set[str]]:
 
 def installed_plugins(
     project_root: str | None = None,
-) -> tuple[dict[str, str], list[str], frozenset[str]]:
-    """``({attributable name: root}, [contested roots], {unverifiable names})``, three empties
+) -> tuple[dict[str, str], dict[str, list[str]], frozenset[str]]:
+    """``({attributable name: root}, {contested name: roots}, {unverifiable names})``, three empties
     when Codex answers nothing, or ``HostProbeTimeout`` when Codex never answers at all.
 
     Those last two are DIFFERENT ANSWERS and this function must not merge them. Three empties
@@ -337,8 +337,9 @@ def installed_plugins(
     skill as MISSING — advice to install what the owner may already have. The expiry is raised
     instead, and ``preflight.check`` maps it to ``unverified``, which is what it means.
 
-    Asking the host is the only way to attribute a skill to a plugin on Codex: skill directories
-    are flat and carry no plugin qualifier, so nothing on disk says whose a skill is. What comes
+    Asking the host is the only way to attribute a skill to a plugin on Codex: an installed
+    plugin's skill directory carries no qualifier of its own, so nothing on disk says whose a
+    skill is — Codex supplies ``<plugin>:`` from the install record. What comes
     back is an IDENTITY, which ``_installed_root`` turns into a path and then checks — the host
     is asked the question only it can answer, and the layout that answer implies is verified
     rather than trusted. ``</dev/null`` because Codex subcommands hang on an unredirected stdin
@@ -362,7 +363,7 @@ def installed_plugins(
     project = project_root or os.getcwd()
     exe = shutil.which(HOST_ID)
     if not exe:
-        return {}, [], frozenset()
+        return {}, {}, frozenset()
     try:
         proc = subprocess.run(
             [exe, "plugin", "list", "--json"],
@@ -384,12 +385,12 @@ def installed_plugins(
             f"codex plugin list --json </dev/null"
         ) from expiry
     except (OSError, subprocess.SubprocessError):
-        return {}, [], frozenset()
+        return {}, {}, frozenset()
     if proc.returncode != 0:
-        return {}, [], frozenset()
+        return {}, {}, frozenset()
     return (
         plugin_roots_from_json(proc.stdout),
-        contested_roots_from_json(proc.stdout),
+        contested_claims_from_json(proc.stdout),
         unverifiable_plugins_from_json(proc.stdout),
     )
 
@@ -819,22 +820,29 @@ class CodexAdapter:
     #: instead of discovering mid-run that a conducted skill resolves to nothing.
     resolves_plugin_dependencies: bool = False
 
+    #: A ``$`` mention matches the exact skill name, and an installed plugin's skill is named
+    #: ``<plugin>:<skill>`` — so ``$code-review`` never reaches ``gstack:code-review``. Measured on
+    #: codex-cli 0.155.0: with spec-craft installed, ``$expectations`` injected no skill.
+    resolves_unqualified_plugin_skills: bool = False
+
     def source_root(self) -> str:
         return config_root()
 
     def native_invocation(self, skill: str) -> str:
-        """``conductor:autodev`` -> ``$autodev``.
+        """``conductor:autodev`` -> ``$conductor:autodev``; ``code-review`` -> ``$code-review``.
 
-        Two things this is NOT. It is not a host dispatch primitive: ``$name`` is a prompting
-        convention the *model* interprets by reading ``AGENTS.md``, and it expands to "read
-        this SKILL.md path and execute it" (ground truth §"Skill invocation under Codex").
-        That is why the driver's fire command writes the path out instead of using this form;
-        this one names a skill to a reader who supplies the convention. And it is not
-        namespaced: Codex skill directories are flat under ``$CODEX_HOME/skills/`` and
-        ``./.codex/skills/``, with no counterpart to Claude's plugin qualifier, so the
-        qualifier is dropped rather than transliterated into a name that resolves to nothing.
+        The plugin qualifier is KEPT. Codex lists an installed plugin's skill as
+        ``<plugin>:<skill>`` (``skills/list`` on codex-cli 0.155.0 shows ``spec-craft:expectations``,
+        ``conductor:start``) and a ``$`` mention matches the exact name: in a live ``codex exec``
+        with spec-craft installed, ``$spec-craft:expectations`` injected the skill and a bare
+        ``$expectations`` injected nothing. Dropping the qualifier names a skill that does not
+        exist. A flat user skill under ``$CODEX_HOME/skills/`` has no qualifier to keep, so an
+        unqualified name stays bare.
+
+        It is still not a host dispatch primitive: the driver's fire command writes the SKILL.md
+        path out instead of using this form, so a launch never depends on it resolving.
         """
-        return skill if skill.startswith("$") else f"${skill.rsplit(':', 1)[-1]}"
+        return skill if skill.startswith("$") else f"${skill}"
 
     def discovered_commands(self, *, project_root: str | None = None) -> set[str]:
         return self.host_skills(project_root=project_root).commands
@@ -852,11 +860,11 @@ class CodexAdapter:
         its skills live under the root that identity implies. Without it no Codex machine can
         distinguish spec-craft's ``expectations`` from any other plugin's.
 
-        A plugin NAME that two installed roots claim is the exception, and it comes back BARE.
-        Both roots' skills really are invocable — the Codex skill namespace is flat — so
-        dropping them would report a present skill missing; but neither root's claim on the name
-        survives the other, so qualifying them would hand a stranger's copy the required
-        plugin's identity. Bare is the third answer: present, unattributed, ``unverified``.
+        A plugin NAME that two installed roots claim is the exception. Both roots' skills really
+        are invocable under the qualified name, so they are listed; but neither root's claim on
+        the name survives the other, so the name also travels in ``contested_plugins`` and
+        preflight reports a requirement on it ``unverified`` rather than handing a stranger's
+        copy the required plugin's identity.
 
         A plugin whose root is NOT ON DISK contributes no names at all — there is nothing there
         to enumerate — so it travels in the second half of the answer instead. Without it,
@@ -893,6 +901,7 @@ class CodexAdapter:
             ) from expiry
         for name, root in attributed.items():
             cmds |= discovery.qualified(name, root, named)
-        for root in contested:
-            cmds |= discovery.plugin_contents(root, named)
-        return discovery.HostSkills(cmds, unverifiable)
+        for name, roots in contested.items():
+            for root in roots:
+                cmds |= discovery.qualified(name, root, named)
+        return discovery.HostSkills(cmds, unverifiable, frozenset(contested))

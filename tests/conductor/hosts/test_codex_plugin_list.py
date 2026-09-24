@@ -526,7 +526,7 @@ def test_codex_answering_nothing_still_returns_three_empties(tmp_path, monkeypat
         exe.write_text(script)
         os.chmod(exe, 0o755)
         monkeypatch.setenv("PATH", str(bindir))
-        assert codex.installed_plugins() == ({}, [], frozenset()), name
+        assert codex.installed_plugins() == ({}, {}, frozenset()), name
 
 
 def test_host_skills_propagates_the_expiry_carrying_what_it_had_already_established(

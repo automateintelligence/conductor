@@ -55,6 +55,11 @@ class HostSkills(NamedTuple):
     #: absent contributes nothing here, and preflight tells those two apart because the remedy
     #: differs — install it, versus repair an install that is already there.
     unverifiable_plugins: frozenset[str]
+    #: Plugins MORE THAN ONE installed root claims. Their skills are invocable under the
+    #: qualified name, but which root answers is not something conductor can establish, so a
+    #: requirement naming one of these plugins is ``unverified``, never a pass. Defaults empty
+    #: because only a host that reports installed plugins can have a collision to report.
+    contested_plugins: frozenset[str] = frozenset()
 
 
 class CommandDiscovery(Protocol):
@@ -73,6 +78,9 @@ class CommandDiscovery(Protocol):
     #: Whether installing a plugin on this host also installs the plugins it declares as
     #: dependencies. False means preflight has to tell the user to do it by hand.
     resolves_plugin_dependencies: bool
+    #: Whether a bare invocation (``code-review``) reaches a plugin's skill of that name. False
+    #: means only a skill named exactly ``code-review`` satisfies an unqualified requirement.
+    resolves_unqualified_plugin_skills: bool
 
     def source_root(self) -> str: ...
     def native_invocation(self, skill: str) -> str: ...
@@ -174,9 +182,9 @@ def scan_plugin_dir(
     """``<plugin>:<name>`` for every skill and command in one plugin root.
 
     An unnamed root yields nothing rather than a bare name: an unattributed entry cannot be
-    told apart from a user skill, so on a host that drops the qualifier it would at best
-    downgrade a required ``plugin:skill`` to ``unverified`` (``preflight._resolve``) and at
-    worst suggest a plugin the host cannot actually load.
+    told apart from a user skill, and it would at best satisfy an unqualified requirement with
+    a skill no host invokes under that name, and at worst suggest a plugin the host cannot
+    actually load.
     """
     name = manifest_name(root, manifest_dirs)
     return qualified(name, root, namer) if name else set()

@@ -6,9 +6,9 @@ Everything else stays `...` until Plan 04 fills it in.
 
 `native_invocation` is the load-bearing one. Ground truth
 (`docs/reviews/2026-08-12-codex-host-ground-truth.md` §"Skill invocation under Codex") pins
-`$name` as Codex's convention and `/plugin:skill` as Claude's, and it also records that Codex
-skill directories are FLAT (`~/.codex/skills/<name>/`) with no plugin-namespace counterpart —
-so the qualifier is a Claude-side concept that the Codex renderer drops.
+`$name` as Codex's convention and `/plugin:skill` as Claude's. Its other claim — that Codex has
+no plugin namespace — did not hold on codex-cli 0.155.0: an installed plugin's skill is listed
+and invoked as `<plugin>:<skill>`, so both renderers keep the qualifier.
 """
 
 from __future__ import annotations
@@ -68,8 +68,13 @@ def test_codex_renders_a_skill_with_the_dollar_convention(adapters):
     assert adapters["codex"].native_invocation("code-review") == "$code-review"
 
 
-def test_codex_drops_the_plugin_qualifier_because_its_skill_dirs_are_flat(adapters):
-    assert adapters["codex"].native_invocation("conductor:autodev") == "$autodev"
+def test_codex_keeps_the_plugin_qualifier(adapters):
+    # codex-cli 0.155.0 lists an installed plugin's skill as `<plugin>:<skill>` and matches a
+    # `$` mention exactly: `$spec-craft:expectations` injected the skill in a live `codex exec`,
+    # `$expectations` injected nothing.
+    assert (
+        adapters["codex"].native_invocation("conductor:autodev") == "$conductor:autodev"
+    )
 
 
 @pytest.mark.parametrize("host_id", base.HOST_IDS)

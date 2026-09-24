@@ -238,6 +238,10 @@ class ClaudeAdapter:
     #: ``dependencies`` array, so installing conductor pulls spec-craft with it.
     resolves_plugin_dependencies: bool = True
 
+    #: A bare ``/code-review`` reaches a plugin's ``code-review`` skill when no user skill of
+    #: that name exists, so an unqualified requirement is satisfied by any plugin's copy.
+    resolves_unqualified_plugin_skills: bool = True
+
     def source_root(self) -> str:
         return os.environ.get(CONFIG_DIR_ENV) or os.path.expanduser("~/.claude")
 
