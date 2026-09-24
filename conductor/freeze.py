@@ -238,7 +238,15 @@ def _read_pointer(gate_dir: str) -> str | None:
 def _assertions_source(
     repo_root: str, manifest_path: str | None = None
 ) -> tuple[dict, str]:
-    """({relpath: sha256}, via) for the human-authored `<spec>.assertions.md` —
+    """``(sources, via)`` — see ``_resolve_assertions_source``."""
+    sources, via, _spec = _resolve_assertions_source(repo_root, manifest_path)
+    return sources, via
+
+
+def _resolve_assertions_source(
+    repo_root: str, manifest_path: str | None = None
+) -> tuple[dict, str, str | None]:
+    """({relpath: sha256}, via, spec) for the human-authored `<spec>.assertions.md` —
     the done-DEFINITION, made tamper-evident alongside the manifest and test
     files. `via` is "env", "gate", "goal", "glob", or "none" (how it was discovered).
 
@@ -279,9 +287,11 @@ def _assertions_source(
         candidates = _source_candidates(base)
         path = _pick_source(candidates, repo_root)
         if path:
-            return {
-                os.path.relpath(path, repo_root): _source_digest(path, repo_root)
-            }, "env"
+            return (
+                {os.path.relpath(path, repo_root): _source_digest(path, repo_root)},
+                "env",
+                os.path.relpath(base, repo_root),
+            )
         raise MissingAssertionsSource(
             f"missing-assertions-source: CONDUCTOR_ASSERTIONS_SOURCE names "
             f"{override} but none of {', '.join(candidates)} exist"
@@ -299,9 +309,11 @@ def _assertions_source(
         candidates = _source_candidates(base)
         path = _pick_source(candidates, repo_root)
         if path:
-            return {
-                os.path.relpath(path, repo_root): _source_digest(path, repo_root)
-            }, "gate"
+            return (
+                {os.path.relpath(path, repo_root): _source_digest(path, repo_root)},
+                "gate",
+                os.path.relpath(base, repo_root),
+            )
         raise MissingAssertionsSource(
             f"missing-assertions-source: {os.path.join(gate_dir, SOURCE_POINTER)} "
             f"names {declared} but none of {', '.join(candidates)} exist"
@@ -315,9 +327,11 @@ def _assertions_source(
             rels = _source_candidates(spec)
             path = _pick_source([os.path.join(repo_root, r) for r in rels], repo_root)
             if path:
-                return {
-                    os.path.relpath(path, repo_root): _source_digest(path, repo_root)
-                }, "goal"
+                return (
+                    {os.path.relpath(path, repo_root): _source_digest(path, repo_root)},
+                    "goal",
+                    os.path.relpath(os.path.join(repo_root, spec), repo_root),
+                )
             raise MissingAssertionsSource(
                 f"missing-assertions-source: the goal names "
                 f"{spec} but none of {', '.join(rels)} exist"
@@ -358,8 +372,9 @@ def _assertions_source(
         )
     if matches:
         rel = os.path.relpath(matches[0], repo_root)
-        return {rel: _source_digest(matches[0], repo_root)}, "glob"
-    return {}, "none"
+        # no spec was named, so there is none to resolve the spelling equivalence against
+        return {rel: _source_digest(matches[0], repo_root)}, "glob", None
+    return {}, "none", None
 
 
 def gate_state(manifest_path: str, repo_root: str) -> dict:
@@ -389,33 +404,59 @@ def record(
     return baseline_path
 
 
-_LEGACY_SUFFIX = ".md.assertions.md"
+_SOURCE_SUFFIX = ".assertions.md"
 
 
-def _spec_key(rel: str) -> str:
-    """One key per SPEC, whichever accepted spelling names its assertions source: the legacy
-    ``<spec>.md.assertions.md`` folds onto spec-craft's ``<stem>.assertions.md``."""
-    if rel.endswith(_LEGACY_SUFFIX):
-        return rel[: -len(_LEGACY_SUFFIX)] + ".assertions.md"
-    return rel
+def _possible_owners(rel: str) -> set[str]:
+    """Every spec path whose `_source_candidates` include the assertions file ``rel``.
+
+    One filename can belong to two specs: ``X.md.assertions.md`` is the legacy spelling for
+    spec ``X.md`` AND the stem spelling for spec ``X.md.md``. Which one a baseline meant is not
+    in the file name, and ``.frozen`` records only the file."""
+    if not rel.endswith(_SOURCE_SUFFIX):
+        return set()
+    base = rel[: -len(_SOURCE_SUFFIX)]
+    owners = {base + ".md"}  # stem spelling: `<stem>.assertions.md` for `<stem>.md`
+    if base.endswith(".md"):
+        owners.add(base)  # legacy spelling: `<spec>.md.assertions.md` for `<spec>.md`
+    return owners
 
 
-def _same_sources(current: dict, recorded: dict) -> bool:
+def _same_sources(
+    current: dict, recorded: dict, spec: str | None, repo_root: str
+) -> bool:
     """Whether the CURRENT assertions-source selection is the one the baseline recorded.
 
     Raw path keys are not enough across the naming upgrade. Every baseline written before
     ``_source_candidates`` existed records the legacy ``<spec>.md.assertions.md`` key, and a
     repo that bridged spec-craft's stem spelling with a committed copy or symlink now has both
-    present — so ``_pick_source`` returns the STEM path for a gate nobody touched. The two
-    spellings of one spec count as one source only when the bytes selected now equal the
-    bytes the baseline recorded; ``_pick_source`` has already refused if the two spellings
-    disagree with each other, and a changed recorded file is reported on its own above."""
+    present — so ``_pick_source`` returns the STEM path for a gate nobody touched.
+
+    The equivalence is granted per SPEC, derived from ``spec`` — the path the current source
+    was resolved FROM — never by folding filenames onto a key (a ``foo.md.md`` spec's stem
+    file is ``foo.md``'s legacy file, #97). It holds only when both recorded and current files
+    are spellings of ``spec``, the selected bytes equal the recorded bytes, and no OTHER spec
+    on disk could own the recorded file. The baseline does not record which spec it was
+    frozen for, so an ambiguous owner refuses the equivalence and falls back to the strict
+    comparison: fail closed. ``_pick_source`` has already refused if the two spellings of
+    ``spec`` disagree with each other, and a changed recorded file is reported on its own."""
     if set(current) == set(recorded):
         return True
-    by_key = {_spec_key(rel): dig for rel, dig in recorded.items()}
-    if len(by_key) != len(recorded) or len(current) != len(recorded):
+    if spec is None or len(current) != 1 or len(recorded) != 1:
         return False
-    return all(by_key.get(_spec_key(rel)) == dig for rel, dig in current.items())
+    (cur_rel, cur_dig), (rec_rel, rec_dig) = (
+        next(iter(current.items())),
+        next(iter(recorded.items())),
+    )
+    spellings = {
+        os.path.normpath(c) for c in _source_candidates(os.path.normpath(spec))
+    }
+    if os.path.normpath(cur_rel) not in spellings:
+        return False
+    if os.path.normpath(rec_rel) not in spellings or cur_dig != rec_dig:
+        return False
+    others = _possible_owners(os.path.normpath(rec_rel)) - {os.path.normpath(spec)}
+    return not any(os.path.isfile(os.path.join(repo_root, o)) for o in others)
 
 
 def verify(
@@ -493,14 +534,17 @@ def verify(
                 "the frozen assertions source) was removed"
             )
         else:
+            current_spec: str | None = None
             try:
                 current_sources: dict | None
-                current_sources, _via = _assertions_source(repo_root, manifest_path)
+                current_sources, _via, current_spec = _resolve_assertions_source(
+                    repo_root, manifest_path
+                )
             except Exception as exc:  # ambiguous/missing now -> fail closed
                 current_sources = None
                 tampered.append(f"assertions-source-unresolvable: {exc}")
             if current_sources is not None and not _same_sources(
-                current_sources, base_sources
+                current_sources, base_sources, current_spec, repo_root
             ):
                 tampered.append(
                     "assertions-source-set-changed "

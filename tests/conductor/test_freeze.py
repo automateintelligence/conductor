@@ -1053,3 +1053,55 @@ def test_a_legacy_baseline_does_not_excuse_a_different_specs_source(tmp_path):
     (tmp_path / ".conductor" / "goal.md").write_text("Implement docs/specs/spec-b.md\n")
     res = freeze.verify(manifest, baseline, str(tmp_path))
     assert any("assertions-source-set-changed" in t for t in res["tampered"]), res
+
+
+# ---------- the spelling equivalence belongs to ONE spec, not to a filename pattern (#97)
+#
+# A spec named `foo.md.md` has the stem-spelled source `foo.md.assertions.md` — which is also
+# the LEGACY spelling for an unrelated spec `foo.md`. Folding filenames back onto a key made the
+# two collide, so a baseline frozen for `foo.md.md` verified clean after the goal moved to
+# `foo.md` and a same-bytes `foo.assertions.md` appeared. The equivalence is only granted for
+# the spec the current source was resolved FROM, and only when no other spec on disk could
+# own the recorded file.
+
+
+def _two_specs_sharing_a_filename(tmp_path):
+    d = tmp_path / "docs" / "specs"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "foo.md.md").write_text("# spec foo.md.md\n")
+    (d / "foo.md").write_text("# spec foo.md\n")
+    shared = d / "foo.md.assertions.md"  # stem of foo.md.md AND legacy of foo.md
+    shared.write_text("# assertions\n")
+    dot = tmp_path / ".conductor"
+    dot.mkdir(exist_ok=True)
+    return d, dot
+
+
+def test_a_dot_md_dot_md_spec_and_an_unrelated_spec_keep_separate_keys(tmp_path):
+    manifest, baseline = _setup(tmp_path)
+    d, dot = _two_specs_sharing_a_filename(tmp_path)
+    (dot / "goal.md").write_text("Implement docs/specs/foo.md.md until done\n")
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/foo.md.assertions.md"]
+    # the goal moves to the OTHER spec, whose stem source carries the same bytes
+    (dot / "goal.md").write_text("Implement docs/specs/foo.md until done\n")
+    (d / "foo.assertions.md").write_text((d / "foo.md.assertions.md").read_text())
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("assertions-source-set-changed" in t for t in res["tampered"]), res
+
+
+def test_the_same_pair_still_bridges_when_only_one_spec_exists(tmp_path):
+    # control: without the `foo.md.md` spec, `foo.md.assertions.md` can only be `foo.md`'s
+    # legacy spelling, so the P1-a bridge applies
+    manifest, baseline = _setup(tmp_path)
+    d, dot = _two_specs_sharing_a_filename(tmp_path)
+    (d / "foo.md.md").unlink()
+    (dot / "goal.md").write_text("Implement docs/specs/foo.md until done\n")
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/foo.md.assertions.md"]
+    (d / "foo.assertions.md").write_text((d / "foo.md.assertions.md").read_text())
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True and res["tampered"] == [], res
