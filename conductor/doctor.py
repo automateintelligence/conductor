@@ -55,6 +55,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -278,27 +279,79 @@ def _task_names_checkout(entry: dict, roots: tuple[str, ...]) -> str | None:
     return None
 
 
-def _text_path_tokens(text: str) -> list[str]:
-    """The absolute paths free text names, as whole shell words.
+#: One word of free text, quote-aware without a shell's all-or-nothing parse: a balanced
+#: double-, single- or back-quoted string is ONE word (spaces and all), anything else runs to the
+#: next whitespace. A lone apostrophe (``don't``) is just a character in its word.
+_FREE_WORD = re.compile(r'"([^"]*)"|\'([^\']*)\'|`([^`]*)`|(\S+)')
 
-    Split the way a shell would (quotes honoured, ``&&``/``;``/``|``/parentheses as their own
-    words, ``#`` NOT a comment), then each word's ``=``-separated parts, with quote and backtick
-    wrappers and trailing sentence punctuation trimmed. Text shlex cannot parse (an unbalanced quote) falls back to whitespace words."""
+#: Shell control operators that separate words even with no space around them (``cd /x&&go``).
+_CONTROL = re.compile(r"&&|\|\||[;&|()<>]")
+
+#: Wrappers and trailing sentence punctuation around a path word.
+_WRAPPERS = "\"'`([{"
+_TRAILERS = "\"'`)]}.,;:!?"
+
+
+def _lexed_words(text: str, *, comments: bool) -> list[str] | None:
+    """``text`` split the way a shell would, or ``None`` when shlex cannot parse it."""
     try:
         lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
-        # Free text, not a script: a `#` does not end what the task names. shlex's default
-        # comment stripping dropped every path after one.
-        lexer.commenters = ""
-        words = list(lexer)
+        if not comments:
+            lexer.commenters = ""
+        return list(lexer)
     except ValueError:
-        words = text.split()
-    paths = []
+        return None
+
+
+def _free_words(text: str) -> list[str]:
+    """``text`` split by ``_FREE_WORD``: never fails, and never cuts a balanced quoted path."""
+    words: list[str] = []
+    for match in _FREE_WORD.finditer(text):
+        quoted = next((g for g in match.groups()[:3] if g is not None), None)
+        if quoted is not None:
+            words.append(quoted)
+        else:
+            words.extend(w for w in _CONTROL.split(match.group(4)) if w)
+    return words
+
+
+def _trimmed(word: str) -> str:
+    """Strip wrappers and trailing punctuation until nothing more comes off, so the ORDER they
+    appear in (`` `/p`. `` vs ``(/p),``) cannot leave one behind."""
+    while True:
+        stripped = word.lstrip(_WRAPPERS).rstrip(_TRAILERS)
+        if stripped == word:
+            return word
+        word = stripped
+
+
+def _text_path_tokens(text: str) -> list[str]:
+    """The absolute paths free text names, as whole words.
+
+    A SCAN MUST NOT MISS ONE, so the words are the UNION of three readings: shlex with ``#`` as
+    a comment, shlex with ``#`` as an ordinary character, and ``_free_words`` — the reading that
+    cannot fail. Each shlex reading can raise on text a shell would reject (``# don't …`` has an
+    unbalanced quote once comments are off); the failing reading contributes nothing and the
+    others still answer. No reading splits on bare whitespace, so a quoted ``"/projects/my app"``
+    is never cut down to ``/projects/my``. Every word is then split on ``=`` and trimmed; a
+    candidate matches only as a whole path (``_under``), so the extra readings add no false
+    matches."""
+    words: list[str] = []
+    for reading in (
+        _lexed_words(text, comments=True),
+        _lexed_words(text, comments=False),
+        _free_words(text),
+    ):
+        words.extend(reading or ())
+    paths: list[str] = []
     for word in words:
         for part in word.split("="):
-            part = part.strip("\"'`").rstrip(".,;:!?")
+            part = _trimmed(part)
             if part.startswith(("/", "~")):
-                paths.append(os.path.abspath(os.path.expanduser(part)))
+                path = os.path.abspath(os.path.expanduser(part))
+                if path not in paths:
+                    paths.append(path)
     return paths
 
 

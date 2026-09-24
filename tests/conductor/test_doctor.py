@@ -305,6 +305,40 @@ def test_a_scheduled_task_naming_the_checkout_or_beneath_it_in_free_text_blocks(
         }, text
 
 
+@pytest.mark.parametrize(
+    "template",
+    [
+        'cd "{c}/my app" # don\'t change branch',
+        "cd '{c}/my app' && go # it's nightly",
+        'run "{c}/my app/bin/x" \'unbalanced',
+        "Work in `{c}/my app`.",
+        "Work in `{c}`.",
+        "(see `{c}`),",
+        "cd {c} #nightly",
+        "# nightly: cd {c}",
+        "run `{c}/bin/x` nightly",
+    ],
+)
+def test_free_text_paths_survive_comments_quotes_and_wrappers(
+    checkout, stub_crontab, scheduled_tasks, template
+):
+    """Every spelling here names the checkout (or beneath it) as a whole path. A lexing failure
+    must never fall back to splitting a quoted path at its space, and wrapper/punctuation
+    stripping must run until nothing more comes off."""
+    stub_crontab([])
+    scheduled_tasks([{"prompt": template.format(c=checkout), "cwd": "/x"}])
+    assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == {"installed-schedule"}
+
+
+def test_a_quoted_path_is_never_truncated_at_its_space(checkout, tmp_path):
+    """``/projects/my`` must not be read out of ``"/projects/my app"``: the truncated word names
+    a DIFFERENT directory, which is a false match in one direction and a miss in the other."""
+    text = f'cd "{tmp_path}/my app" # don\'t change branch'
+    paths = doctor._text_path_tokens(text)
+    assert f"{tmp_path}/my app" in paths, paths
+    assert f"{tmp_path}/my" not in paths, paths
+
+
 def test_an_unreadable_harness_scheduled_task_file_blocks(
     checkout, stub_crontab, scheduled_tasks
 ):
