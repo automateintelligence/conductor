@@ -998,3 +998,79 @@ def test_an_ancestor_merely_having_the_lock_file_open_does_not_make_a_foreign_fi
         os.close(unlocked)
         fire.kill()
         fire.wait(timeout=30)
+
+
+# --- no path clears a record while a foreign fire still holds resume.lock ---------------------
+
+
+@pytest.mark.parametrize("force", [False, True], ids=["exit-proof", "force"])
+def test_disown_leaves_the_record_while_a_foreign_fire_holds_the_lock(harness, force):
+    """The recorded wrapper is provably gone, but its fire is not. Clearing the record would
+    hand the run to the next claimant under a running fire, so neither the exit proof nor
+    ``--force`` clears it; stopping the fire is the documented way out."""
+    dead = _dead_wrapper_record(harness)
+    fire = _orphaned_fire(harness)
+    try:
+        outcome, detail = ownership.disown(
+            harness.state_root, harness.run_key, force=force
+        )
+        assert outcome == "refused", detail
+        assert "resume.lock" in detail and "nothing was removed" in detail, detail
+        assert harness.owner_doc()["wrapper_identity"] == dead.wrapper_identity
+        assert fire.poll() is None, "the fire exited; this proved nothing"
+    finally:
+        fire.kill()
+        fire.wait(timeout=30)
+    outcome, detail = ownership.disown(harness.state_root, harness.run_key, force=force)
+    assert outcome == "cleared", detail
+
+
+def test_release_leaves_the_record_while_a_foreign_fire_holds_the_lock(harness):
+    """Even the record's own identity does not drop it under a fire it cannot account for."""
+    owner = _sleeper()
+    try:
+        record = harness.record(_identity(owner.pid), tier="wrapper")
+        fire = _orphaned_fire(harness)
+        try:
+            refusal = ownership.release(
+                harness.state_root,
+                harness.run_key,
+                wrapper_identity=record.wrapper_identity,
+            )
+            assert refusal is not None and "resume.lock" in refusal, refusal
+            assert harness.owner_doc()["wrapper_identity"] == record.wrapper_identity
+        finally:
+            fire.kill()
+            fire.wait(timeout=30)
+        assert (
+            ownership.release(
+                harness.state_root,
+                harness.run_key,
+                wrapper_identity=record.wrapper_identity,
+            )
+            is None
+        )
+        assert ownership.read(harness.state_root, harness.run_key) is None
+    finally:
+        owner.kill()
+        owner.wait(timeout=30)
+
+
+def test_run_disown_of_ones_own_record_refuses_under_a_foreign_fire(
+    harness, monkeypatch, capsys
+):
+    identity = harness.claude_session_identity(monkeypatch)
+    harness.record(identity)
+    fire = _orphaned_fire(harness)
+    try:
+        capsys.readouterr()
+        rc = run_cmd.main(
+            ["disown", "--run", harness.run_key, "--project", str(harness.root)]
+        )
+        err = capsys.readouterr().err
+        assert rc == run_cmd.EXIT_FAIL, err
+        assert "resume.lock" in err, err
+        assert harness.owner_doc()["wrapper_identity"] == identity
+    finally:
+        fire.kill()
+        fire.wait(timeout=30)

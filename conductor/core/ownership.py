@@ -471,10 +471,24 @@ def disown(state_root: str, run_key: str, *, force: bool = False) -> tuple[str, 
     uninterpretable cases (a foreign host, an unloadable adapter, a schema this build refuses,
     ``hidepid`` hiding the target) where no proof is obtainable and only a human can supply the
     missing fact.
+
+    NEITHER CLEARS A RECORD UNDER A RUNNING FIRE. A record is the run's admission, and while
+    ``running_fire`` reports a driver fire holding ``resume.lock`` outside the caller's own
+    process tree, clearing it hands the run to the next claimant underneath that fire — the
+    same reason ``claim`` refuses. ``force`` supplies a missing exit proof for the RECORD; it is
+    not evidence about the fire, so it does not override this. There is no override: the way
+    out is to let the fire finish or stop it, which releases the lock.
     """
     lock = runstate.owner_lock_path(state_root, run_key)
     os.makedirs(runstate.run_dir(state_root, run_key), exist_ok=True)
     with locks.hold(lock, kind="owner", run_key=run_key):
+        fire = running_fire(state_root)
+        if fire:
+            return (
+                "refused",
+                f"run {run_key!r}: {fire}; nothing was removed. --force does not override "
+                "a running fire.",
+            )
         try:
             record = read(state_root, run_key)
         except OwnerAmbiguous as exc:
@@ -503,13 +517,26 @@ def disown(state_root: str, run_key: str, *, force: bool = False) -> tuple[str, 
         )
 
 
-def release(state_root: str, run_key: str, *, wrapper_identity: str) -> None:
-    """Drop ownership if ``wrapper_identity`` still holds it. A no-op otherwise."""
+def release(state_root: str, run_key: str, *, wrapper_identity: str) -> str | None:
+    """Drop ownership if ``wrapper_identity`` still holds it. A no-op otherwise.
+
+    Returns a refusal sentence, leaving the record in place, while a fire outside the caller's
+    own process tree still holds ``resume.lock`` (see ``disown``): a wrapper whose driver left
+    descendants running is not done with the run just because its own work returned. The record
+    then names an identity that will exit, and ``claim`` frees it only once the fire is gone."""
     lock = runstate.owner_lock_path(state_root, run_key)
     with locks.hold(lock, kind="owner", run_key=run_key):
         try:
             current = read(state_root, run_key)
         except OwnerAmbiguous:
-            return
-        if current is not None and current.wrapper_identity == str(wrapper_identity):
-            _write(state_root, run_key, None)
+            return None
+        if current is None or current.wrapper_identity != str(wrapper_identity):
+            return None
+        fire = running_fire(state_root)
+        if fire:
+            return (
+                f"run {run_key!r}: {fire}; the ownership record of {wrapper_identity} was "
+                "left in place."
+            )
+        _write(state_root, run_key, None)
+        return None

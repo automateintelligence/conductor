@@ -585,7 +585,10 @@ def cmd_disown(args: argparse.Namespace) -> int:
         except ownership.OwnerUnidentified:
             identity = None
         if identity is not None and identity == current.wrapper_identity:
-            ownership.release(state_root, key, wrapper_identity=identity)
+            refusal = ownership.release(state_root, key, wrapper_identity=identity)
+            if refusal:
+                print(refusal, file=sys.stderr)
+                return EXIT_FAIL
             print(f"run {key}: released this session's own ownership ({identity}).")
             return EXIT_OK
     outcome, detail = ownership.disown(state_root, key, force=args.force)
