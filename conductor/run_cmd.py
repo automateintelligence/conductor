@@ -457,6 +457,46 @@ def cmd_own(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _git_detail(exc: subprocess.SubprocessError) -> str:
+    if isinstance(exc, subprocess.CalledProcessError):
+        detail = (exc.stderr or "").strip() if isinstance(exc.stderr, str) else ""
+        return " ".join(detail.split()) or f"exit {exc.returncode}"
+    return " ".join(str(exc).split())
+
+
+def _definitely_no_repository(exc: subprocess.SubprocessError) -> bool:
+    """Did git ANSWER that there is no repository here? Exit 128 with git's own not-a-repository
+    message, and nothing else: a localized or unfamiliar message stays on the refusing side."""
+    return (
+        isinstance(exc, subprocess.CalledProcessError)
+        and exc.returncode == 128
+        and isinstance(exc.stderr, str)
+        and "not a git repository" in exc.stderr
+    )
+
+
+def _owner_busy_unanswerable(
+    project: str | None, exc: subprocess.SubprocessError
+) -> str:
+    """``owner-busy``'s fail-closed line when git could not say where the run state lives."""
+    base = (
+        project
+        if project is not None
+        else (os.environ.get("CONDUCTOR_HOME") or os.getcwd())
+    )
+    what = (
+        "timed out"
+        if isinstance(exc, subprocess.TimeoutExpired)
+        else f"failed ({_git_detail(exc)})"
+    )
+    return (
+        f"owner-busy state=unreadable reason=repository-unresolved project={base} "
+        f"detail=git rev-parse --git-common-dir {what}, so whether a run here is owned cannot "
+        f"be read; no write occurred. Check it with: git -C {shlex.quote(base)} rev-parse "
+        "--git-common-dir"
+    )
+
+
 def cmd_owner_busy(args: argparse.Namespace) -> int:
     """Is a live owner on this run? See ``EXIT_OWNER_FREE`` for the two-code contract.
 
@@ -466,6 +506,9 @@ def cmd_owner_busy(args: argparse.Namespace) -> int:
     """
     try:
         resolution = resolve.resolve(run_key=args.run, start=args.project)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print(_owner_busy_unanswerable(args.project, exc))
+        return EXIT_OK
     except resolve.RunNotFound:
         # No run here means no ownership record, which means nothing is claiming this checkout.
         # This is the condition every project was in before ownership existed, and reporting it
@@ -752,19 +795,26 @@ def main(argv: list[str] | None = None) -> int:
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             # NO REPOSITORY RESOLVES. For every other verb this is a failure and falls through
-            # to the handler below. For `owner-busy` it is an ANSWER: run state is anchored at
-            # the git common dir, so where there is no repository there is no
-            # `.conductor/runs/<key>/owner.json` and nothing can be claiming this checkout —
-            # the same fact `reason=no-run` reports one level in.
+            # to the handler below. For `owner-busy` a DEFINITIVE "not a git repository" is an
+            # ANSWER: run state is anchored at the git common dir, so where there is no
+            # repository there is no `.conductor/runs/<key>/owner.json` and nothing can be
+            # claiming this checkout — the same fact `reason=no-run` reports one level in.
+            # Answering "cannot tell" there would be a REGRESSION dressed as caution: a driver
+            # installed against a directory that is not a git checkout fired before this
+            # contract existed and would now skip every tick forever.
             #
-            # Answering "cannot tell" here instead would be a REGRESSION dressed as caution: a
-            # driver installed against a directory that is not a git checkout fired before this
-            # contract existed and would now skip every tick forever, for a reason that has
-            # nothing to do with ownership.
+            # ONLY that answer. A timeout, or git failing for any other reason (a dubious-
+            # ownership refusal, a corrupt repository, a missing binary), is git NOT answering,
+            # and reading it as free fires a driver past a record nobody could consult.
             if args.cmd != "owner-busy":
                 raise
-            print(f"owner-busy state=free reason=no-repository detail={exc}")
-            return EXIT_OWNER_FREE
+            if _definitely_no_repository(exc):
+                print(
+                    f"owner-busy state=free reason=no-repository detail={_git_detail(exc)}"
+                )
+                return EXIT_OWNER_FREE
+            print(_owner_busy_unanswerable(getattr(args, "project", None), exc))
+            return EXIT_OK
         resolve.recover_pending(state_root)
         return _HANDLERS[args.cmd](args)
     except resolve.RunAmbiguous as exc:

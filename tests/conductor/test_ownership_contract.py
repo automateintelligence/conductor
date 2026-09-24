@@ -935,3 +935,47 @@ def test_a_worker_launched_by_the_fire_holding_the_lock_can_still_register(harne
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "owned by claude" in result.stdout, result.stdout
+
+
+# --- only a DEFINITIVE "no repository" answers free ------------------------------------------
+
+
+def test_owner_busy_outside_any_repository_is_free(tmp_path, capsys):
+    """git answered, and its answer is that there is no repository: nothing can own a run here."""
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    assert (
+        run_cmd.main(["owner-busy", "--project", str(plain)]) == run_cmd.EXIT_OWNER_FREE
+    )
+    assert "state=free reason=no-repository" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.TimeoutExpired(["git", "rev-parse"], 30),
+        subprocess.CalledProcessError(
+            128,
+            ["git", "rev-parse"],
+            stderr="fatal: detected dubious ownership in repository at '/x'\n",
+        ),
+    ],
+    ids=["timeout", "other-git-failure"],
+)
+def test_owner_busy_fails_closed_when_git_cannot_answer(
+    tmp_path, monkeypatch, capsys, failure
+):
+    """A git that timed out or failed for any other reason has NOT said there is no repository.
+    Reading that as free would fire a driver past a record nobody could consult."""
+    from conductor.core import resolve
+
+    def cannot_answer(start=None):
+        raise failure
+
+    monkeypatch.setattr(resolve, "repo_root", cannot_answer)
+    rc = run_cmd.main(["owner-busy", "--project", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == run_cmd.EXIT_OK, out
+    assert "state=unreadable" in out and "state=free" not in out, out
+    assert "no write occurred" in out and str(tmp_path) in out, out
+    assert "git -C" in out, out
