@@ -306,8 +306,9 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      (a Codex plugin lookup cut off at its bound — logged before the fire ever starts),
      `fire-timeout` (the fire showed no progress for its whole silence window and was killed),
      `fire-unsupervised` (no `ps` on the machine, so nothing bounded the fire),
-     `lock-unavailable` (the driver could not lock at all — not contention) or
-     `fire-end rc=` non-zero (the generated driver logs all six) — those offending log lines are NAMED verbatim.
+     `lock-unavailable` (the driver could not lock at all — not contention),
+     `fire-unkillable` (part of a fire survived SIGKILL; the driver exited anyway) or
+     `fire-end rc=` non-zero (the generated driver logs all seven) — those offending log lines are NAMED verbatim.
      On a non-zero status, WARN the owner loudly — the run has been failing to make
      headless progress. (The driver already fails loud per-fire; the tested status command makes
      a repeated failure visible at the next owner check-in instead of accumulating unnoticed.)
