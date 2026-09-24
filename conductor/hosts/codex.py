@@ -14,12 +14,16 @@ The token ``-p`` therefore does not appear in this file at all, and a test enfor
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
+import selectors
 import shutil
+import signal
 import subprocess
 import textwrap
+import time
 from collections.abc import Mapping
 
 from conductor.hosts import base, discovery, proc
@@ -92,14 +96,224 @@ PLUGIN_LIST_KILL_GRACE_S = 5
 #: fields that ARE, and then checked on disk.
 _INSTALL_CACHE = ("plugins", "cache")
 
-#: Codex names a skill by the ``name`` its SKILL.md frontmatter declares, falling back to the
-#: directory name only when none is declared. Measured against codex-cli 0.155.0's own
-#: ``skills/list``: ``dir-a/`` declaring ``name: alpha`` lists as ``alpha``; ``name: "beta"`` as
-#: ``beta``; a SKILL.md with no ``name`` as its directory. gstack relies on the first case — its
-#: Codex installer links ``$CODEX_HOME/skills/gstack-claude/`` declaring ``name: claude`` — so a
-#: directory-name discovery reports ``$claude`` missing on a machine where Codex lists it. Claude
-#: Code resolves user skills by directory name, so this rule is Codex's alone.
-_SKILL_NAMER: discovery.SkillNamer = discovery.declared_skill_names
+#: Longest skill name Codex accepts (``MAX_NAME_LEN``, ``codex-rs/skills/src/parser.rs`` at
+#: rust-v0.155.0).
+SKILL_NAME_MAX_CHARS = 64
+
+
+def codex_skill_names(pattern: str) -> set[str]:
+    """The names Codex would load a ``.../skills/*/SKILL.md`` glob under — the FALLBACK rule.
+
+    ``parse_skill_frontmatter_metadata`` at rust-v0.155.0, restated: a ``---`` frontmatter block
+    with a closing ``---`` is required; ``name`` is the declared one (whitespace collapsed) or
+    the directory name when none is declared, and at most 64 characters; ``description`` is
+    required and non-empty. Anything else Codex reports as an error and does not load, so it is
+    not counted. gstack depends on the declared-name half: its Codex installer links
+    ``$CODEX_HOME/skills/gstack-claude/`` declaring ``name: claude``. Claude Code names user
+    skills by directory, so none of this applies to the Claude adapter.
+
+    Used only when Codex's own catalog (``skills_list``) cannot be had. Codex parses the
+    frontmatter as YAML; ``discovery.frontmatter`` is a stdlib line reader, which agrees on the
+    frontmatter skills are written in and is the reason this is the fallback, not the source.
+    """
+    names = set()
+    for path in glob.glob(pattern):
+        fields = discovery.frontmatter(path)
+        if fields is None:
+            continue
+        name = " ".join(fields.get("name", "").split()) or os.path.basename(
+            os.path.dirname(path)
+        )
+        description = " ".join(fields.get("description", "").split())
+        if description and len(name) <= SKILL_NAME_MAX_CHARS:
+            names.add(name)
+    return names
+
+
+_SKILL_NAMER: discovery.SkillNamer = codex_skill_names
+
+#: Seconds ``codex app-server`` gets to answer ``skills/list``. Measured on 0.155.0: about 1.5s
+#: against a populated ``$CODEX_HOME`` and 0.9s against an empty one, so this bounds the
+#: pathological case, as ``PLUGIN_LIST_TIMEOUT_S`` does for its probe.
+SKILLS_LIST_TIMEOUT_S = 20
+
+#: The ``skills/list`` request id, and the one response line that answers it.
+_SKILLS_LIST_ID = 1
+
+
+def _skills_list_request(cwd: str) -> bytes:
+    """The JSON-RPC exchange ``codex app-server`` needs before it answers ``skills/list``."""
+    messages = [
+        {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "conductor-preflight", "version": "0"}},
+        },
+        {"jsonrpc": "2.0", "method": "initialized"},
+        {
+            "jsonrpc": "2.0",
+            "id": _SKILLS_LIST_ID,
+            "method": "skills/list",
+            "params": {"cwds": [cwd]},
+        },
+    ]
+    return "".join(json.dumps(m) + "\n" for m in messages).encode()
+
+
+def skills_from_response(message: object) -> list[dict] | None:
+    """The skill entries of a ``skills/list`` response, or None when it is not one.
+
+    None — never an empty list — for an error response or an unexpected shape, because "Codex
+    lists no skills" is an answer and "this is not an answer" is a different fact: the caller
+    falls back to the filesystem on the second and trusts the first.
+    """
+    if not isinstance(message, dict) or "error" in message:
+        return None
+    result = message.get("result")
+    data = result.get("data") if isinstance(result, dict) else None
+    if not isinstance(data, list):
+        return None
+    skills: list[dict] = []
+    for entry in data:
+        listed = entry.get("skills") if isinstance(entry, dict) else None
+        if not isinstance(listed, list):
+            return None
+        skills += [
+            s for s in listed if isinstance(s, dict) and isinstance(s.get("name"), str)
+        ]
+    return skills
+
+
+def skills_list(project_root: str | None = None) -> list[dict] | None:
+    """Codex's own skill catalog for ``project_root``, from ``codex app-server``'s
+    ``skills/list``; None when Codex cannot give one; ``HostProbeTimeout`` when it never answers.
+
+    WHY ASK CODEX RATHER THAN SCAN. The catalog is what a ``$`` mention resolves against, and
+    reproducing it means reproducing ``resolve_skill_roots`` and ``SkillNamespaceResolver``
+    (``codex-rs/ext/skills/src`` at rust-v0.155.0): user roots ``$CODEX_HOME/skills`` and
+    ``~/.agents/skills``, the system cache, admin and trusted-project config layers, repo
+    ``.agents/skills`` between the project root and cwd, installed plugin roots, a recursive
+    walk that follows directory symlinks, a ``<namespace>:`` taken from the nearest valid plugin
+    manifest above each skill (which is how ``~/.agents/skills/superpowers`` becomes
+    ``superpowers:<skill>``), per-skill ``enabled`` config, and a YAML validity rule. Every piece
+    of that restated here is a piece that drifts silently with the next release. The catalog
+    carries all of it by construction.
+
+    WHY IT IS SAFE FOR A BARE CRON. No auth is needed; it answers from local config and disk.
+    It runs as a child of this process with stdin, stdout and a deadline under our control; the
+    run is killed — the whole process group, since a Codex server may have spawned helpers — if
+    no answer arrives in ``SKILLS_LIST_TIMEOUT_S``. ``HOME`` must be set, as it must for Codex to
+    find ``~/.agents`` at all.
+
+    The server does not answer a request it has already seen EOF behind, so the exchange is
+    written, the answer read, and only then stdin closed.
+    """
+    project = project_root or os.getcwd()
+    exe = shutil.which(HOST_ID)
+    if not exe:
+        return None
+    try:
+        child = subprocess.Popen(
+            [exe, "app-server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+    deadline = time.monotonic() + SKILLS_LIST_TIMEOUT_S
+    expired = False
+    try:
+        assert child.stdin is not None and child.stdout is not None
+        try:
+            child.stdin.write(_skills_list_request(project))
+            child.stdin.flush()
+        except OSError:
+            return None
+        pending = b""
+        with selectors.DefaultSelector() as selector:
+            selector.register(child.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    expired = True
+                    raise base.HostProbeTimeout(
+                        f"`codex app-server` did not answer within {SKILLS_LIST_TIMEOUT_S}s when "
+                        f"asked for `skills/list`, and was killed; conductor wrote nothing. "
+                        f"host={HOST_ID} project_root={project} — this is a pre-run capability "
+                        f"probe, so it names the host it could not ask and the project it was "
+                        f"asked about in place of a run key. Codex could not be asked which "
+                        f"skills it loads, so every one is unknown rather than absent."
+                    )
+                if not selector.select(remaining):
+                    continue
+                chunk = os.read(child.stdout.fileno(), 65536)
+                if not chunk:
+                    return None  # exited without answering: not a catalog
+                pending += chunk
+                *lines, pending = pending.split(b"\n")
+                for line in lines:
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (
+                        isinstance(message, dict)
+                        and message.get("id") == _SKILLS_LIST_ID
+                    ):
+                        return skills_from_response(message)
+    finally:
+        _end(child, grace=0 if expired else PLUGIN_LIST_KILL_GRACE_S)
+
+
+def _end(child: subprocess.Popen, *, grace: float) -> None:
+    """Close the exchange and make sure nothing of it outlives this call.
+
+    Closing stdin is how a server that answered is asked to exit; ``grace`` is how long it gets
+    to do so. An expired probe gets none — it already had its bound.
+    """
+    for stream in (child.stdin, child.stdout):
+        try:
+            if stream is not None:
+                stream.close()
+        except OSError:
+            pass
+    try:
+        child.wait(timeout=grace)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except OSError:
+        child.kill()
+    child.wait()
+
+
+def catalog_names(skills: list[dict]) -> tuple[set[str], frozenset[str]]:
+    """``(invocable names, contested namespaces)`` from a ``skills/list`` catalog.
+
+    A disabled skill is not invocable. A qualified name listed at more than one path is
+    contested: both answer to ``$<namespace>:<skill>`` and which one Codex runs is not something
+    conductor can establish, so its namespace travels with the plugin-list collisions.
+    """
+    names: set[str] = set()
+    paths: dict[str, set[str]] = {}
+    for skill in skills:
+        if skill.get("enabled") is False:
+            continue
+        name = skill["name"]
+        names.add(name)
+        paths.setdefault(name, set()).add(str(skill.get("path")))
+    contested = frozenset(
+        name.split(":", 1)[0]
+        for name, where in paths.items()
+        if ":" in name and len(where) > 1
+    )
+    return names, contested
+
 
 #: Characters that may follow the first one in a plugin-identity segment, beyond ASCII
 #: alphanumerics. Declared beside the predicate because ``PLUGIN_ROOT_SNIPPET`` spells the same
@@ -848,60 +1062,73 @@ class CodexAdapter:
         return self.host_skills(project_root=project_root).commands
 
     def host_skills(self, *, project_root: str | None = None) -> discovery.HostSkills:
-        """Invocable command names on this machine, all bare, plus the plugins Codex lists but
-        cannot be shown to hold.
+        """Invocable command names on this machine, plus the plugins Codex lists but cannot be
+        shown to hold and the plugin names more than one source answers to.
 
-        Three verified roots: ``$CODEX_HOME/skills/``, ``$CODEX_HOME/prompts/`` (the analogue
-        of Claude's slash commands), and the project-local ``./.codex/skills/`` the
-        ``AGENTS.md`` dispatch table resolves.
+        THE SOURCE IS CODEX'S OWN CATALOG (``skills_list``): every skill a ``$`` mention can
+        reach, named exactly as Codex names it — plugin skills as ``<plugin>:<skill>``,
+        manifest-namespaced user skills such as ``~/.agents/skills/superpowers`` as
+        ``superpowers:<skill>``, user skills bare — minus what it disabled or refused to load.
+        ``$CODEX_HOME/prompts/`` (the analogue of Claude's slash commands) and conductor's own
+        checkout and dev roots are added to it, as they always were.
 
-        Installed PLUGIN skills come back qualified, because Codex itself supplies the
-        attribution: ``codex plugin list --json`` reports each installed plugin's identity, and
-        its skills live under the root that identity implies. Without it no Codex machine can
-        distinguish spec-craft's ``expectations`` from any other plugin's.
+        When Codex cannot give a catalog — no executable, an error, output that is not the
+        protocol — the answer falls back to scanning: ``$CODEX_HOME/skills/``, the project-local
+        ``./.codex/skills/``, and each installed plugin's root, named and filtered by
+        ``codex_skill_names``. That scan does not reach ``~/.agents/skills`` or the other roots
+        only Codex's resolver knows, so it can under-report; it is the answer of last resort.
 
-        A plugin NAME that two installed roots claim is the exception. Both roots' skills really
-        are invocable under the qualified name, so they are listed; but neither root's claim on
-        the name survives the other, so the name also travels in ``contested_plugins`` and
-        preflight reports a requirement on it ``unverified`` rather than handing a stranger's
-        copy the required plugin's identity.
+        ``codex plugin list --json`` is asked either way, first. It is what knows a plugin Codex
+        lists but whose root is NOT ON DISK (``unverifiable_plugins``) and a plugin name two
+        installed roots claim (``contested_plugins``, joined by any qualified name the catalog
+        lists at two paths). Without the first, "codex says spec-craft is installed and its tree
+        is gone" and "spec-craft was never installed" arrive at preflight as the same empty
+        contribution; without the second, a second marketplace's same-named plugin passes as
+        the required one.
 
-        A plugin whose root is NOT ON DISK contributes no names at all — there is nothing there
-        to enumerate — so it travels in the second half of the answer instead. Without it,
-        "codex says spec-craft is installed and its tree is gone" and "spec-craft was never
-        installed" arrive at preflight as the same empty contribution.
-
-        An expired ``codex plugin list --json`` PROPAGATES rather than degrading here. This
-        method's answer is "what is invocable", and after an unanswered probe that is not known;
-        returning the filesystem legs alone would be an answer of the same shape as a healthy
-        one, and preflight would read a hung Codex as a machine with no plugins installed. The
+        An expired probe — either one — PROPAGATES rather than degrading here. This method's
+        answer is "what is invocable", and after an unanswered probe that is not known;
+        returning what was scanned would be an answer of the same shape as a healthy one. The
         expiry carries those legs as ``partial`` instead, so the policy layer degrades with
         every fact that WAS established and none that were not.
         """
         home = self.source_root()
         project = project_root or os.getcwd()
         named = _SKILL_NAMER
-        cmds = named(f"{home}/skills/*/SKILL.md")
-        cmds |= discovery.command_names(f"{home}/prompts/*.md")
-        cmds |= named(f"{project}/.{self.id}/skills/*/SKILL.md")
+        cmds = discovery.command_names(f"{home}/prompts/*.md")
         cmds |= discovery.scan_plugin_dir(
             discovery.CONDUCTOR_ROOT, discovery.ALL_MANIFEST_DIRS, named
         )
         for root in discovery.dev_plugin_roots():
             cmds |= discovery.scan_plugin_dir(root, (f".{self.id}-plugin",), named)
-        # LAST, so everything above is established before the host is asked and can travel with
-        # the expiry. Union order is otherwise irrelevant — these are sets.
+        scanned = named(f"{home}/skills/*/SKILL.md")
+        scanned |= named(f"{project}/.{self.id}/skills/*/SKILL.md")
+        # The host is asked only after everything above is established, so it can travel with
+        # an expiry.
         try:
             attributed, contested, unverifiable = installed_plugins(
                 project_root=project
             )
         except base.HostProbeTimeout as expiry:
             raise base.HostProbeTimeout(
-                str(expiry), partial=discovery.HostSkills(cmds, frozenset())
+                str(expiry), partial=discovery.HostSkills(cmds | scanned, frozenset())
             ) from expiry
         for name, root in attributed.items():
-            cmds |= discovery.qualified(name, root, named)
+            scanned |= discovery.qualified(name, root, named)
         for name, roots in contested.items():
             for root in roots:
-                cmds |= discovery.qualified(name, root, named)
-        return discovery.HostSkills(cmds, unverifiable, frozenset(contested))
+                scanned |= discovery.qualified(name, root, named)
+        colliding = frozenset(contested)
+        try:
+            catalog = skills_list(project_root=project)
+        except base.HostProbeTimeout as expiry:
+            raise base.HostProbeTimeout(
+                str(expiry),
+                partial=discovery.HostSkills(cmds | scanned, unverifiable, colliding),
+            ) from expiry
+        if catalog is None:
+            return discovery.HostSkills(cmds | scanned, unverifiable, colliding)
+        listed, listed_twice = catalog_names(catalog)
+        return discovery.HostSkills(
+            cmds | listed, unverifiable, colliding | listed_twice
+        )

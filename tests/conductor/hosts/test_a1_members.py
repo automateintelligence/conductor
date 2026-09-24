@@ -99,7 +99,9 @@ def test_discovered_commands_finds_a_bare_user_skill_under_the_host_source_root(
     root = tmp_path / f".{host_id}"
     skill = root / "skills" / "document-release"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: document-release\n---\n")
+    (skill / "SKILL.md").write_text(
+        "---\nname: document-release\ndescription: d\n---\n"
+    )
     assert "document-release" in discovery.adapter_for(host_id).discovered_commands()
 
 
@@ -124,7 +126,7 @@ def test_codex_discovers_a_project_local_skill(monkeypatch, tmp_path):
     project = tmp_path / "project"
     skill = project / ".codex" / "skills" / "code-review"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: code-review\n---\n")
+    (skill / "SKILL.md").write_text("---\nname: code-review\ndescription: d\n---\n")
     assert "code-review" in discovery.adapter_for("codex").discovered_commands(
         project_root=str(project)
     )
@@ -156,7 +158,7 @@ def test_each_host_reads_its_own_plugin_manifest(
     (plug / manifest_dir / "plugin.json").write_text('{"name": "spec-craft"}')
     skill = plug / "skills" / "expectations"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    (skill / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
     monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
     found = discovery.adapter_for(host_id).discovered_commands()
     assert "spec-craft:expectations" in found

@@ -69,12 +69,14 @@ def _recorded(codex_home, *, keep=None, on_disk=None, junk=()):
         src = os.path.join(entry["source"]["path"], "skills", "start")
         os.makedirs(src, exist_ok=True)
         with open(os.path.join(src, "SKILL.md"), "w") as f:
-            f.write("---\nname: start\n---\n")
+            f.write("---\nname: start\ndescription: d\n---\n")
         if on_disk is not None and entry["pluginId"] not in on_disk:
             continue
         root = codex_home / _RECORDED_INSTALLED_ROOTS[entry["pluginId"]]
         (root / "skills" / "start").mkdir(parents=True, exist_ok=True)
-        (root / "skills" / "start" / "SKILL.md").write_text("---\nname: start\n---\n")
+        (root / "skills" / "start" / "SKILL.md").write_text(
+            "---\nname: start\ndescription: d\n---\n"
+        )
         # A STALE version directory either side of the listed one, both populated. An upgrade or
         # a half-cleaned cache leaves these behind, and with only ever one version directory per
         # plugin the version segment was unobservable: a parser that ignored the reported
@@ -85,7 +87,7 @@ def _recorded(codex_home, *, keep=None, on_disk=None, junk=()):
                 parents=True, exist_ok=True
             )
             (root.parent / stale / "skills" / "start" / "SKILL.md").write_text(
-                "---\nname: start\n---\n"
+                "---\nname: start\ndescription: d\n---\n"
             )
     # FIRST, so an entry that is not an entry cannot be skipped by luck of ordering: a parser
     # that stops at the first surprise never reaches the valid entries behind it.
@@ -539,7 +541,7 @@ def test_host_skills_propagates_the_expiry_carrying_what_it_had_already_establis
     home = tmp_path / "codex-home"
     (home / "skills" / "flat-user-skill").mkdir(parents=True)
     (home / "skills" / "flat-user-skill" / "SKILL.md").write_text(
-        "---\nname: flat-user-skill\n---\n"
+        "---\nname: flat-user-skill\ndescription: d\n---\n"
     )
     monkeypatch.setenv(codex.CONFIG_DIR_ENV, str(home))
     _codex_that_never_answers(tmp_path, monkeypatch)

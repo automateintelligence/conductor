@@ -53,7 +53,7 @@ def test_discovers_plugin_dir_install(tmp_path, monkeypatch):  # dogfood: --plug
     (plug / ".claude-plugin" / "plugin.json").write_text('{"name": "spec-craft"}')
     skill = plug / "skills" / "expectations"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    (skill / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
     monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty"))
     avail = preflight.available_commands()
@@ -227,7 +227,7 @@ def _codex_install(
     for name in ("code-review", review_wrapper, "document-release"):
         d = home / "skills" / f"{env_dir_prefix}{name}"
         d.mkdir(parents=True)
-        (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
+        (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n")
     sources = {}
     for plugin, skills in _PLUGIN_SKILLS.items():
         root = _installed_root(home, plugin)
@@ -245,13 +245,13 @@ def _codex_install(
         for stale in stale_version_siblings(root.name):
             d = root.parent / stale / "skills" / "stale-decoy"
             d.mkdir(parents=True)
-            (d / "SKILL.md").write_text("---\nname: stale-decoy\n---\n")
+            (d / "SKILL.md").write_text("---\nname: stale-decoy\ndescription: d\n---\n")
         for name in skills:
             if name in without:
                 continue
             d = (home / "skills" / name) if flat_only else (root / "skills" / name)
             d.mkdir(parents=True)
-            (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
+            (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n")
     _stub_codex_on_path(tmp_path, monkeypatch, {} if flat_only else sources)
     return home
 
@@ -404,8 +404,8 @@ def test_codex_discovery_reports_the_declared_name_not_the_directory(
         monkeypatch,
         {
             "gstack-claude": "---\nname: claude\ndescription: x\n---\nbody\n",
-            "quoted": '---\nname: "beta"\n---\n',
-            "single-quoted": "---\nname: 'gamma'\n---\n",
+            "quoted": '---\nname: "beta"\ndescription: x\n---\n',
+            "single-quoted": "---\nname: 'gamma'\ndescription: x\n---\n",
             "nameless": "---\ndescription: no name\n---\n",
         },
     )
@@ -427,8 +427,8 @@ def test_a_codex_directory_named_after_a_requirement_does_not_satisfy_it(
         tmp_path,
         monkeypatch,
         {
-            "claude": "---\nname: something-else\n---\n",
-            "gstack-claude": "---\nname: gstack-claude\n---\n",
+            "claude": "---\nname: something-else\ndescription: d\n---\n",
+            "gstack-claude": "---\nname: gstack-claude\ndescription: d\n---\n",
         },
     )
     out = preflight.check(project_root=str(tmp_path / "project"))
@@ -478,7 +478,7 @@ def test_a_codex_plugin_skill_is_qualified_by_its_declared_name(tmp_path, monkey
     (plug / ".codex-plugin" / "plugin.json").write_text('{"name": "spec-craft"}')
     skill = plug / "skills" / "spec-craft-expectations"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    (skill / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
     _stub_codex_on_path(tmp_path, monkeypatch, {})
     monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
     found = preflight.available_commands(
@@ -499,7 +499,7 @@ def test_claude_discovery_still_names_a_user_skill_by_its_directory(
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
     d = home / "skills" / "connect-chrome"
     d.mkdir(parents=True)
-    (d / "SKILL.md").write_text("---\nname: open-gstack-browser\n---\n")
+    (d / "SKILL.md").write_text("---\nname: open-gstack-browser\ndescription: d\n---\n")
     found = preflight.available_commands(host_id="claude")
     assert "connect-chrome" in found
     assert "open-gstack-browser" not in found
@@ -616,7 +616,7 @@ def test_codex_recovers_plugin_identity_from_the_installed_plugin_list(
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
     skill = _installed_root(home, "spec-craft") / "skills" / "expectations"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    (skill / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
     _stub_codex_on_path(
         tmp_path, monkeypatch, {"spec-craft": tmp_path / "marketplace" / "spec-craft"}
     )
@@ -751,7 +751,7 @@ def test_available_commands_uses_the_requested_hosts_root(tmp_path, monkeypatch)
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
     d = tmp_path / "codex-home" / "skills" / "only-on-codex"
     d.mkdir(parents=True)
-    (d / "SKILL.md").write_text("---\n---\n")
+    (d / "SKILL.md").write_text("---\ndescription: d\n---\n")
     assert "only-on-codex" in preflight.available_commands(host_id="codex")
     assert "only-on-codex" not in preflight.available_commands(host_id="claude")
 
@@ -871,7 +871,7 @@ def test_check_discovers_the_projects_own_codex_skills_not_the_current_directory
     proj = tmp_path / "proj"
     skill = proj / ".codex" / "skills" / "expectations"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    (skill / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-codex-home"))
     monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
     _bin_dir_without_codex(tmp_path, monkeypatch)
@@ -919,7 +919,7 @@ def test_a_manifestless_plugin_dir_contributes_nothing_on_either_host(
     plug = tmp_path / "spec-craft"
     skill = plug / "skills" / "expectations"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    (skill / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
     monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty-claude-home"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-codex-home"))

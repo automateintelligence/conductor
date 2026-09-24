@@ -4,9 +4,10 @@
 It is "glob a directory, read a JSON ``name``", and it is genuinely identical on the two hosts
 because the ``SKILL.md`` format and the ``skills/<name>/`` layout are identical (ground truth
 §"Skill file format is compatible across hosts"). What *does* differ — which roots are searched,
-which manifest directory names the plugin, and whether a skill is named by its directory or by
-the ``name`` its ``SKILL.md`` declares — stays in each adapter, where a wrong answer is visible
-rather than averaged away. This module supplies both naming primitives and chooses neither.
+which manifest directory names the plugin, whether a skill is named by its directory or by the
+``name`` its ``SKILL.md`` declares, and which SKILL.md files the host refuses to load — stays in
+each adapter, where a wrong answer is visible rather than averaged away. This module supplies
+the primitives (``skill_names``, ``frontmatter``) and chooses neither rule.
 
 Nothing here raises. Discovery answers "what is installed", and a missing, unreadable, or
 malformed directory is a legitimate answer to that question ("not this"), not an error. The
@@ -118,11 +119,16 @@ def _yaml_scalar(raw: str) -> str:
     return value.split(" #", 1)[0].strip()
 
 
-def declared_name(skill_md: str) -> str | None:
-    """The top-level ``name`` declared in a SKILL.md's leading ``---`` frontmatter, or None.
+def frontmatter(skill_md: str) -> dict[str, str] | None:
+    """The top-level scalar fields of a SKILL.md's leading ``---`` frontmatter block.
 
-    None for no frontmatter, no ``name`` key in it, an empty value, or an unreadable file. A
-    ``name:`` line in the body, or nested under another key, is not a declaration.
+    None when there is no block: the first line is not ``---``, no closing ``---`` follows, the
+    block is empty, or the file cannot be read. Nested keys are skipped, and a ``|`` or ``>``
+    block scalar is folded into one line. A line in the body is never a field.
+
+    This is a line reader, not a YAML parser — the package is stdlib-only. It covers the
+    frontmatter skills are actually written in; a host that needs its own exact rule applies it
+    to what this returns.
     """
     try:
         with open(skill_md, encoding="utf-8") as f:
@@ -131,21 +137,32 @@ def declared_name(skill_md: str) -> str | None:
         return None
     if not lines or lines[0].strip() != "---":
         return None
-    for line in lines[1:]:
-        if line.strip() == "---":
-            return None
-        if line.startswith("name:"):
-            return _yaml_scalar(line[len("name:") :]) or None
-    return None
-
-
-def declared_skill_names(pattern: str) -> set[str]:
-    """Skill names from a ``.../skills/*/SKILL.md`` glob — the declared ``name`` of each, or
-    its directory name when it declares none."""
-    return {
-        declared_name(p) or os.path.basename(os.path.dirname(p))
-        for p in glob.glob(pattern)
-    }
+    try:
+        close = next(i for i, line in enumerate(lines[1:], 1) if line.strip() == "---")
+    except StopIteration:
+        return None
+    block = lines[1:close]
+    if not block:
+        return None
+    fields: dict[str, str] = {}
+    folding: str | None = None
+    for line in block:
+        indented = line[:1] in (" ", "\t")
+        if folding is not None:
+            if indented or not line.strip():
+                fields[folding] = " ".join((fields[folding] + " " + line).split())
+                continue
+            folding = None
+        if indented or line.startswith("#") or ":" not in line:
+            continue
+        key, _, raw = line.partition(":")
+        value = raw.strip()
+        if value[:1] in ("|", ">"):
+            fields[key.strip()] = ""
+            folding = key.strip()
+            continue
+        fields[key.strip()] = _yaml_scalar(value)
+    return fields
 
 
 def command_names(pattern: str) -> set[str]:
