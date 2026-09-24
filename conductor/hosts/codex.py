@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import textwrap
+import urllib.parse
 from collections.abc import Mapping
 
 from conductor.hosts import base, discovery, proc
@@ -720,11 +721,20 @@ class CodexAdapter:
         return matched.pop()
 
     def session_identity(self, env: Mapping[str, str]) -> str | None:
-        """``codex:<CODEX_THREAD_ID>:<boot-id>`` for the session that owns ``env``.
+        """``codex:<CODEX_THREAD_ID>:<boot-id>:<quoted CODEX_HOME>`` for the session that owns
+        ``env``.
 
         The thread id is the identity and a pid never is: one Codex process can hold several
         thread locks, so keying ownership on the process would exclude threads that are not
         working on this run.
+
+        THE CODEX_HOME IS PART OF THE IDENTITY. The liveness proof is a lock under
+        ``<CODEX_HOME>/thread-writer-locks/``, and the process that later asks — a cron driver,
+        ``conductor status``, a relocation scan — runs with ITS OWN environment. Resolving the
+        lock against the reader's ``CODEX_HOME`` looked in the wrong directory whenever the two
+        differed: "cannot tell" at best, and a positive "exited" whenever the reader's home held
+        an unlocked file of the same name. It is percent-quoted so a ``:`` in the path cannot
+        split the identity.
 
         ``None`` when no thread id can be established, when it is not a well-formed id, or when
         the boot id is unreadable — all of which mean the caller must refuse to claim ownership
@@ -741,7 +751,10 @@ class CodexAdapter:
         boot = proc.boot_id()
         if boot is None:
             return None
-        return f"{self.id}:{thread_id}:{boot}"
+        recorded_home = urllib.parse.quote(
+            os.path.abspath(os.path.expanduser(home)), safe=""
+        )
+        return f"{self.id}:{thread_id}:{boot}:{recorded_home}"
 
     def process_alive(self, identity: str) -> bool | None:
         """Tri-state liveness for an identity recorded against this host.
@@ -770,15 +783,20 @@ class CodexAdapter:
         if scheme != self.id:
             return None
         parts = identity.split(":")
-        if len(parts) != 3 or not parts[2]:
+        if len(parts) not in (3, 4) or not parts[2]:
             return None
         thread_id, recorded_boot = parts[1], parts[2]
+        # A three-field identity predates the recorded home; the reader's CODEX_HOME is the only
+        # answer it ever had. A four-field one names its own, and nothing else is consulted.
+        home = urllib.parse.unquote(parts[3]) if len(parts) == 4 else None
+        if home is not None and not os.path.isabs(home):
+            return None
         current_boot = proc.boot_id()
         if current_boot is None:
             return None
         if current_boot != recorded_boot:
             return False
-        path = self.thread_lock_path(thread_id)
+        path = self.thread_lock_path(thread_id, home=home)
         if path is None:
             return None
         if not os.path.isdir(os.path.dirname(path)):
