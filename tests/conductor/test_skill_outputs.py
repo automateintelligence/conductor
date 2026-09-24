@@ -403,6 +403,42 @@ _FORBIDDEN: dict[str, list[str]] = {
 }
 
 
+# Claims about the Tier-B driver that describe the DELETED `pgrep -f 'claude'` + `/proc/<pid>/cwd`
+# guard. Prose a worker reads is executable, and the driver now does the opposite of each: an
+# open session does not stop a fire (only a registered ownership record does, and only while it
+# is held), and nothing the driver decides is keyed on a process name. Matched against
+# whitespace-normalized, lowercased text, so a re-wrap cannot smuggle one back in.
+_FORBIDDEN_STALE_DRIVER_CLAIMS: dict[str, list[tuple[str, str]]] = {
+    "skills/start/SKILL.md": [
+        (
+            "a claude process holds the cwd",
+            "the process-name/cwd guard is gone — a live claude session does not by itself "
+            "stop a Tier-B fire, so telling the owner it does sends them to wait out a stall "
+            "that is not happening",
+        ),
+        (
+            "no-ops on every fire",
+            "same deleted guard, other spelling: fires skip only while an ownership record is "
+            "held (`fire-skipped reason=owner-busy`) or the lock is busy, never for every fire",
+        ),
+    ],
+}
+
+
+@pytest.mark.parametrize("path", sorted(_FORBIDDEN_STALE_DRIVER_CLAIMS))
+def test_no_skill_describes_the_deleted_process_name_guard(path):
+    raw = open(os.path.join(ROOT, path), encoding="utf-8").read()
+    text = " ".join(raw.lower().split())
+    present = [
+        f"{needle!r}: {why}"
+        for needle, why in _FORBIDDEN_STALE_DRIVER_CLAIMS[path]
+        if needle in text
+    ]
+    assert not present, f"{path} still describes the deleted guard:\n  " + "\n  ".join(
+        present
+    )
+
+
 # A top-level step heading: `4.` / `4b.` at column 0. The executable spine of a skill.
 # Column 0 is what distinguishes it from a SUB-step — autodev indents `**3a.`/`**3b.` and
 # its whole step-6 recipe by three spaces, and those legitimately belong to their parent.
