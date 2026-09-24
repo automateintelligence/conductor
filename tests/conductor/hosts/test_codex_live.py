@@ -3,8 +3,9 @@
 Skipped unless `CONDUCTOR_LIVE_CODEX=1`. With the variable set, a missing `codex` is a failure,
 not a skip, because asking for this test means asking for a real Codex. The rest of the suite
 is hermetic (`tests/conftest.py` refuses a real `codex`) and replays responses recorded from
-codex-cli 0.155.0; this is where a newer Codex shows whether those recordings, and the fallback
-rule in `conductor.hosts.codex.codex_skill_names`, still describe it.
+codex-cli 0.155.0; this is where a newer Codex shows whether those recordings still describe
+it, and whether `conductor.hosts.codex.codex_skill_names` still accepts nothing Codex rejects
+(checked over the generated corpus in `tests/conductor/skill_corpus.py`).
 
 Runs against a scratch `HOME` and `CODEX_HOME`, so it reads nothing of the operator's install.
 Codex may start its own plugin-marketplace sync on a fresh home, which can reach the network.
@@ -13,11 +14,13 @@ Codex may start its own plugin-marketplace sync on a fresh home, which can reach
 from __future__ import annotations
 
 import os
+import pathlib
 import shutil
 
 import pytest
 
 from conductor.hosts import codex
+from tests.conductor import skill_corpus
 
 pytestmark = [
     pytest.mark.live_codex,
@@ -27,26 +30,11 @@ pytestmark = [
     ),
 ]
 
-_SKILLS = {
-    "gstack-claude": "---\nname: claude\ndescription: d\n---\n",
-    "nameless": "---\ndescription: d\n---\n",
-    "quoted": '---\nname: "beta"\ndescription: d\n---\n',
-    "no-description": "---\nname: no-description\n---\n",
-    "empty-frontmatter": "---\n---\n",
-    "no-frontmatter": "description: d\n",
-    "long-name": f"---\nname: {'n' * 65}\ndescription: d\n---\n",
-    "bracket": "---\nname: bracket\ndescription: [\n---\n",
-    "colon": "---\nname: colon\ndescription: Build for AWS: ECS\n---\n",
-    "tab": "---\nname: tab\ndescription:\td\n---\n",
-    "list-description": "---\nname: list-description\ndescription: [a, b]\n---\n",
-    "null-description": "---\nname: null-description\ndescription: null\n---\n",
-}
 
-
-def test_the_real_catalog_agrees_with_the_fallback_rule(tmp_path, monkeypatch):
+def _catalog_for(tmp_path, monkeypatch, files):
     assert shutil.which("codex"), "CONDUCTOR_LIVE_CODEX=1 but no `codex` on PATH"
     home = tmp_path / "codex-home"
-    for dirname, text in _SKILLS.items():
+    for dirname, text in files.items():
         d = home / "skills" / dirname
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(text)
@@ -54,15 +42,35 @@ def test_the_real_catalog_agrees_with_the_fallback_rule(tmp_path, monkeypatch):
     project.mkdir()
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("CODEX_HOME", str(home))
-
     catalog = codex.skills_list(project_root=str(project))
-
-    assert catalog is not None, "codex app-server gave no skills/list answer"
-    listed = {
-        s["name"]
+    return home, {
+        pathlib.Path(s["path"]).parent.name: s["name"]
         for s in catalog
-        if str(s.get("path", "")).startswith(str(home / "skills"))
+        if pathlib.Path(s["path"]).parent.parent == home / "skills"
     }
-    listed -= {s["name"] for s in catalog if "/.system/" in str(s.get("path", ""))}
-    assert listed == {"claude", "nameless", "beta", "bracket", "colon", "tab"}, listed
-    assert codex.codex_skill_names(f"{home}/skills/*/SKILL.md") == listed
+
+
+def test_everything_the_subset_accepts_codex_loads_under_the_same_name(
+    tmp_path, monkeypatch
+):
+    """The namer's one promise, checked against the real parser over a generated corpus:
+    whatever it accepts, Codex loads, and under the name the namer reported. (The converse is
+    deliberately not required: an exotic SKILL.md Codex loads may read as not loadable.)"""
+    files = skill_corpus.corpus()
+    home, loaded = _catalog_for(tmp_path, monkeypatch, files)
+    wrong = {}
+    for dirname in files:
+        accepted = codex.codex_skill_names(f"{home}/skills/{dirname}/SKILL.md")
+        if accepted and loaded.get(dirname) not in accepted:
+            wrong[dirname] = (files[dirname], sorted(accepted), loaded.get(dirname))
+    assert not wrong, wrong
+
+
+def test_the_hand_picked_cases_hold_against_the_real_codex(tmp_path, monkeypatch):
+    from tests.conductor.hosts.test_codex_skills_list import ACCEPTED, REJECTED
+
+    files = {d: text for d, (text, _) in ACCEPTED.items()}
+    files.update({f"rejected-{d}": text for d, text in REJECTED.items()})
+    _, loaded = _catalog_for(tmp_path, monkeypatch, files)
+    for dirname, (_, name) in ACCEPTED.items():
+        assert loaded.get(dirname) == name, (dirname, loaded.get(dirname))

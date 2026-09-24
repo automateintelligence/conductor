@@ -16,13 +16,14 @@ scanning the filesystem, and there it applies Codex's own SKILL.md validity rule
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import time
 import pytest
 
 from conductor import preflight
 from conductor.hosts import base, codex
-from tests.conductor import codex_stub
+from tests.conductor import codex_stub, skill_corpus
 
 _REQUIRED_ON_CODEX = (
     "spec-craft:expectations",
@@ -267,6 +268,10 @@ def test_only_an_enabled_true_skill_is_counted(tmp_path, monkeypatch, entry):
     assert "claude" not in found
 
 
+@pytest.mark.skipif(
+    not os.path.isdir("/proc/self"),
+    reason="needs /proc to see whether the helper process is still running",
+)
 def test_the_catalog_probe_leaves_no_helper_process_behind(tmp_path, monkeypatch):
     """A Codex server may start helpers in its process group; they must not outlive the probe
     even when the server itself exits cleanly."""
@@ -285,6 +290,44 @@ def test_the_catalog_probe_leaves_no_helper_process_behind(tmp_path, monkeypatch
     assert codex.skills_list(project_root=str(project)) is not None
     pid = int(pidfile.read_text())
     assert not _running(pid), f"helper {pid} outlived the probe"
+
+
+def test_a_group_that_survives_sigkill_is_reported_not_passed(tmp_path, monkeypatch):
+    """A member still in the server's process group after SIGKILL (a process stuck in
+    uninterruptible sleep, say) means the probe did not end cleanly, so its answer is not
+    trusted: the catalog is reported unavailable, naming the group."""
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    project = tmp_path / "project"
+    codex_stub.put_on_path(
+        monkeypatch,
+        tmp_path / "stub-bin",
+        app_server=codex_stub.recorded_app_server(
+            codex_home=str(home), cwd=str(project), home=str(tmp_path)
+        ),
+        helper_pidfile=tmp_path / "helper.pid",
+    )
+    monkeypatch.setattr(codex, "SKILLS_LIST_REAP_GRACE_S", 0.3)
+    monkeypatch.setattr(codex, "PLUGIN_LIST_KILL_GRACE_S", 0.3)
+    real_alive = codex._group_alive
+    seen = []
+
+    def stuck(pgid):
+        seen.append(real_alive(pgid))
+        return True  # one member never leaves
+
+    monkeypatch.setattr(codex, "_group_alive", stuck)
+    started = time.monotonic()
+    with pytest.raises(codex.CatalogUnavailable, match="process group"):
+        codex.skills_list(project_root=str(project))
+    assert (
+        time.monotonic() - started < 10
+    )  # bounded, not waiting on the survivor forever
+
+    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
+    out = preflight.check(required=["claude"], project_root=str(project))
+    assert out["unverified"] == ["$claude"], out
 
 
 def _running(pid):
@@ -310,31 +353,34 @@ def test_a_server_that_never_reads_cannot_block_the_request(tmp_path, monkeypatc
     assert time.monotonic() - started < 10
 
 
-# ------------------------------------------------ fallback namer: Codex's SKILL.md validity rule
+# ------------------------------------------ the namer: a strict subset of what Codex loads
 #
-# `parse_skill_frontmatter_metadata` (codex-rs/skills/src/parser.rs, rust-v0.155.0): a `---`
-# block with a closing `---`, parsed as YAML — and when that fails, re-parsed after quoting
-# scalars that contain `: ` or start like a broken flow value. `name` defaults to the directory
-# and is at most 64 characters; `description` is required and non-empty. Every case below was
-# checked against a live 0.155.0 `skills/list` (see `test_codex_live.py`).
+# `codex_skill_names` decides only conductor's own checkout and the `CONDUCTOR_PLUGIN_DIRS` dev
+# roots; everything else comes from Codex's catalog. So it does not try to match Codex's parser.
+# It accepts a small, flat form it can read exactly, and rejects the whole file on anything else
+# — a Codex-valid but exotic SKILL.md reads as not loadable (unverified), never the reverse.
 
 ACCEPTED = {
-    "plain": ("---\ndescription: d\n---\n", "plain"),
-    "block": ("---\nname: block\ndescription: |\n  spans\n  lines\n---\n", "block"),
+    "plain": ("---\nname: plain\ndescription: d\n---\n", "plain"),
+    "declared": ("---\nname: claude\ndescription: d\n---\n", "claude"),
+    "double": ('---\nname: "beta"\ndescription: "a: b # c"\n---\n', "beta"),
+    "single": ("---\nname: 'gamma'\ndescription: 'it''s'\n---\n", "gamma"),
+    "blank-lines": ("---\n\nname: blank\n\ndescription: d\n\n---\n", "blank"),
+    "extra-key": ("---\nname: extra\ndescription: d\nlicense: MIT\n---\n", "extra"),
+    "punctuated": (
+        "---\nname: punct\ndescription: Use /spec-craft:x — then [y] {z} a#b.\n---\n",
+        "punct",
+    ),
+    "crlf": ("---\r\nname: crlf\r\ndescription: d\r\n---\r\n", "crlf"),
     "max-name": (f"---\nname: {'m' * 64}\ndescription: d\n---\n", "m" * 64),
-    "bracket": ("---\nname: bracket\ndescription: [\n---\n", "bracket"),
-    "brace": ("---\nname: brace\ndescription: {\n---\n", "brace"),
-    "colon": ("---\nname: colon\ndescription: Build for AWS: ECS\n---\n", "colon"),
-    "mapdesc": ("---\nname: mapdesc\ndescription: {a: 1}\n---\n", "mapdesc"),
-    "number": ("---\nname: number\ndescription: 42\n---\n", "number"),
-    "tab": ("---\nname: tab\ndescription:\td\n---\n", "tab"),
-    "multi": ("---\nname: multi\ndescription: first\n  continued\n---\n", "multi"),
-    "quoted": ('---\nname: "beta"\ndescription: d\n---\n', "beta"),
 }
+
 REJECTED = {
+    # round 1
     "no-description": "---\nname: no-description\n---\n",
     "empty-description": '---\nname: empty-description\ndescription: ""\n---\n',
     "null-description": "---\nname: null-description\ndescription: null\n---\n",
+    "tilde-description": "---\nname: tilde-description\ndescription: ~\n---\n",
     "list-description": "---\nname: list-description\ndescription: [a, b]\n---\n",
     "list-name": "---\nname: [x]\ndescription: d\n---\n",
     "not-a-mapping": "---\n- a\n- b\n---\n",
@@ -342,6 +388,33 @@ REJECTED = {
     "no-frontmatter": "description: d\n",
     "unclosed": "---\nname: unclosed\ndescription: d\n",
     "long-name": f"---\nname: {'n' * 65}\ndescription: d\n---\n",
+    # round 2
+    "anchor-duplicate": "---\nname: &n expectations\nname: *n\ndescription: d\n---\n",
+    "missing-alias": "---\nname: alias\ndescription: d\nfoo: *missing\n---\n",
+    "unterminated-quote": '---\nname: quote\ndescription: d\nfoo: "unterminated\n---\n',
+    "duplicate-key": "---\nname: one\nname: two\ndescription: d\n---\n",
+    "metadata-null": "---\nname: meta\ndescription: d\nmetadata: null\n---\n",
+    "metadata-map": "---\nname: meta\ndescription: d\nmetadata:\n  a: b\n---\n",
+    "dash": "---\nname: dash\ndescription: d\n-\n---\n",
+    "dash-item": "---\nname: dash\ndescription: d\n- foo\n---\n",
+    "complex-key": "---\nname: q\ndescription: d\n? foo\n---\n",
+    "comma": "---\nname: comma\ndescription: d\n,foo\n---\n",
+    "comment-line": "---\nname: hash\ndescription: d\n#foo\n---\n",
+    "trailing-comment": "---\nname: x # c\ndescription: d\n---\n",
+    # the rest of the subset's edges
+    "nameless": "---\ndescription: d\n---\n",
+    "continuation": "---\nname: cont\ndescription: first\n  continued\n---\n",
+    "block-scalar": "---\nname: block\ndescription: |\n  text\n---\n",
+    "tab-separator": "---\nname: tab\ndescription:\td\n---\n",
+    "colon-space": "---\nname: colon\ndescription: Build for AWS: ECS\n---\n",
+    "trailing-colon": "---\nname: colon\ndescription: ends:\n---\n",
+    "tag": "---\nname: tag\ndescription: !!str d\n---\n",
+    "escape": '---\nname: esc\ndescription: "a\\nb"\n---\n',
+    "numeric": "---\nname: num\ndescription: 42\n---\n",
+    "boolean-name": "---\nname: true\ndescription: d\n---\n",
+    "bad-key": "---\nname: key\ndescription: d\nbad key: v\n---\n",
+    "empty-value": "---\nname: empty\ndescription: d\nfoo:\n---\n",
+    "document-marker": "---\nname: doc\ndescription: d\n...\n---\n",
 }
 
 
@@ -349,18 +422,32 @@ def _names(tmp_path, skills):
     for dirname, text in skills.items():
         d = tmp_path / "skills" / dirname
         d.mkdir(parents=True)
-        (d / "SKILL.md").write_text(text)
+        (d / "SKILL.md").write_text(text, newline="")
     return codex.codex_skill_names(f"{tmp_path}/skills/*/SKILL.md")
 
 
-def test_the_fallback_namer_accepts_what_codex_accepts(tmp_path):
+def test_the_namer_accepts_its_flat_subset(tmp_path):
     found = _names(tmp_path, {d: text for d, (text, _) in ACCEPTED.items()})
     assert found == {name for _, name in ACCEPTED.values()}
 
 
 @pytest.mark.parametrize("dirname", sorted(REJECTED))
-def test_the_fallback_namer_rejects_what_codex_rejects(tmp_path, dirname):
+def test_the_namer_rejects_the_whole_file_outside_its_subset(tmp_path, dirname):
     assert _names(tmp_path, {dirname: REJECTED[dirname]}) == set()
+
+
+def test_the_generated_corpus_exercises_both_sides_of_the_subset(tmp_path):
+    """The opt-in live test checks that everything the subset accepts from this corpus Codex
+    also loads. That check only means something if the corpus lands on both sides."""
+    files = skill_corpus.corpus()
+    accepted = _names(tmp_path, files)
+    assert 0 < len(accepted) < len(files)
+
+
+def test_conductors_own_skills_are_inside_the_subset():
+    root = pathlib.Path(codex.__file__).resolve().parents[2]
+    own = {p.parent.name for p in (root / "skills").glob("*/SKILL.md")}
+    assert own and codex.codex_skill_names(f"{root}/skills/*/SKILL.md") == own
 
 
 # ------------------------------------------------------- recorded codex-cli 0.155.0 responses
@@ -396,19 +483,3 @@ def test_the_recorded_catalog_resolves_plugin_and_agents_skills(tmp_path, monkey
     assert out["unverified"] == [], out
     # That scratch home had no gstack install, so the environment-provided skills are absent.
     assert out["missing"] == ["$code-review", "$claude", "$document-release"], out
-
-
-@pytest.mark.parametrize("dirname", sorted(REJECTED))
-def test_without_pyyaml_the_namer_still_never_accepts_what_codex_rejects(
-    tmp_path, monkeypatch, dirname
-):
-    monkeypatch.setattr(codex, "_yaml", None)
-    assert _names(tmp_path, {dirname: REJECTED[dirname]}) == set()
-
-
-def test_without_pyyaml_conductors_own_skills_still_resolve(monkeypatch):
-    monkeypatch.setattr(codex, "_yaml", None)
-    root = pathlib.Path(codex.__file__).resolve().parents[2]
-    assert {"autodev", "start", "assertions-to-tests"} <= codex.codex_skill_names(
-        f"{root}/skills/*/SKILL.md"
-    )

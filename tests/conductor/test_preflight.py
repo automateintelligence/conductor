@@ -443,12 +443,12 @@ def test_codex_discovery_reports_the_declared_name_not_the_directory(
             "gstack-claude": "---\nname: claude\ndescription: x\n---\nbody\n",
             "quoted": '---\nname: "beta"\ndescription: x\n---\n',
             "single-quoted": "---\nname: 'gamma'\ndescription: x\n---\n",
-            "nameless": "---\ndescription: no name\n---\n",
+            "nameless": "---\ndescription: no name\n---\n",  # outside the subset
         },
     )
     found = codex_host.codex_skill_names(f"{home}/skills/*/SKILL.md")
-    assert {"claude", "beta", "gamma", "nameless"} <= found
-    assert not {"gstack-claude", "quoted", "single-quoted"} & found
+    assert {"claude", "beta", "gamma"} <= found
+    assert not {"gstack-claude", "quoted", "single-quoted", "nameless"} & found
 
 
 def test_a_codex_directory_named_after_a_requirement_does_not_satisfy_it(
@@ -484,10 +484,13 @@ def test_a_name_line_outside_the_frontmatter_is_not_a_declared_name(
     found = codex_host.codex_skill_names(f"{home}/skills/*/SKILL.md")
     assert "claude" not in found
     # codex-cli 0.155.0 lists each of these under its directory name
-    assert {"body-only", "nested", "empty-name"} <= found
+    # Each of these is also outside conductor's strict subset, so none is read at all.
+    assert not {"body-only", "nested", "empty-name"} & found
 
 
-def test_a_codex_name_is_read_as_a_yaml_scalar(tmp_path, monkeypatch):
+def test_a_codex_name_outside_the_flat_subset_is_not_read(tmp_path, monkeypatch):
+    """A trailing comment is valid YAML that Codex loads, but it is outside the subset
+    conductor reads exactly, so the file reads as not loadable: the safe direction."""
     home = _codex_home_with(
         tmp_path,
         monkeypatch,
@@ -497,7 +500,8 @@ def test_a_codex_name_is_read_as_a_yaml_scalar(tmp_path, monkeypatch):
         },
     )
     found = codex_host.codex_skill_names(f"{home}/skills/*/SKILL.md")
-    assert {"delta", "eps"} <= found
+    assert "eps" in found
+    assert not {"delta", "commented"} & found
 
 
 def test_a_codex_plugin_skill_is_qualified_by_its_declared_name(tmp_path, monkeypatch):

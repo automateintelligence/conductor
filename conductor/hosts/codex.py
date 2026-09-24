@@ -102,194 +102,109 @@ SKILL_NAME_MAX_CHARS = 64
 
 
 def codex_skill_names(pattern: str) -> set[str]:
-    """The names Codex would load a ``.../skills/*/SKILL.md`` glob under.
+    """The names under which Codex loads the SKILL.md files a ``.../skills/*/SKILL.md`` glob
+    matches, for the files conductor can read exactly.
 
-    Codex's own rule (``parse_skill_frontmatter_metadata``, ``codex-rs/skills/src/parser.rs``
-    at rust-v0.155.0), applied by ``codex_frontmatter``: a SKILL.md it rejects is not counted,
-    and one it accepts is named by its declared ``name`` or, failing that, its directory. gstack
-    depends on the declared-name half: its Codex installer links
-    ``$CODEX_HOME/skills/gstack-claude/`` declaring ``name: claude``. Claude Code names user
-    skills by directory, so none of this applies to the Claude adapter.
+    WHAT THIS DECIDES. Only the trees Codex's catalog does not speak for: conductor's own
+    checkout and the ``CONDUCTOR_PLUGIN_DIRS`` dev roots (plus on-disk evidence for advice, which
+    never counts). Everything else comes from ``skills_list``.
 
-    Used for the roots Codex's catalog does not speak for (conductor's own checkout and the
-    ``CONDUCTOR_PLUGIN_DIRS`` dev roots), and as on-disk evidence when the catalog is
-    unavailable — never as a pass on its own.
+    WHAT IT GUARANTEES. Every name it returns, Codex 0.155.0 loads under that name: it accepts
+    only ``codex_frontmatter``'s flat subset, which Codex's serde_yaml parser reads the same
+    way. The converse is deliberately not guaranteed. A SKILL.md Codex loads but that uses
+    anything outside the subset — a missing ``name`` (Codex would use the directory), a comment,
+    a block scalar, a flow value, ``metadata`` — is not returned, so a requirement it would have
+    met reads as unverified. That is the safe direction, and it is a trade made on purpose: the
+    earlier attempts to match Codex's parser accepted files Codex rejects.
     """
     names = set()
     for path in glob.glob(pattern):
         block = discovery.frontmatter_block(path)
-        parsed = codex_frontmatter(block) if block is not None else None
-        if parsed is None:
-            continue
-        declared, _ = parsed
-        name = declared or os.path.basename(os.path.dirname(path))
-        if len(name) <= SKILL_NAME_MAX_CHARS:
+        name = codex_frontmatter(block) if block is not None else None
+        if name is not None:
             names.add(name)
     return names
 
 
-def codex_frontmatter(block: str) -> tuple[str | None, str] | None:
-    """``(declared name or None, description)`` if Codex 0.155.0 accepts this frontmatter block,
-    else None.
+#: A frontmatter line in the subset: an unindented ``key: value`` with a simple key.
+_SUBSET_LINE = re.compile(r"([A-Za-z0-9][A-Za-z0-9_-]*): (.+)")
 
-    Codex deserializes the block with serde_yaml into ``{name?: String, description?: String,
-    metadata?: {short-description?: String}}``. If that fails, for ANY reason, it quotes the
-    scalars that YAML cannot take as written (``repair_frontmatter_scalar_fields``) and tries
-    once more. So ``description: [`` loads as the string ``[`` and ``description: Build for AWS:
-    ECS`` loads as written, while ``description: [a, b]`` (a real sequence) and ``description:
-    null`` do not. Plain scalars keep their written text: serde_yaml hands a ``String`` field the
-    scalar as written, which is why ``_CodexLoader`` resolves nothing but null. Every case here
-    was checked against a live 0.155.0 ``skills/list``; see ``tests/conductor/hosts/``.
+#: Characters that start a YAML indicator (anchor, alias, tag, block scalar, quote, directive,
+#: reserved, sequence, complex key, mapping, flow, comment) and so may not start a plain value.
+_INDICATORS = frozenset("&*!|>'\"%@`-?:,[]{}#")
 
-    Without PyYAML the rule cannot be applied exactly, and ``_simple_frontmatter`` accepts only
-    a subset of what Codex accepts. It can reject a skill Codex would load; it never accepts one
-    Codex would reject.
+#: Plain values a YAML 1.1 or 1.2 resolver may read as something other than a string. Refused
+#: for ``name`` and ``description``, the two fields that must be strings.
+_NON_STRING_WORDS = frozenset("null ~ true false yes no on off y n".split())
+
+
+def _subset_value(raw: str) -> str | None:
+    """The string a subset value denotes, or None when it is outside the subset."""
+    value = raw.strip()
+    # Python's notion of printable is narrower than YAML's, which is the safe side: it also
+    # refuses U+0085, U+2028 and U+2029, which a YAML parser reads as line breaks.
+    if not value or not value.isprintable():
+        return None
+    if value[0] == '"':
+        inner = value[1:-1]
+        if len(value) < 2 or value[-1] != '"' or '"' in inner or "\\" in inner:
+            return None
+        return inner
+    if value[0] == "'":
+        inner = value[1:-1]
+        if len(value) < 2 or value[-1] != "'" or "'" in inner.replace("''", ""):
+            return None
+        return inner.replace("''", "'")
+    if value[0] in _INDICATORS or " #" in value or ": " in value or value.endswith(":"):
+        return None
+    return value
+
+
+def codex_frontmatter(block: str) -> str | None:
+    """The ``name`` of a frontmatter block inside conductor's flat subset, or None.
+
+    The subset, and the whole file is rejected on any line outside it:
+
+    * blank lines, and unindented ``key: value`` lines whose key matches
+      ``[A-Za-z0-9][A-Za-z0-9_-]*`` and appears once;
+    * a value that is a plain scalar starting with no YAML indicator and containing no `` #``
+      comment, no ``: `` and no trailing ``:``; or a balanced single-quoted string (``''`` the
+      only escape) or double-quoted string with no ``\\`` and no inner ``"``;
+    * ``name`` and ``description`` present and non-empty after whitespace is collapsed, neither
+      a plain value YAML could read as null, a boolean or a number, and ``name`` at most 64
+      characters; no ``metadata`` key at all.
+
+    Every accepted block is one Codex 0.155.0 parses with serde_yaml on the first try, to the
+    same strings; see ``codex_skill_names`` for what that costs.
     """
-    if _yaml is None:
-        return _simple_frontmatter(block)
-    parsed = _typed_frontmatter(block)
-    if parsed is None:
-        repaired = _repair_frontmatter(block)
-        parsed = _typed_frontmatter(repaired) if repaired is not None else None
-    return parsed
-
-
-try:
-    import yaml as _yaml
-except ImportError:  # optional, as it is for assertions/run.py
-    _yaml = None
-
-if _yaml is not None:
-
-    class _CodexLoader(_yaml.SafeLoader):
-        """SafeLoader resolving only null: every other plain scalar stays the text it was
-        written as, as serde_yaml gives it to a ``String`` field."""
-
-    _CodexLoader.yaml_implicit_resolvers = {
-        first: [(tag, regexp) for tag, regexp in resolvers if tag.endswith(":null")]
-        for first, resolvers in _yaml.SafeLoader.yaml_implicit_resolvers.items()
-    }
-
-
-def _single_line(value: str) -> str:
-    return " ".join(value.split())
-
-
-#: A tab separating a key from its value. serde_yaml's YAML 1.2 parser accepts it (live
-#: 0.155.0: ``description:<TAB>d`` loads as ``d``); PyYAML's YAML 1.1 scanner refuses a tab
-#: that starts a token. Rewriting it to a space is the one place the two parsers were found to
-#: disagree on a frontmatter line.
-_TAB_AFTER_KEY = re.compile(r"^(\s*[^\s#:][^:]*):\t+", re.MULTILINE)
-
-
-def _typed_frontmatter(block: str) -> tuple[str | None, str] | None:
-    assert _yaml is not None
-    try:
-        data = _yaml.load(  # noqa: S506 - SafeLoader subclass
-            _TAB_AFTER_KEY.sub(r"\1: ", block), Loader=_CodexLoader
-        )
-    except _yaml.YAMLError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    name, description = data.get("name"), data.get("description")
-    metadata = data.get("metadata")
-    if not all(v is None or isinstance(v, str) for v in (name, description)):
-        return None
-    if metadata is not None:
-        if not isinstance(metadata, dict):
-            return None
-        short = metadata.get("short-description")
-        if short is not None and not isinstance(short, str):
-            return None
-    description = _single_line(description or "")
-    if not description:
-        return None
-    return (_single_line(name) or None) if name is not None else None, description
-
-
-def _yaml_parses(text: str) -> bool:
-    assert _yaml is not None
-    try:
-        _yaml.load(text, Loader=_CodexLoader)  # noqa: S506 - SafeLoader subclass
-    except _yaml.YAMLError:
-        return False
-    return True
-
-
-def _repair_frontmatter(block: str) -> str | None:
-    """``repair_frontmatter_scalar_fields`` (rust-v0.155.0), line for line: single-quote each
-    ``key: value`` scalar that contains ``: `` or starts like a flow value YAML cannot parse,
-    leaving block scalars, quoted scalars and comments alone. None when nothing changed."""
-    changed = False
-    block_indent: int | None = None
-    lines: list[str] = []
-    for line in block.split("\n"):
-        indent = len(line) - len(line.lstrip(" "))
-        if block_indent is not None:
-            if not line.strip() or indent > block_indent:
-                lines.append(line)
-                continue
-            block_indent = None
-        key, colon, value = line.partition(":")
-        if not colon or not key.strip() or (value and not value[0].isspace()):
-            lines.append(line)
-            continue
-        trimmed = value.lstrip()
-        leading = value[: len(value) - len(trimmed)]
-        scalar, comment = trimmed, ""
-        for index, char in enumerate(trimmed):
-            if char == "#" and (index == 0 or trimmed[index - 1].isspace()):
-                cut = len(trimmed[:index].rstrip())
-                scalar, comment = trimmed[:cut], trimmed[cut:]
-                break
-        scalar = scalar.rstrip()
-        if not scalar or scalar[0] in "'\"":
-            lines.append(line)
-            continue
-        if scalar[0] in "|>":
-            block_indent = indent
-            lines.append(line)
-            continue
-        colon_separated = any(
-            c == ":" and nxt.isspace() for c, nxt in zip(scalar, scalar[1:])
-        )
-        broken_flow = scalar[0] in "[{@`" and not _yaml_parses(scalar)
-        if not colon_separated and not broken_flow:
-            lines.append(line)
-            continue
-        quoted = "'" + scalar.replace("'", "''") + "'"
-        lines.append(f"{key}:{leading}{quoted}{comment}")
-        changed = True
-    return "\n".join(lines) if changed else None
-
-
-_NULLS = {"", "~", "null", "Null", "NULL"}
-
-
-def _simple_frontmatter(block: str) -> tuple[str | None, str] | None:
-    """The no-PyYAML subset: flat ``key: value`` lines only, values taken as written."""
     fields: dict[str, str] = {}
+    plain: set[str] = set()
     for line in block.split("\n"):
-        if not line.strip() or line.lstrip().startswith("#"):
+        if not line.strip():
             continue
-        key, colon, value = line.partition(":")
-        if line[:1].isspace() or not colon or not key.strip():
+        match = _SUBSET_LINE.fullmatch(line.rstrip("\r"))
+        if match is None or match.group(1) in fields:
             return None
-        value = value.strip()
-        if value[:1] in "[{&*!|>%@`'\"":
-            if key.strip() in ("name", "description", "metadata"):
-                return None
-            continue
-        fields[key.strip()] = value
-    if "metadata" in fields and fields["metadata"] not in _NULLS:
+        key, raw = match.groups()
+        value = _subset_value(raw)
+        if value is None:
+            return None
+        fields[key] = value
+        if raw.strip()[0] not in "'\"":
+            plain.add(key)
+    if "metadata" in fields:
         return None
-    name = fields.get("name")
-    description = _single_line(fields.get("description", ""))
-    if description in _NULLS:
-        return None
-    name = None if name is None or name in _NULLS else _single_line(name) or None
-    return name, description
+    for key in ("name", "description"):
+        value = " ".join(fields.get(key, "").split())
+        if not value:
+            return None
+        if key in plain and (
+            value.lower() in _NON_STRING_WORDS or value[0].isdigit() or value[0] in ".+"
+        ):
+            return None
+        fields[key] = value
+    name = fields["name"]
+    return name if len(name) <= SKILL_NAME_MAX_CHARS else None
 
 
 _SKILL_NAMER: discovery.SkillNamer = codex_skill_names
@@ -298,6 +213,10 @@ _SKILL_NAMER: discovery.SkillNamer = codex_skill_names
 #: against a populated ``$CODEX_HOME`` and 0.9s against an empty one, so this bounds the
 #: pathological case, as ``PLUGIN_LIST_TIMEOUT_S`` does for its probe.
 SKILLS_LIST_TIMEOUT_S = 20
+
+#: Seconds the catalog server's process group gets to empty after SIGKILL before the probe
+#: reports survivors instead of a clean exit.
+SKILLS_LIST_REAP_GRACE_S = 5
 
 #: The ``skills/list`` request id, and the one response line that answers it.
 _SKILLS_LIST_ID = 1
@@ -375,7 +294,8 @@ def skills_list(project_root: str | None = None) -> list[dict]:
     writing the request as well as reading the answer — runs inside one deadline of
     ``SKILLS_LIST_TIMEOUT_S``: stdin is non-blocking, so a server that never reads cannot hold
     the write. The server runs in its own process group, and every exit path ends that group
-    (``_end_group``), so no helper it started outlives the probe.
+    (``_end_group``); a helper that survives even SIGKILL is reported, and the answer is not
+    trusted.
 
     The server does not answer a request it has already seen EOF behind, so stdin stays open
     until the answer is read.
@@ -401,34 +321,44 @@ def skills_list(project_root: str | None = None) -> list[dict]:
             f"host={HOST_ID} project_root={project}"
         ) from exc
     deadline = time.monotonic() + SKILLS_LIST_TIMEOUT_S
-    expired = False
     try:
         message = _exchange(child, _skills_list_request(project), deadline)
-        if message is _EXPIRED:
-            expired = True
-            raise base.HostProbeTimeout(
-                f"`codex app-server` did not answer within {SKILLS_LIST_TIMEOUT_S}s when "
-                f"asked for `skills/list`, and was killed; conductor wrote nothing. "
-                f"host={HOST_ID} project_root={project} — this is a pre-run capability "
-                f"probe, so it names the host it could not ask and the project it was "
-                f"asked about in place of a run key. Codex could not be asked which "
-                f"skills it loads, so every one is unknown rather than absent."
-            )
-        skills = skills_from_response(message) if message is not None else None
-        if skills is None:
-            raise CatalogUnavailable(
-                "`codex app-server` gave no usable `skills/list` answer (it "
-                + (
-                    "exited without one"
-                    if message is None
-                    else "answered with an error"
-                )
-                + f"), so Codex's catalog of loadable skills is unknown. "
-                f"host={HOST_ID} project_root={project}"
-            )
-        return skills
-    finally:
-        _end_group(child, grace=0 if expired else PLUGIN_LIST_KILL_GRACE_S)
+    except BaseException:
+        _end_group(child, grace=0)
+        raise
+    expired = message is _EXPIRED
+    emptied = _end_group(child, grace=0 if expired else PLUGIN_LIST_KILL_GRACE_S)
+    survivors = (
+        ""
+        if emptied
+        else (
+            f" Its process group {child.pid} still had members "
+            f"{SKILLS_LIST_REAP_GRACE_S}s after SIGKILL; they were left running."
+        )
+    )
+    if expired:
+        raise base.HostProbeTimeout(
+            f"`codex app-server` did not answer within {SKILLS_LIST_TIMEOUT_S}s when "
+            f"asked for `skills/list`, and was killed; conductor wrote nothing. "
+            f"host={HOST_ID} project_root={project} — this is a pre-run capability "
+            f"probe, so it names the host it could not ask and the project it was "
+            f"asked about in place of a run key. Codex could not be asked which "
+            f"skills it loads, so every one is unknown rather than absent.{survivors}"
+        )
+    if not emptied:
+        raise CatalogUnavailable(
+            f"`codex app-server` answered `skills/list` but did not end cleanly, so its "
+            f"answer is not trusted.{survivors} host={HOST_ID} project_root={project}"
+        )
+    skills = skills_from_response(message) if message is not None else None
+    if skills is None:
+        raise CatalogUnavailable(
+            "`codex app-server` gave no usable `skills/list` answer (it "
+            + ("exited without one" if message is None else "answered with an error")
+            + f"), so Codex's catalog of loadable skills is unknown. "
+            f"host={HOST_ID} project_root={project}"
+        )
+    return skills
 
 
 #: ``_exchange``'s answer when the deadline passed first.
@@ -493,13 +423,17 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
-def _end_group(child: subprocess.Popen, *, grace: float) -> None:
-    """End the server's whole process group, whatever the leader has already done.
+def _end_group(child: subprocess.Popen, *, grace: float) -> bool:
+    """End the server's whole process group, whatever the leader has already done; True when
+    the group is empty afterwards.
 
     Closing stdin asks a server that answered to exit. Then the GROUP — not the leader, whose
-    exit says nothing about helpers it started — gets SIGTERM, ``grace`` seconds to empty, and
-    SIGKILL. The leader is reaped throughout, since an unreaped leader keeps the group alive.
-    An expired probe gets no grace; it already had its bound.
+    exit says nothing about helpers it started — gets SIGTERM, ``grace`` seconds to empty,
+    SIGKILL, and ``SKILLS_LIST_REAP_GRACE_S`` more to empty, liveness being asked of the group
+    each time. The leader is reaped throughout, since an unreaped leader keeps the group alive;
+    helpers are the init process's to reap once orphaned. A group still populated at the end is
+    reported, never taken for a clean exit. An expired probe gets no TERM grace; it already had
+    its bound.
     """
     for stream in (child.stdin, child.stdout):
         try:
@@ -508,25 +442,24 @@ def _end_group(child: subprocess.Popen, *, grace: float) -> None:
         except OSError:
             pass
     pgid = child.pid  # start_new_session=True: the leader's pid is the group id
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    for sig, wait in (
+        (signal.SIGTERM, grace),
+        (signal.SIGKILL, SKILLS_LIST_REAP_GRACE_S),
+    ):
         try:
             os.killpg(pgid, sig)
         except OSError:
             pass
-        until = time.monotonic() + (
-            grace if sig == signal.SIGTERM else PLUGIN_LIST_KILL_GRACE_S
-        )
+        until = time.monotonic() + wait
         while True:
             child.poll()
-            if not _group_alive(pgid) or time.monotonic() >= until:
+            if not _group_alive(pgid):
+                return True
+            if time.monotonic() >= until:
                 break
             time.sleep(0.02)
-        if not _group_alive(pgid):
-            break
-    try:
-        child.wait(timeout=PLUGIN_LIST_KILL_GRACE_S)
-    except subprocess.TimeoutExpired:
-        pass
+    child.poll()
+    return not _group_alive(pgid)
 
 
 def catalog_names(skills: list[dict]) -> tuple[set[str], frozenset[str]]:

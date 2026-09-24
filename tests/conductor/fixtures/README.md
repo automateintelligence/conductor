@@ -81,5 +81,5 @@ them in and replays the lines to conductor over stdio.
 To re-record, run `codex app-server` in that home, write the three requests
 (`conductor.hosts.codex._skills_list_request`), read until the reply with `"id": 1`, then close
 stdin. Replace the three paths with their placeholders. `tests/conductor/hosts/test_codex_live.py`
-(`CONDUCTOR_LIVE_CODEX=1`) runs a real Codex's `skills/list` and checks that it still agrees with
-the naming and validity rule the hermetic tests assume.
+(`CONDUCTOR_LIVE_CODEX=1`) runs a real Codex's `skills/list` and checks that every SKILL.md the
+namer's strict subset accepts, Codex loads under the same name.
