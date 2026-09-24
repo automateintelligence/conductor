@@ -6,9 +6,9 @@ Everything else stays `...` until Plan 04 fills it in.
 
 `native_invocation` is the load-bearing one. Ground truth
 (`docs/reviews/2026-08-12-codex-host-ground-truth.md` §"Skill invocation under Codex") pins
-`$name` as Codex's convention and `/plugin:skill` as Claude's, and it also records that Codex
-skill directories are FLAT (`~/.codex/skills/<name>/`) with no plugin-namespace counterpart —
-so the qualifier is a Claude-side concept that the Codex renderer drops.
+`$name` as Codex's convention and `/plugin:skill` as Claude's. Its other claim — that Codex has
+no plugin namespace — did not hold on codex-cli 0.155.0: an installed plugin's skill is listed
+and invoked as `<plugin>:<skill>`, so both renderers keep the qualifier.
 """
 
 from __future__ import annotations
@@ -18,6 +18,16 @@ import os
 import pytest
 
 from conductor.hosts import base, discovery
+from tests.conductor import codex_stub
+
+
+@pytest.fixture(autouse=True)
+def _codex_without_a_catalog(monkeypatch, tmp_path):
+    """Every Codex case here is about the filesystem legs, so the stub `codex` gives no
+    `skills/list` catalog: what discovery scans is then on-disk evidence, and only conductor's
+    own checkout, the dev roots and `prompts/` count. Hermetic either way: `tests/conftest.py`
+    refuses a real `codex`."""
+    codex_stub.put_on_path(monkeypatch, tmp_path / "stub-bin")
 
 
 @pytest.fixture
@@ -68,8 +78,13 @@ def test_codex_renders_a_skill_with_the_dollar_convention(adapters):
     assert adapters["codex"].native_invocation("code-review") == "$code-review"
 
 
-def test_codex_drops_the_plugin_qualifier_because_its_skill_dirs_are_flat(adapters):
-    assert adapters["codex"].native_invocation("conductor:autodev") == "$autodev"
+def test_codex_keeps_the_plugin_qualifier(adapters):
+    # codex-cli 0.155.0 lists an installed plugin's skill as `<plugin>:<skill>` and matches a
+    # `$` mention exactly: `$spec-craft:expectations` injected the skill in a live `codex exec`,
+    # `$expectations` injected nothing.
+    assert (
+        adapters["codex"].native_invocation("conductor:autodev") == "$conductor:autodev"
+    )
 
 
 @pytest.mark.parametrize("host_id", base.HOST_IDS)
@@ -94,8 +109,14 @@ def test_discovered_commands_finds_a_bare_user_skill_under_the_host_source_root(
     root = tmp_path / f".{host_id}"
     skill = root / "skills" / "document-release"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: document-release\n---\n")
-    assert "document-release" in discovery.adapter_for(host_id).discovered_commands()
+    (skill / "SKILL.md").write_text(
+        "---\nname: document-release\ndescription: d\n---\n"
+    )
+    snapshot = discovery.adapter_for(host_id).host_skills()
+    # Without Codex's catalog (the autouse stub gives none) a Codex skill on disk is evidence,
+    # not a command; Claude has no catalog and counts its source root directly.
+    found = snapshot.on_disk if host_id == "codex" else snapshot.commands
+    assert "document-release" in found
 
 
 def test_claude_discovers_the_marketplace_plugin_cache(monkeypatch, tmp_path):
@@ -119,10 +140,9 @@ def test_codex_discovers_a_project_local_skill(monkeypatch, tmp_path):
     project = tmp_path / "project"
     skill = project / ".codex" / "skills" / "code-review"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: code-review\n---\n")
-    assert "code-review" in discovery.adapter_for("codex").discovered_commands(
-        project_root=str(project)
-    )
+    (skill / "SKILL.md").write_text("---\nname: code-review\ndescription: d\n---\n")
+    snapshot = discovery.adapter_for("codex").host_skills(project_root=str(project))
+    assert "code-review" in snapshot.on_disk
 
 
 def test_codex_discovers_a_prompt_as_a_command(monkeypatch, tmp_path):
@@ -151,7 +171,7 @@ def test_each_host_reads_its_own_plugin_manifest(
     (plug / manifest_dir / "plugin.json").write_text('{"name": "spec-craft"}')
     skill = plug / "skills" / "expectations"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: expectations\n---\n")
+    (skill / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
     monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
     found = discovery.adapter_for(host_id).discovered_commands()
     assert "spec-craft:expectations" in found
