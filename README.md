@@ -157,51 +157,26 @@ merge; the done-gate defines whole-spec completion. They are different checks.
 
 ## Install
 
-Conductor declares `dependencies: ["spec-craft"]`. Claude Code installs that dependency
-automatically; Codex does not resolve plugin dependencies, so on Codex install spec-craft
-explicitly (below).
+Two ways in. **Install it as a plugin** from the `automateintelligence` marketplace — one
+command per host, updates with `plugin update`. Or **run it from a clone** if you are developing
+conductor or would rather not use a marketplace. Either way, the
+[prerequisites](#prerequisites) apply.
 
-### Prerequisites
+### As a plugin (recommended)
 
-- **Claude Code** (`2.1.224`+) with the conducted skill stack available —
-  [superpowers](https://github.com/obra/superpowers), `/codex` (the opposite-host
-  reviewer), `/code-review`, `/document-release`.
-- **or Codex CLI** (`0.155.0`+) with the same stack in Codex form — `$superpowers:*`
-  ([superpowers](https://github.com/obra/superpowers) supports Codex), a `claude` skill (the
-  opposite-host reviewer; [gstack](https://github.com/garrytan/gstack) ships one for Codex),
-  `document-release` (gstack), and a `code-review` skill.
-- `conductor preflight` checks every required skill **on the host the run uses** and
-  fail-closes, naming what to install, if any is missing.
-- Optional: [spec-kit](https://github.com/github/spec-kit). `start` can use it instead of
-  `superpowers:writing-plans` to write the plan; preflight does not require it.
-- **`gh` CLI**, authenticated (`gh auth status`). GitHub issues are the ledger.
-- **Python 3.12** on PATH (the runner, ledger, and gate modules are Python).
-
-### Install as a plugin (recommended)
-
-Add the `automateintelligence` marketplace once, then install conductor — its `spec-craft`
-dependency is pulled automatically:
+**Claude Code** — add the marketplace once, then install. Claude Code installs conductor's
+`spec-craft` dependency automatically:
 
 ```
 /plugin marketplace add automateintelligence/marketplace
-/plugin install conductor@automateintelligence     # auto-installs the spec-craft dependency
+/plugin install conductor@automateintelligence
 ```
 
-CLI equivalents:
+or from a shell: `claude plugin marketplace add automateintelligence/marketplace`, then
+`claude plugin install conductor@automateintelligence`.
 
-```bash
-claude plugin marketplace add automateintelligence/marketplace
-claude plugin install conductor@automateintelligence
-```
-
-> The catalog lives in [automateintelligence/marketplace](https://github.com/automateintelligence/marketplace)
-> and lists both plugins, so `claude plugin install spec-craft@automateintelligence` installs
-> spec-craft on its own.
-
-### Install on OpenAI Codex
-
-The same marketplace works from Codex. Add it once, then install conductor **and**
-spec-craft — Codex does not pull in plugin dependencies:
+**OpenAI Codex** (Codex CLI `0.155.0`+) — same marketplace. Codex does not resolve plugin
+dependencies, so install spec-craft alongside conductor:
 
 ```bash
 codex plugin marketplace add automateintelligence/marketplace
@@ -209,27 +184,66 @@ codex plugin add conductor@automateintelligence
 codex plugin add spec-craft@automateintelligence
 ```
 
-Codex exposes plugin skills under their plugin-qualified names: `$conductor:start`,
-`$conductor:autodev`, `$spec-craft:expectations`, `$spec-craft:executable-assertions`.
-Start a run from a Codex session with `$conductor:start <spec>`; the driver it installs
-launches `codex` on every fire.
+On Codex, skills use plugin-qualified `$` names: `$conductor:start`, `$conductor:autodev`,
+`$spec-craft:expectations`, `$spec-craft:executable-assertions`. Start a run with
+`$conductor:start <spec>`; the driver it installs launches `codex` on every fire.
 
-### Install locally (dev / `--plugin-dir`)
+### Without the plugin (from a clone)
 
-Clone both repos side by side and load them as plugin directories:
+For development, or to run an unreleased checkout. Clone both repos side by side:
 
 ```bash
 git clone https://github.com/automateintelligence/spec-craft
 git clone https://github.com/automateintelligence/conductor
-claude --plugin-dir ./spec-craft --plugin-dir ./conductor
 ```
 
-In dev mode the plugins aren't in the marketplace cache, so point preflight at spec-craft
+**Claude Code** — load both checkouts as plugin directories, and point preflight at spec-craft
 (conductor's own root is found automatically):
 
 ```bash
+claude --plugin-dir ./spec-craft --plugin-dir ./conductor
 export CONDUCTOR_PLUGIN_DIRS="$PWD/spec-craft"
 ```
+
+**OpenAI Codex** — Codex has no `--plugin-dir`; wrap the two checkouts in a local marketplace:
+
+```bash
+mkdir -p local-mkt/.claude-plugin
+ln -s "$PWD/conductor" local-mkt/conductor
+ln -s "$PWD/spec-craft" local-mkt/spec-craft
+cat > local-mkt/.claude-plugin/marketplace.json <<'EOF'
+{
+  "name": "conductor-local",
+  "description": "Local conductor + spec-craft checkouts",
+  "owner": { "name": "you" },
+  "plugins": [
+    { "name": "conductor", "source": "./conductor", "description": "conductor local checkout" },
+    { "name": "spec-craft", "source": "./spec-craft", "description": "spec-craft local checkout" }
+  ]
+}
+EOF
+codex plugin marketplace add "$PWD/local-mkt"
+codex plugin add conductor@conductor-local
+codex plugin add spec-craft@conductor-local
+```
+
+Codex copies each checkout into its plugin cache at install time; to pick up later edits,
+`codex plugin remove` and `codex plugin add` again.
+
+### Prerequisites
+
+- **A host:** Claude Code (`2.1.224`+) or Codex CLI (`0.155.0`+).
+- **The conducted skill stack on that host.** Claude Code:
+  [superpowers](https://github.com/obra/superpowers), `/codex` (the opposite-host reviewer),
+  `/code-review`, `/document-release`. Codex: `$superpowers:*` (superpowers supports Codex), a
+  `claude` skill (the opposite-host reviewer; [gstack](https://github.com/garrytan/gstack)
+  ships one for Codex), `document-release` (gstack), and a `code-review` skill.
+  `conductor preflight` checks every one **on the host the run uses** and fail-closes, naming
+  what to install.
+- Optional: [spec-kit](https://github.com/github/spec-kit). `start` can use it instead of
+  `superpowers:writing-plans` to write the plan; preflight does not require it.
+- **`gh` CLI**, authenticated (`gh auth status`). GitHub issues are the ledger.
+- **Python 3.12** on PATH (the runner, ledger, and gate modules are Python).
 
 ### Verify
 
