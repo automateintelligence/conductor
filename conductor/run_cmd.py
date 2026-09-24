@@ -20,6 +20,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -457,6 +458,60 @@ def cmd_own(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _git_detail(exc: subprocess.SubprocessError) -> str:
+    if isinstance(exc, subprocess.CalledProcessError):
+        detail = (exc.stderr or "").strip() if isinstance(exc.stderr, str) else ""
+        return " ".join(detail.split()) or f"exit {exc.returncode}"
+    return " ".join(str(exc).split())
+
+
+#: git's answer when discovery walked the whole tree and found NO repository: the parenthesised
+#: "(or any of the parent directories)" form, or the "(or any parent up to mount point …)" form
+#: that a filesystem boundary produces. Anchored on the first line of stderr.
+_NO_REPOSITORY = re.compile(
+    r"\Afatal: not a git repository \(or any (?:of the parent directories|parent up to "
+    r"mount point [^)]*)\)"
+)
+
+
+def _definitely_no_repository(exc: subprocess.SubprocessError) -> bool:
+    """Did git ANSWER that there is no repository here? Exit 128 with git's discovery-failed
+    message, and nothing else.
+
+    NOT the bare substring "not a git repository": git prints ``fatal: not a git repository:
+    /path/.git/worktrees/x`` for a linked worktree whose gitdir pointer is broken, and that
+    names a repository that existed here, with run state that may still be live. That form, a
+    localized message and anything unfamiliar all stay on the refusing side."""
+    return (
+        isinstance(exc, subprocess.CalledProcessError)
+        and exc.returncode == 128
+        and isinstance(exc.stderr, str)
+        and _NO_REPOSITORY.match(exc.stderr.lstrip()) is not None
+    )
+
+
+def _owner_busy_unanswerable(
+    project: str | None, exc: subprocess.SubprocessError
+) -> str:
+    """``owner-busy``'s fail-closed line when git could not say where the run state lives."""
+    base = (
+        project
+        if project is not None
+        else (os.environ.get("CONDUCTOR_HOME") or os.getcwd())
+    )
+    what = (
+        "timed out"
+        if isinstance(exc, subprocess.TimeoutExpired)
+        else f"failed ({_git_detail(exc)})"
+    )
+    return (
+        f"owner-busy state=unreadable reason=repository-unresolved project={base} "
+        f"detail=git rev-parse --git-common-dir {what}, so whether a run here is owned cannot "
+        f"be read; no write occurred. Check it with: git -C {shlex.quote(base)} rev-parse "
+        "--git-common-dir"
+    )
+
+
 def cmd_owner_busy(args: argparse.Namespace) -> int:
     """Is a live owner on this run? See ``EXIT_OWNER_FREE`` for the two-code contract.
 
@@ -466,6 +521,9 @@ def cmd_owner_busy(args: argparse.Namespace) -> int:
     """
     try:
         resolution = resolve.resolve(run_key=args.run, start=args.project)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print(_owner_busy_unanswerable(args.project, exc))
+        return EXIT_OK
     except resolve.RunNotFound:
         # No run here means no ownership record, which means nothing is claiming this checkout.
         # This is the condition every project was in before ownership existed, and reporting it
@@ -478,16 +536,22 @@ def cmd_owner_busy(args: argparse.Namespace) -> int:
     except ownership.OwnerAmbiguous as exc:
         print(f"owner-busy state=unreadable run={key} detail={exc}")
         return EXIT_OK
-    if record is None:
-        print(f"owner-busy state=free run={key} reason=no-record")
-        return EXIT_OWNER_FREE
-    if ownership.is_inherited(record, os.environ):
+    if record is not None and ownership.is_inherited(record, os.environ):
         print(
             f"owner-busy state=free run={key} reason=inherited "
             f"identity={record.wrapper_identity}"
         )
         return EXIT_OWNER_FREE
-    live = ownership.identity_is_live(record)
+    live = None if record is None else ownership.identity_is_live(record)
+    if record is None or live is False:
+        # No live RECORDED owner. The run is free only if no fire outlives it either.
+        fire = ownership.running_fire(state_root)
+        if fire:
+            print(f"owner-busy state=live run={key} reason=fire-running detail={fire}")
+            return EXIT_OK
+    if record is None:
+        print(f"owner-busy state=free run={key} reason=no-record")
+        return EXIT_OWNER_FREE
     if live is False:
         print(
             f"owner-busy state=free run={key} reason=owner-exited "
@@ -495,9 +559,15 @@ def cmd_owner_busy(args: argparse.Namespace) -> int:
         )
         return EXIT_OWNER_FREE
     state = "live" if live else "unreadable"
+    recovery = (
+        ""
+        if live
+        else " recover=confirm no process is working on this run, then: conductor run "
+        f"disown --run {key} --force"
+    )
     print(
         f"owner-busy state={state} run={key} host={record.host} tier={record.tier} "
-        f"identity={record.wrapper_identity} since={record.acquired_at}"
+        f"identity={record.wrapper_identity} since={record.acquired_at}{recovery}"
     )
     return EXIT_OK
 
@@ -536,7 +606,10 @@ def cmd_disown(args: argparse.Namespace) -> int:
         except ownership.OwnerUnidentified:
             identity = None
         if identity is not None and identity == current.wrapper_identity:
-            ownership.release(state_root, key, wrapper_identity=identity)
+            refusal = ownership.release(state_root, key, wrapper_identity=identity)
+            if refusal:
+                print(refusal, file=sys.stderr)
+                return EXIT_FAIL
             print(f"run {key}: released this session's own ownership ({identity}).")
             return EXIT_OK
     outcome, detail = ownership.disown(state_root, key, force=args.force)
@@ -746,19 +819,26 @@ def main(argv: list[str] | None = None) -> int:
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             # NO REPOSITORY RESOLVES. For every other verb this is a failure and falls through
-            # to the handler below. For `owner-busy` it is an ANSWER: run state is anchored at
-            # the git common dir, so where there is no repository there is no
-            # `.conductor/runs/<key>/owner.json` and nothing can be claiming this checkout —
-            # the same fact `reason=no-run` reports one level in.
+            # to the handler below. For `owner-busy` a DEFINITIVE "not a git repository" is an
+            # ANSWER: run state is anchored at the git common dir, so where there is no
+            # repository there is no `.conductor/runs/<key>/owner.json` and nothing can be
+            # claiming this checkout — the same fact `reason=no-run` reports one level in.
+            # Answering "cannot tell" there would be a REGRESSION dressed as caution: a driver
+            # installed against a directory that is not a git checkout fired before this
+            # contract existed and would now skip every tick forever.
             #
-            # Answering "cannot tell" here instead would be a REGRESSION dressed as caution: a
-            # driver installed against a directory that is not a git checkout fired before this
-            # contract existed and would now skip every tick forever, for a reason that has
-            # nothing to do with ownership.
+            # ONLY that answer. A timeout, or git failing for any other reason (a dubious-
+            # ownership refusal, a corrupt repository, a missing binary), is git NOT answering,
+            # and reading it as free fires a driver past a record nobody could consult.
             if args.cmd != "owner-busy":
                 raise
-            print(f"owner-busy state=free reason=no-repository detail={exc}")
-            return EXIT_OWNER_FREE
+            if _definitely_no_repository(exc):
+                print(
+                    f"owner-busy state=free reason=no-repository detail={_git_detail(exc)}"
+                )
+                return EXIT_OWNER_FREE
+            print(_owner_busy_unanswerable(getattr(args, "project", None), exc))
+            return EXIT_OK
         resolve.recover_pending(state_root)
         return _HANDLERS[args.cmd](args)
     except resolve.RunAmbiguous as exc:

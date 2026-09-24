@@ -2892,3 +2892,22 @@ def test_the_run_lookup_cannot_outlive_the_kill_it_annotates(
     assert "run_key=" not in line, line
     # ...and the fire it was annotating was still killed.
     assert fire_alive == [], f"the fire outlived a lookup that hung: {fire_alive}"
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+def test_installed_worktree_reads_back_the_binding_render_wrote(tmp_path, host):
+    """``conductor heartbeat`` decides which run a driver drives from this binding, so it must
+    read back byte-for-byte whatever path ``render`` quoted — shell-hostile bytes included."""
+    worktree = str(tmp_path / "wt $HOME `x`; 'q' \"d\"")
+    script = tmp_path / "resume-autodev.sh"
+    script.write_text(rs.render(str(tmp_path), worktree, host), encoding="utf-8")
+    assert rs.installed_worktree(str(script)) == worktree
+
+
+def test_installed_worktree_is_none_without_a_single_binding(tmp_path):
+    script = tmp_path / "resume-autodev.sh"
+    assert rs.installed_worktree(str(script)) is None
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    assert rs.installed_worktree(str(script)) is None
+    script.write_text("#!/bin/sh\nWORKTREE=/a\nWORKTREE=/b\n", encoding="utf-8")
+    assert rs.installed_worktree(str(script)) is None

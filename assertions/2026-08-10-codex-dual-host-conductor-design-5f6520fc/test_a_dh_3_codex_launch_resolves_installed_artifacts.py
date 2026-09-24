@@ -76,11 +76,10 @@ FRONTMATTER_NAME = re.compile(r"^name:\s*(\S+)\s*$", re.MULTILINE)
 #: precisely the third-party dependency this assertion governs.
 DISPATCH_TOKEN = re.compile(r"\$[A-Za-z][\w:-]*")
 
-#: The directories the generated driver prepends to ``PATH`` before it resolves anything. The
-#: harness's own bin dir sits behind them, so a real ``codex`` or ``conductor`` in any of these
-#: would be measured instead of the fake — the setup guarantee below refuses rather than
-#: silently reporting on the wrong binary. ``$HOME`` is scratch and empty, so its entry cannot
-#: shadow anything.
+#: The system directories the generated driver puts on ``PATH`` behind ``$HOME/.local/bin``.
+#: The fire's own ``PATH`` is exactly these (coreutils, python3, the ``env bash`` shebang); the
+#: harness fakes live in the scratch ``$HOME/.local/bin``, which the driver searches FIRST, so a
+#: real ``codex`` or ``conductor`` installed in any of these can never be what the fire runs.
 DRIVER_SYSTEM_PATH = ("/usr/local/bin", "/usr/bin", "/bin")
 
 _FAKE_CODEX = """#!/usr/bin/env python3
@@ -120,11 +119,18 @@ class Fire:
         )
 
 
-def _snapshot(*roots: pathlib.Path) -> set[pathlib.Path]:
-    """Every file under ``roots``, by its literal path. Deliberately NOT resolved: a symlink
-    planted under the scratch HOME is a file under the scratch HOME, and resolving it would
-    move it out of the snapshot and out of this assertion's reach."""
-    return {p for root in roots for p in root.rglob("*") if p.is_file()}
+def _snapshot(
+    *roots: pathlib.Path, harness: frozenset[pathlib.Path] = frozenset()
+) -> set[pathlib.Path]:
+    """Every file under ``roots``, by its literal path, except the ``harness``'s own fakes.
+    Deliberately NOT resolved: a symlink planted under the scratch HOME is a file under the
+    scratch HOME, and resolving it would move it out of the snapshot and out of this
+    assertion's reach. The excluded paths are exactly the files the harness created — a
+    recording ``codex`` and a ``conductor`` symlink — never a directory, so anything else
+    appearing beside them is still seen."""
+    return {
+        p for root in roots for p in root.rglob("*") if p.is_file() and p not in harness
+    }
 
 
 def _seed_package_root(root: pathlib.Path) -> None:
@@ -136,17 +142,30 @@ def _seed_package_root(root: pathlib.Path) -> None:
 
 
 def _fire(label: str) -> Fire:
+    """One fire in a fresh scratch tree. A fire that fails or refuses removes its tree before
+    re-raising: only a returned fire is registered for the module teardown, so nothing else
+    would."""
     fire = Fire()
     fire.workdir = pathlib.Path(tempfile.mkdtemp(prefix=f"a-dh-3-{label}-")).resolve()
+    try:
+        return _fire_in(fire)
+    except BaseException:
+        shutil.rmtree(fire.workdir, ignore_errors=True)
+        raise
+
+
+def _fire_in(fire: Fire) -> Fire:
     fire.package = fire.workdir / "package"
     fire.home = fire.workdir / "home"
     fire.codex_home = fire.workdir / "codex-home"
     project = fire.workdir / "project"
     worktree = fire.workdir / "worktree"
-    # The harness's bins live OUTSIDE the scratch host roots, so those roots can start — and be
-    # asserted — genuinely empty: no AGENTS.md, no skills/, no dispatch convention, nothing.
-    bindir = fire.workdir / "bin"
-    for directory in (fire.home, fire.codex_home, project, worktree, bindir):
+    # The harness's fakes live in the scratch `$HOME/.local/bin` — the FIRST directory the
+    # driver puts on PATH — so no binary installed on this machine can shadow them. They are
+    # excluded from the snapshots by exact path, so the host roots still start — and are
+    # asserted — empty of anything else: no AGENTS.md, no skills/, no dispatch convention.
+    bindir = fire.home / ".local" / "bin"
+    for directory in (fire.codex_home, project, worktree, bindir):
         directory.mkdir(parents=True)
     _seed_package_root(fire.package)
 
@@ -160,6 +179,7 @@ def _fire(label: str) -> Fire:
     # symlink is what makes "the resolution artifact follows the package root" a property of
     # the product's derivation rather than of an environment variable the test handed it.
     os.symlink(fire.package / "bin" / "conductor", bindir / "conductor")
+    harness = frozenset({fake, bindir / "conductor"})
 
     base_env = {
         key: value
@@ -202,16 +222,14 @@ def _fire(label: str) -> Fire:
         f"(rc={render.returncode}):\n{render.stderr}"
     )
 
-    # The FIRE's PATH is the harness bin dir plus exactly the system bin dirs the driver
-    # prepends anyway — so coreutils, python3 and the script's own `env bash` shebang stay
-    # reachable while this machine's real `codex` and `conductor`, which live further down the
-    # ambient PATH, are simply not on it. Appending dirs the driver already searches first
-    # cannot change what shadows what, which is what `test_no_system_bin_dir_shadows_the_
-    # harness_fakes` pins.
+    # The FIRE's PATH is exactly the system bin dirs, for coreutils, python3 and the script's
+    # own `env bash` shebang. `codex` and `conductor` resolve from the scratch
+    # `$HOME/.local/bin`, which the driver prepends ahead of all of them, so this machine's real
+    # binaries — wherever they are installed — are never what the fire runs.
     fire_env = dict(base_env)
-    fire_env["PATH"] = os.pathsep.join([str(bindir), *DRIVER_SYSTEM_PATH])
+    fire_env["PATH"] = os.pathsep.join(DRIVER_SYSTEM_PATH)
 
-    fire.before = _snapshot(fire.home, fire.codex_home)
+    fire.before = _snapshot(fire.home, fire.codex_home, harness=harness)
     proc = subprocess.run(
         [str(script)],
         env=fire_env,
@@ -223,7 +241,7 @@ def _fire(label: str) -> Fire:
         check=False,
     )
     fire.driver_rc = proc.returncode
-    fire.after = _snapshot(fire.home, fire.codex_home)
+    fire.after = _snapshot(fire.home, fire.codex_home, harness=harness)
     log_path = project / ".conductor" / "resume-autodev.log"
     fire.driver_log = (
         log_path.read_text(encoding="utf-8", errors="replace")
@@ -332,20 +350,15 @@ def _resolution_artifacts(fire: Fire) -> list[pathlib.Path]:
     return artifacts
 
 
-def test_no_system_bin_dir_shadows_the_harness_fakes() -> None:
-    """Setup guarantee. The driver prepends the system bin dirs ahead of the harness's own, so
-    a real `codex` or `conductor` in one of them would be what the fire measured. Refuse loudly
-    rather than report on the wrong binary."""
-    shadowing = [
-        os.path.join(directory, name)
-        for directory in DRIVER_SYSTEM_PATH
-        for name in ("codex", "conductor")
-        if os.path.exists(os.path.join(directory, name))
-    ]
-    assert not shadowing, (
-        f"a real host/conductor binary sits ahead of the harness fakes on the driver's PATH: "
-        f"{shadowing}"
-    )
+@pytest.mark.parametrize("label", ["first", "second"])
+def test_the_fire_launched_the_harness_fake_whatever_the_machine_has_installed(
+    label: str,
+) -> None:
+    """Setup guarantee, independent of this machine. The driver puts ``$HOME/.local/bin`` ahead
+    of every system bin dir, and the harness's fakes live there under the scratch ``HOME`` — so
+    a real ``codex`` or ``conductor`` in ``/usr/local/bin`` is never what the fire launched."""
+    fire = fire_at(label)
+    assert fire.argv[0] == str(fire.home / ".local" / "bin" / "codex"), fire.argv[0]
 
 
 def test_the_scratch_host_roots_start_empty() -> None:

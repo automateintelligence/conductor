@@ -953,3 +953,39 @@ def test_the_end_to_end_status_message_carries_the_hosts_prompt(
     renderings = _autodev_renderings()
     assert renderings["claude"] in out, out
     assert renderings["codex"] not in out, out
+
+
+def test_install_during_a_fire_waits_then_fails_naming_the_lock_and_the_retry(
+    tmp_path, monkeypatch, capsys
+):
+    """A heartbeat holds the driver's install lock for its whole fire. An operator's install in
+    that window waits, then fails having written nothing, and says what to do."""
+    import fcntl
+    import time
+
+    proj, root = _mk_project(tmp_path)
+    _stub_crontab(tmp_path, monkeypatch, [])
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    monkeypatch.setattr(driver, "INSTALL_LOCK_TIMEOUT_S", 0.2)
+    lock = driver.install_lock_path(root)
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    # A separate open file description: flock conflicts between descriptions, even in one
+    # process, exactly as it does against a heartbeat's.
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        started = time.monotonic()
+        assert driver.install(str(proj), str(wt)) == 1
+        waited = time.monotonic() - started
+        # It WAITED the configured bound rather than failing on the first attempt.
+        assert waited >= driver.INSTALL_LOCK_TIMEOUT_S, waited
+        err = capsys.readouterr().err
+        assert lock in err and "fire" in err and "no write occurred" in err.lower(), err
+        assert "re-run" in err.lower(), err
+        log = os.path.join(root, ".conductor", "resume-autodev.log")
+        assert f"tail -n 3 {log}" in err, err
+        assert "conductor driver status" not in err, err
+        assert not (proj / ".conductor" / "resume-autodev.sh").exists()
+    finally:
+        os.close(fd)

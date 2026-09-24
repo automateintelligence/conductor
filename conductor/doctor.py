@@ -55,6 +55,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -63,6 +64,7 @@ from typing import NamedTuple
 from conductor import resume_script
 from conductor.core import ownership, resolve
 from conductor.hosts import base as hostbase
+from conductor.hosts import proc
 
 _GIT_TIMEOUT = 120.0
 
@@ -273,9 +275,95 @@ def _task_names_checkout(entry: dict, roots: tuple[str, ...]) -> str | None:
         if not isinstance(value, str):
             continue
         for root in roots:
-            if root in value:
+            if _text_names_path(value, root):
                 return root
     return None
+
+
+#: One word of free text, quote-aware without a shell's all-or-nothing parse: a balanced
+#: double-, single- or back-quoted string is ONE word (spaces and all), anything else runs to the
+#: next whitespace. A lone apostrophe (``don't``) is just a character in its word.
+_FREE_WORD = re.compile(r'"([^"]*)"|\'([^\']*)\'|`([^`]*)`|(\S+)')
+
+#: Shell control operators that separate words even with no space around them (``cd /x&&go``).
+_CONTROL = re.compile(r"&&|\|\||[;&|()<>]")
+
+#: Wrappers and trailing sentence punctuation around a path word.
+_WRAPPERS = "\"'`([{"
+_TRAILERS = "\"'`)]}.,;:!?"
+
+
+def _lexed_words(text: str, *, comments: bool) -> list[str] | None:
+    """``text`` split the way a shell would, or ``None`` when shlex cannot parse it."""
+    try:
+        lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        if not comments:
+            lexer.commenters = ""
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def _free_words(text: str) -> list[str]:
+    """``text`` split by ``_FREE_WORD``: never fails, and never cuts a balanced quoted path."""
+    words: list[str] = []
+    for match in _FREE_WORD.finditer(text):
+        quoted = next((g for g in match.groups()[:3] if g is not None), None)
+        if quoted is not None:
+            words.append(quoted)
+        else:
+            words.extend(w for w in _CONTROL.split(match.group(4)) if w)
+    return words
+
+
+def _trimmed(word: str) -> str:
+    """Strip wrappers and trailing punctuation until nothing more comes off, so the ORDER they
+    appear in (`` `/p`. `` vs ``(/p),``) cannot leave one behind."""
+    while True:
+        stripped = word.lstrip(_WRAPPERS).rstrip(_TRAILERS)
+        if stripped == word:
+            return word
+        word = stripped
+
+
+def _text_path_tokens(text: str) -> list[str]:
+    """The absolute paths free text names, as whole words.
+
+    A SCAN MUST NOT MISS ONE, so the words are the UNION of three readings: shlex with ``#`` as
+    a comment, shlex with ``#`` as an ordinary character, and ``_free_words`` — the reading that
+    cannot fail. Each shlex reading can raise on text a shell would reject (``# don't …`` has an
+    unbalanced quote once comments are off); the failing reading contributes nothing and the
+    others still answer. No reading splits on bare whitespace, so a quoted ``"/projects/my app"``
+    is never cut down to ``/projects/my``. Every word is then split on ``=`` and trimmed; a
+    candidate matches only as a whole path (``_under``), so the extra readings add no false
+    matches."""
+    words: list[str] = []
+    for reading in (
+        _lexed_words(text, comments=True),
+        _lexed_words(text, comments=False),
+        _free_words(text),
+    ):
+        words.extend(reading or ())
+    paths: list[str] = []
+    for word in words:
+        for part in word.split("="):
+            part = _trimmed(part)
+            if part.startswith(("/", "~")):
+                path = os.path.abspath(os.path.expanduser(part))
+                if path not in paths:
+                    paths.append(path)
+    return paths
+
+
+def _text_names_path(text: str, root: str) -> bool:
+    """Does free text name ``root`` or a path beneath it?
+
+    A WHOLE PATH WORD, compared with ``_under``: equal to the checkout, or continuing past it
+    only with the path separator. A substring or character-class test read ``/projects/app``
+    inside ``/projects/app-backup``, ``/projects/app+backup`` and ``/mirror/projects/app``, so
+    one checkout's scan was blocked by every sibling that happened to extend its name."""
+    return any(_under(path, (root,)) for path in _text_path_tokens(text))
 
 
 def _scheduled_task_findings(checkout: str, roots: tuple[str, ...]) -> list[Finding]:
@@ -446,6 +534,13 @@ def flock_holders(path: str) -> list[tuple[str, int]] | None:
             continue
         if found == want and (tokens[0], pid) not in holders:
             holders.append((tokens[0], pid))
+    # `/proc/locks` omits a lock whose recorded pid has exited — which is every lock the driver
+    # takes, since `flock -n 9` is a helper process that exits at once while the shell keeps the
+    # descriptor (#95). The descriptors themselves still say so: add every process whose fdinfo
+    # shows a FLOCK held on this inode.
+    for pid in proc.flock_holder_pids(info):
+        if not any(held_pid == pid for _, held_pid in holders):
+            holders.append(("FLOCK", pid))
     return sorted(holders)
 
 

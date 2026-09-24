@@ -345,7 +345,16 @@ def install(project: str, worktree: str, host: str | None = None) -> int:
     except locks.LockTimeout as e:
         # Loud, and having changed nothing: the lock is taken before the first write, so a
         # refusal here cannot have replaced a live driver on its way out.
-        print(f"driver install: {e}", file=sys.stderr)
+        log = os.path.join(root, ".conductor", "resume-autodev.log")
+        print(
+            f"driver install: {e}\n"
+            f"  Another writer of this driver holds {lock} — usually a heartbeat fire, which "
+            "holds it for the whole fire so the running script is not rewritten under it. No "
+            "write occurred. A fire is running when the driver log's last entry is a "
+            f"fire-start with no fire-end after it:\n    tail -n 3 {log}\n"
+            "  Re-run this install once that fire has ended.",
+            file=sys.stderr,
+        )
         return 1
 
 
