@@ -22,8 +22,33 @@ worker rewrote its own watchdog unreviewed). Found a real defect in them? Escala
 `escalate.file_followup(debt)` with the proposed patch — and keep working. The only exception is
 step 3b's terminal crontab removal.
 
-> **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
-> below); installed plugins are not on `PATH`.
+> **Conductor CLI path:** installed plugins are not on `PATH`, so invoke the CLI by ABSOLUTE path
+> as `<conductor-plugin-root>/bin/conductor` (written `conductor` below). Resolve
+> `<conductor-plugin-root>` in this order: `$CLAUDE_PLUGIN_ROOT` when your host exports it (Claude
+> Code does; Codex has no verified equivalent); otherwise **the directory this `SKILL.md` lives in,
+> two levels up** — `<root>/skills/autodev/SKILL.md` means `<root>/bin/conductor`. That second form
+> works on every host and never goes stale, because you already know the path you read this from.
+
+0. **REGISTER OWNERSHIP — before any product work, and before step 1.**
+   `conductor run own` (add `--run <run-key>` when more than one run is active). It records
+   THIS SESSION as the run's owner in `.conductor/runs/<run-key>/owner.json`, and the cron
+   driver refuses to fire while that record names something live — so the twenty-minute tick
+   cannot start a headless phase underneath you while you are working in the same checkout.
+
+   **It can refuse, and a refusal is not something to work around.**
+   - *"is owned by … (live)"* — someone or something else is already executing this run.
+     **Stop.** Do not register, do not do product work. `conductor status` names the owner.
+   - *"exposes no session identity"* — your host did not give this session a durable handle
+     (`$CLAUDE_PID` on Claude, `$CODEX_THREAD_ID` on Codex; both are undocumented and a host
+     upgrade can withdraw either). **Stop and escalate.** Registering something weaker is worse
+     than not registering: a record nothing can verify blocks the run permanently.
+   - *"already owned by the wrapper that launched this session"* — you were started BY a
+     conductor fire that already holds the record. That is success; continue to step 1.
+
+   **Release it when you exit:** `conductor run disown`. If you crash instead, the record is
+   still recoverable without a timer — your session's exit is provable, so the next fire clears
+   it (`conductor run disown --force` is only for a record that cannot be interpreted at all).
+   Never delete `owner.json` by hand.
 
 1. **RE-LOAD GOAL (fresh context).** Done only when `conductor assert run --level spec` exits 0.
    Re-read goal + paths from the durable handoff/ledger; trust git/issues, not memory. Read the
@@ -36,11 +61,22 @@ step 3b's terminal crontab removal.
    assume `origin`** — it derives the remote from the repo URL (many repos use `github`), matching
    what `merge-gate` uses; a hardcoded `origin` fails the fetch/merge on those repos.
 1b. **KEEP THE RUN BRANCH CURRENT (every fire, before anything else builds).** On the run
-   branch, with `R="$(conductor remote)"` and `D="$(conductor default-branch)"` (the
-   single-sourced default-branch resolver): `git fetch "$R" "$D" && git merge "$R/$D"`
-   (MERGE, never rebase — a
-   shared integration branch's history is load-bearing; phase branches may rebase, the run
-   branch never does). Conflicts get resolved NOW, by you, in this small increment — or
+   branch, run the resolution and the merge as ONE `&&` chain, so a failed resolve cannot fall
+   through into a git command:
+
+   ```bash
+   R="$(conductor remote)" && D="$(conductor default-branch)" \
+     && git fetch "$R" "$D" && git merge "$R/$D"
+   ```
+
+   `conductor default-branch` is the single-sourced resolver and it FAILS CLOSED: it prints
+   nothing and exits non-zero when the repo's default cannot be resolved from remote metadata.
+   The `&&` is the enforcement — nothing after it runs, so `git fetch "$R" ""` on an empty `$D`
+   is impossible. **A non-zero exit from that chain at the resolver is not a retry: STOP this
+   fire, write the handoff, and escalate to the owner to fix the remote metadata.** Never
+   substitute a guessed default.
+   MERGE, never rebase — a shared integration branch's history is load-bearing; phase branches
+   may rebase, the run branch never does. Conflicts get resolved NOW, by you, in this small increment — or
    escalated — never left to accumulate for the owner's final review. If the merge brought
    changes, re-run `conductor assert run --level spec` before proceeding: gate-green must mean
    green against CURRENT reality, not day-1 reality.
@@ -61,9 +97,16 @@ step 3b's terminal crontab removal.
    **All green AND no plans left** → the run is complete:
    **3a. OPEN THE FINAL OWNER PR (run topology only — skip when no run branch is configured).**
    Verify the run branch is not behind the default branch (step 1b just merged; re-check).
-   Generate the review packet — `conductor run-packet <run-branch> > /tmp/packet.md` — then,
-   with `D="$(conductor default-branch)"`,
-   `gh pr create --base "$D" --head <run-branch> --body-file /tmp/packet.md`, title
+   Generate the review packet — `conductor run-packet <run-branch> > /tmp/packet.md` — then
+   resolve the base and open the PR as ONE `&&` chain, so an unresolved default means NO final
+   PR is opened rather than one opened against a guessed base:
+
+   ```bash
+   D="$(conductor default-branch)" \
+     && gh pr create --base "$D" --head <run-branch> --body-file /tmp/packet.md
+   ```
+
+   A non-zero exit at the resolver → STOP and escalate; do not open the PR by hand. Title
    "Conductor run complete: <spec-slug> — owner review", and assign the owner. **NEVER merge
    this PR — not with merge-gate ok, not with --admin, not at all.** It is the owner's single
    review point for the whole run; conductor's authority ends at opening it. (Where the repo
@@ -122,9 +165,10 @@ step 3b's terminal crontab removal.
    defect, never permission — step 4b already refused to claim the phase over it, so you never
    reach here blind. Believe an ADR is wrong? Escalate it (§9, patch-later or needs-human) and
    keep building to it meanwhile — never quietly build against a closed decision.
-   Conducted skills: `/superpowers:*` are plugin skills;
-   `/code-review`, `/codex`, `/document-release` are **environment-provided** commands (verified
-   by `/conductor:start` preflight):
+   Conducted skills: the `superpowers` ones are plugin skills; `code-review`, the opposite-host
+   review wrapper, and `document-release` are **environment-provided** commands (verified by
+   conductor's preflight, which names each of them in your host's own invocation form — run
+   `conductor preflight` rather than assuming a form):
    0. **Reconcile-within-phase (restart safety):** diff the phase's `- [ ]` tasks against
       `git log` on the phase branch (per-task commits are the breadcrumbs) and the gate's
       per-assertion state; skip tasks already done. A dirty tree left by a dead worker: commit it
@@ -155,41 +199,47 @@ step 3b's terminal crontab removal.
    4. **one PR per phase, base = the RUN branch** (`Closes #<phase-issue>` for traceability —
       merge-gate blocks without it, and its base leg blocks any other base with
       `base-mismatch`; run-branch merges don't auto-close issues — `phase-done` does that).
-   5. `/codex $superpowers:requesting-code-review Please provide a read-only, pre-merge review for
-      PR#<n> against the phase's Spec sections and ADRs` — post the result as a PR comment starting with the
-      gate's review marker (**`CONDUCTOR_REVIEW_MARKER`, default "Codex review"**).
-      **Codex usage-limit fallback — continue uninterrupted, never stall.** If `/codex` reports its
-      5-hour OR weekly usage limit is exhausted (its stderr/stdout names a usage/rate/quota limit,
-      or `/status` shows the window spent — distinct from a transient timeout, which you retry ONCE
-      first), do NOT halt and do NOT park the phase until the window resets: a spent WEEKLY quota
-      would freeze the whole run for days, breaking the "walk away and it keeps making progress"
-      contract. Fall back to `/code-review` for the independent pre-merge review. The gate is
-      OWNER-CONFIGURED and you must NOT change its env, so honor two constraints as they are set:
-        - **Marker (`CONDUCTOR_REVIEW_MARKER`, default `Codex review`):** post `/code-review`'s
-          findings as the PR comment with that exact marker at the START of the body, labeled
-          honestly — e.g. **"Codex review — UNAVAILABLE (usage limit); Claude /code-review
-          fallback"** — so `conductor merge-gate` still counts it AND the degradation stays visible.
-          Read the configured marker; do not assume it is the default.
+   5. **Opposite-host review.** Invoke the review wrapper for the host you are NOT — `conductor
+      preflight` names it for your host, and it is `codex` on a Claude-hosted run and `claude` on
+      a Codex-hosted one — asking it to run `requesting-code-review` and provide a read-only,
+      pre-merge review for PR#<n> against the phase's Spec sections and ADRs. Post the result as
+      a PR comment starting with the gate's review marker
+      (**`CONDUCTOR_REVIEW_MARKER`, default `<Opposite-host> review`** — `Codex review` on a
+      Claude-hosted run, `Claude review` on a Codex-hosted one).
+      **Usage-limit fallback — continue uninterrupted, never stall.** If the opposite host
+      reports its 5-hour OR weekly usage limit is exhausted (its stderr/stdout names a
+      usage/rate/quota limit, or its status shows the window spent — distinct from a transient
+      timeout, which you retry ONCE first), do NOT halt and do NOT park the phase until the
+      window resets: a spent WEEKLY quota would freeze the whole run for days, breaking the
+      "walk away and it keeps making progress" contract. Fall back to your OWN host's
+      `code-review` for the independent pre-merge review. The gate is OWNER-CONFIGURED and you
+      must NOT change its env, so honor two constraints as they are set:
+        - **Marker (`CONDUCTOR_REVIEW_MARKER`):** post `code-review`'s findings as the PR comment
+          with that exact marker at the START of the body, labeled honestly — e.g. **"<marker> —
+          UNAVAILABLE (usage limit); same-host code-review fallback"** — so `conductor merge-gate`
+          still counts it AND the degradation stays visible. **Read the configured marker; never
+          assume the default**, which itself depends on the run's host.
         - **Provenance (`CONDUCTOR_REVIEW_AUTHOR`):** if it is pinned to a non-worker account, a
           worker-posted fallback can NEVER be counted — do NOT post unusable reviews in a loop;
-          escalate needs-human instead (that config is incompatible with conductor's local-posting
-          Codex flow anyway). Check this BEFORE falling back.
+          escalate needs-human instead (that config is incompatible with conductor's
+          local-posting review flow anyway). Check this BEFORE falling back.
       Keep posting eligible final-state fallback reviews until `conductor merge-gate <pr>` passes —
       it needs `CONDUCTOR_MIN_REVIEWS` marker comments with the newest postdating the newest commit;
       do NOT assume that count is 2. Then **let the owner know** (the §9 *patch-later* branch, not a
       halt):
-      `escalate.file_followup(repo, "debt", "Codex-fallback review: phase #<n>", body, link_issue=<phase#>)`
+      `escalate.file_followup(repo, "debt", "Same-host fallback review: phase #<n>", body, link_issue=<phase#>)`
       with `body` naming the phase, the PR, which limit tripped (5-hour vs weekly), and that this
-      phase traded Codex's independence for Claude's — flag it for optional independent re-review.
+      phase traded the opposite host's independence for its own — flag it for optional
+      independent re-review.
       The open `debt` issue rides the handoff's `Open:` line to the final owner PR, where YOU decide;
       it SURFACES the degradation, it does not silently repair it. Keep working.
-   6. `/superpowers:receiving-code-review` — apply fixes, commit, then **codex re-reviews the
-      FINAL state** (posted as another "Codex review" comment; if Codex is still usage-limited the
-      step-5 fallback applies again — `/code-review` the final state under the same configured
-      marker); repeat until the last review postdates the last commit and raises nothing blocking.
+   6. `receiving-code-review` — apply fixes, commit, then **the opposite host re-reviews the
+      FINAL state** (posted as another marker comment; if it is still usage-limited the step-5
+      fallback applies again — `code-review` the final state under the same configured marker);
+      repeat until the last review postdates the last commit and raises nothing blocking.
       merge-gate enforces both: `CONDUCTOR_MIN_REVIEWS` marker comments and review-of-final-state —
       the fallback satisfies them by running the SAME independent review rounds on the final diff,
-      on `/code-review` instead of Codex.
+      on your own host's `code-review` instead of the opposite host's.
    7. **merge INTO THE RUN BRANCH with `conductor merge <pr>`** (§6.2) — the ONE merge command:
       it runs `merge-gate` and performs `gh pr merge --merge` (no squash) only if the gate is ok,
       and refuses `base=default` so the final owner PR can never be auto-merged. **Never run raw
@@ -215,4 +265,6 @@ step 3b's terminal crontab removal.
    (dogfood: 0/27 checkboxes, labels never maintained). Phase incomplete this fire: renew the
    lease and commit progress.
 9. **WRITE HANDOFF (§4)** (`conductor.handoff.write`) to `.conductor/` (gitignored — local resume
-   scratch only); then commit + **push** the code changes and ledger state. EXIT.
+   scratch only); then commit + **push** the code changes and ledger state. **Release ownership
+   with `conductor run disown`** — last, after the push, because until the push lands you are
+   still the thing the next fire must not race. Then EXIT.

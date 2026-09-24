@@ -1,0 +1,210 @@
+"""The `HostAdapter` members A1 actually consumes.
+
+A1 is a SUBSET of Plan 04's nineteen-member protocol, not a competitor: it implements only
+`source_root`, `native_invocation`, and the per-host command discovery the preflight needs.
+Everything else stays `...` until Plan 04 fills it in.
+
+`native_invocation` is the load-bearing one. Ground truth
+(`docs/reviews/2026-08-12-codex-host-ground-truth.md` §"Skill invocation under Codex") pins
+`$name` as Codex's convention and `/plugin:skill` as Claude's. Its other claim — that Codex has
+no plugin namespace — did not hold on codex-cli 0.155.0: an installed plugin's skill is listed
+and invoked as `<plugin>:<skill>`, so both renderers keep the qualifier.
+"""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+
+from conductor.hosts import base, discovery
+from tests.conductor import codex_stub
+
+
+@pytest.fixture(autouse=True)
+def _codex_without_a_catalog(monkeypatch, tmp_path):
+    """Every Codex case here is about the filesystem legs, so the stub `codex` gives no
+    `skills/list` catalog: what discovery scans is then on-disk evidence, and only conductor's
+    own checkout, the dev roots and `prompts/` count. Hermetic either way: `tests/conftest.py`
+    refuses a real `codex`."""
+    codex_stub.put_on_path(monkeypatch, tmp_path / "stub-bin")
+
+
+@pytest.fixture
+def adapters():
+    return {host_id: base.load(host_id) for host_id in base.HOST_IDS}
+
+
+def test_claude_source_root_defaults_to_the_dot_claude_home(monkeypatch, tmp_path):
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert base.load("claude").source_root() == str(tmp_path / ".claude")
+
+
+def test_claude_source_root_honours_claude_config_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "elsewhere"))
+    assert base.load("claude").source_root() == str(tmp_path / "elsewhere")
+
+
+def test_codex_source_root_defaults_to_the_dot_codex_home(monkeypatch, tmp_path):
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert base.load("codex").source_root() == str(tmp_path / ".codex")
+
+
+def test_codex_source_root_honours_codex_home(monkeypatch, tmp_path):
+    # Verified in ground truth §"Session and config isolation": auth always uses CODEX_HOME,
+    # so it is the Codex config root even when `--ignore-user-config` is in play.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "scratch"))
+    assert base.load("codex").source_root() == str(tmp_path / "scratch")
+
+
+def test_the_two_source_roots_are_never_the_same_directory(adapters):
+    assert adapters["claude"].source_root() != adapters["codex"].source_root()
+
+
+def test_claude_renders_a_plugin_qualified_skill_as_a_slash_command(adapters):
+    assert (
+        adapters["claude"].native_invocation("conductor:autodev")
+        == "/conductor:autodev"
+    )
+
+
+def test_claude_renders_an_unqualified_skill_as_a_bare_slash_command(adapters):
+    assert adapters["claude"].native_invocation("code-review") == "/code-review"
+
+
+def test_codex_renders_a_skill_with_the_dollar_convention(adapters):
+    assert adapters["codex"].native_invocation("code-review") == "$code-review"
+
+
+def test_codex_keeps_the_plugin_qualifier(adapters):
+    # codex-cli 0.155.0 lists an installed plugin's skill as `<plugin>:<skill>` and matches a
+    # `$` mention exactly: `$spec-craft:expectations` injected the skill in a live `codex exec`,
+    # `$expectations` injected nothing.
+    assert (
+        adapters["codex"].native_invocation("conductor:autodev") == "$conductor:autodev"
+    )
+
+
+@pytest.mark.parametrize("host_id", base.HOST_IDS)
+def test_native_invocation_is_idempotent_over_an_already_rendered_name(
+    adapters, host_id
+):
+    # The requirement list is written once in host-neutral form, but a caller that renders
+    # twice (a message quoting a name that preflight already rendered) must not produce
+    # `//code-review` or `$$code-review`.
+    once = adapters[host_id].native_invocation("code-review")
+    assert adapters[host_id].native_invocation(once) == once
+
+
+@pytest.mark.parametrize("host_id", base.HOST_IDS)
+def test_discovered_commands_finds_a_bare_user_skill_under_the_host_source_root(
+    monkeypatch, tmp_path, host_id
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    root = tmp_path / f".{host_id}"
+    skill = root / "skills" / "document-release"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: document-release\ndescription: d\n---\n"
+    )
+    snapshot = discovery.adapter_for(host_id).host_skills()
+    # Without Codex's catalog (the autouse stub gives none) a Codex skill on disk is evidence,
+    # not a command; Claude has no catalog and counts its source root directly.
+    found = snapshot.on_disk if host_id == "codex" else snapshot.commands
+    assert "document-release" in found
+
+
+def test_claude_discovers_the_marketplace_plugin_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    cached = tmp_path / ".claude" / "plugins" / "cache" / "market" / "gstack" / "1.0"
+    (cached / "skills" / "code-review").mkdir(parents=True)
+    (cached / "skills" / "code-review" / "SKILL.md").write_text("---\n---\n")
+    (cached / "commands").mkdir()
+    (cached / "commands" / "browse.md").write_text("x")
+    found = discovery.adapter_for("claude").discovered_commands()
+    assert "gstack:code-review" in found
+    assert "gstack:browse" in found
+
+
+def test_codex_discovers_a_project_local_skill(monkeypatch, tmp_path):
+    # Verified in ground truth: the AGENTS.md dispatch table resolves `./.codex/skills/`,
+    # not only `~/.codex/skills/`. A repo-local conducted skill must therefore count.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    project = tmp_path / "project"
+    skill = project / ".codex" / "skills" / "code-review"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: code-review\ndescription: d\n---\n")
+    snapshot = discovery.adapter_for("codex").host_skills(project_root=str(project))
+    assert "code-review" in snapshot.on_disk
+
+
+def test_codex_discovers_a_prompt_as_a_command(monkeypatch, tmp_path):
+    # Verified: `~/.codex/prompts/*.md` are the Codex analogue of Claude's slash commands.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    prompts = tmp_path / "codex-home" / "prompts"
+    prompts.mkdir(parents=True)
+    (prompts / "document-release.md").write_text("---\ndescription: x\n---\n")
+    assert "document-release" in discovery.adapter_for("codex").discovered_commands()
+
+
+@pytest.mark.parametrize(
+    "host_id,manifest_dir", [("claude", ".claude-plugin"), ("codex", ".codex-plugin")]
+)
+def test_each_host_reads_its_own_plugin_manifest(
+    monkeypatch, tmp_path, host_id, manifest_dir
+):
+    # Verified in ground truth §"Claude vs Codex": `.claude-plugin/plugin.json` vs
+    # `.codex-plugin/plugin.json`. A shared reader would namespace a Codex plugin's skills
+    # under nothing at all.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "nowhere-claude"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "nowhere-codex"))
+    plug = tmp_path / "spec-craft"
+    (plug / manifest_dir).mkdir(parents=True)
+    (plug / manifest_dir / "plugin.json").write_text('{"name": "spec-craft"}')
+    skill = plug / "skills" / "expectations"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: expectations\ndescription: d\n---\n")
+    monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
+    found = discovery.adapter_for(host_id).discovered_commands()
+    assert "spec-craft:expectations" in found
+
+
+def test_a_host_ignores_the_other_hosts_plugin_manifest(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "nowhere-claude"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "nowhere-codex"))
+    plug = tmp_path / "spec-craft"
+    (plug / ".claude-plugin").mkdir(parents=True)
+    (plug / ".claude-plugin" / "plugin.json").write_text('{"name": "spec-craft"}')
+    skill = plug / "skills" / "expectations"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\n---\n")
+    monkeypatch.setenv("CONDUCTOR_PLUGIN_DIRS", str(plug))
+    assert (
+        "spec-craft:expectations"
+        not in discovery.adapter_for("codex").discovered_commands()
+    )
+
+
+@pytest.mark.parametrize("host_id", base.HOST_IDS)
+def test_every_host_discovers_conductors_own_skills_from_its_checkout(host_id):
+    # Dogfood invariant, preserved from the Claude-only preflight: whatever else is or is not
+    # installed, the copy of conductor that is RUNNING can always resolve its own skills.
+    found = discovery.adapter_for(host_id).discovered_commands()
+    assert "conductor:assertions-to-tests" in found
+
+
+@pytest.mark.parametrize("host_id", base.HOST_IDS)
+def test_discovery_survives_a_missing_source_root(monkeypatch, tmp_path, host_id):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "absent"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "absent"))
+    monkeypatch.delenv("CONDUCTOR_PLUGIN_DIRS", raising=False)
+    assert isinstance(discovery.adapter_for(host_id).discovered_commands(), set)
+    assert not os.path.exists(str(tmp_path / "absent"))

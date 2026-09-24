@@ -27,7 +27,8 @@ _CLOSES_RE = re.compile(r"(?i)\b(close[sd]?|fix(es|ed)?|resolve[sd]?)\s+#\d+")
 
 def _expected_base() -> str | None:
     """The run's integration branch, when one is configured: env CONDUCTOR_RUN_BRANCH,
-    else the `<project>/.conductor/run_branch` file `/conductor:start` writes (re-derived
+    else the `<project>/.conductor/run_branch` file the `conductor:start` skill writes
+    (re-derived
     from `git ls-remote 'conductor/run-*'` on a fresh clone). None = no run topology
     configured → the base leg is disabled (0.4.x direct-merge runs keep working)."""
     env = (os.environ.get("CONDUCTOR_RUN_BRANCH") or "").strip()
@@ -136,10 +137,21 @@ def _newest_commit_dates(repo: str, pr: int) -> Any:
     return json.loads(node)
 
 
-def _remote_for(repo: str, run: Any = subprocess.run) -> str:
-    """Pick the git remote whose URL points at <owner/repo>; fall back to 'origin'."""
+def _remote_for(
+    repo: str, run: Any = subprocess.run, *, root: str | None = None
+) -> str:
+    """Pick the git remote whose URL points at <owner/repo>; fall back to 'origin'.
+
+    ``root`` names the repository to ask. Omitted, `git remote -v` reads whatever repository the
+    process cwd happens to sit in — which is the caller's project only by coincidence. A verb
+    carrying an explicit ``--project`` must pass it: the remote it gets back is used to resolve
+    the OTHER project's branch tips, so an ambient answer names a remote that repository may not
+    have (or, worse, one it has under a different URL)."""
     out = run(
-        ["git", "remote", "-v"], capture_output=True, text=True, timeout=_GH_TIMEOUT
+        ["git", *(("-C", root) if root else ()), "remote", "-v"],
+        capture_output=True,
+        text=True,
+        timeout=_GH_TIMEOUT,
     )
     for line in (out.stdout or "").splitlines():
         parts = line.split()
@@ -175,6 +187,33 @@ def _merge_ref_verify(
         except Exception:  # cleanup is best-effort; never let it escape the gate
             pass
         shutil.rmtree(wt, ignore_errors=True)
+
+
+def default_review_marker(host_id: str) -> str:
+    """The review-marker default for a run hosted on ``host_id``.
+
+    Derived from ``opposite(host_id)``, never spelled out. The literal default used to be
+    "Codex review", which is right for a Claude-hosted run and exactly wrong for a
+    Codex-hosted one: the reviewer there is Claude, so the gate would count comments carrying
+    a word the reviewer never wrote and block every phase on `reviews:0/2` with two genuine
+    reviews already on the pull request. `CONDUCTOR_REVIEW_MARKER` still overrides this —
+    A1 changes the default, it does not add a mechanism.
+    """
+    from conductor.hosts.base import opposite
+
+    return f"{opposite(host_id).capitalize()} review"
+
+
+def _review_marker() -> str:
+    """The configured marker, or the one this run's host implies. Read per call: tests
+    monkeypatch the env, and an empty marker would match every comment."""
+    configured = (os.environ.get("CONDUCTOR_REVIEW_MARKER") or "").strip()
+    if configured:
+        return configured
+    from conductor.hosts import runhost
+    from conductor.paths import project_root
+
+    return default_review_marker(runhost.resolve(project_root()))
 
 
 def check(
@@ -216,8 +255,7 @@ def check(
             blockers.append(f"base-mismatch:{d.get('baseRefName')}")
         if not _CLOSES_RE.search(d.get("body") or ""):
             blockers.append("closes-missing")  # recipe: one PR per phase, Closes #issue
-        # env read per call (tests monkeypatch); empty marker would match everything
-        marker = (os.environ.get("CONDUCTOR_REVIEW_MARKER") or "Codex review").lower()
+        marker = _review_marker().lower()
         min_reviews = int(os.environ.get("CONDUCTOR_MIN_REVIEWS", "2"))
         if min_reviews < 0:  # 0 disables the review legs; negative is invalid
             raise ValueError(f"CONDUCTOR_MIN_REVIEWS must be >= 0, got {min_reviews}")
@@ -262,9 +300,15 @@ def check(
     return {"ok": not blockers, "blockers": blockers}
 
 
-def _resolve_repo(run: Any = subprocess.run) -> str:
+def _resolve_repo(run: Any = subprocess.run, *, root: str | None = None) -> str:
     """The repo the gate runs against: CONDUCTOR_REPO if set, else `gh repo view` — time-bounded
-    and fail-closed (a hung or failed autodiscovery raises instead of stalling/crashing)."""
+    and fail-closed (a hung or failed autodiscovery raises instead of stalling/crashing).
+
+    ``root`` names the repository to ask about. `gh` resolves the repository from ITS OWN cwd, so
+    omitting it answers for whatever repository the caller happened to be standing in. That is
+    the ambient answer `conductor finish --project <other>` must never take: the name returned
+    here becomes `gh pr view -R <name>`, and a name from the wrong repository validates the wrong
+    pull request before the cleanup runs against the resolved one."""
     repo = os.environ.get("CONDUCTOR_REPO")
     if repo:
         return repo
@@ -273,6 +317,7 @@ def _resolve_repo(run: Any = subprocess.run) -> str:
         capture_output=True,
         text=True,
         timeout=_GH_TIMEOUT,
+        cwd=root,
     )
     if out.returncode != 0:
         raise RuntimeError(f"repo-discovery-failed: {(out.stderr or '').strip()}")
@@ -289,7 +334,10 @@ if __name__ == "__main__":
     try:
         pr_num = int(sys.argv[1])
     except ValueError:
-        print(f"usage: conductor merge-gate <pr> — expected an integer, got {sys.argv[1]!r}", file=sys.stderr)
+        print(
+            f"usage: conductor merge-gate <pr> — expected an integer, got {sys.argv[1]!r}",
+            file=sys.stderr,
+        )
         sys.exit(64)
     try:
         repo = _resolve_repo()

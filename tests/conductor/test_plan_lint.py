@@ -149,6 +149,267 @@ def test_blank_checkbox_line_is_not_a_task():
     assert "phase-no-tasks:Phase 2 — Reporting (A8)" in reasons
 
 
+# --- non-standard checkbox markers -----------------------------------------------------
+# `- [~] something` is counted as NOTHING: issue-sync's `_TASK` (`^- \[ \] (.+)$`) never
+# sees it, so no sub-issue is ever created for it, and phase-done's `_UNTICKED` rewrites
+# `- [ ]` only, so it can never be ticked either. It vanishes silently. Rejecting it at
+# lint time is the fix — teaching `_TASK` to accept `[~]` would spawn sub-issues for
+# half-done work instead.
+
+_MARKER = "phase-task-marker-unknown:"
+
+
+def test_partial_marker_beside_a_valid_task_is_flagged():
+    # The exact hole: `_TASK_ANY` still matches the SIBLING `- [ ]` line, so phase-no-tasks
+    # stays quiet and the `[~]` line is dropped with nothing said about it.
+    text = GOOD_PLAN.replace("- [ ] Implement scoring", "- [~] Implement scoring")
+    reasons = plan_lint.lint(text)
+    assert f"{_MARKER}Phase 1 — Scoring (A3, A4):- [~] Implement scoring" in reasons, (
+        reasons
+    )
+    assert not any(r.startswith("phase-no-tasks:") for r in reasons)
+
+
+def test_partial_marker_is_a_hard_finding_not_a_warning(tmp_path, capsys):
+    # A silently-dropped task is a correctness problem: exit 1, on stderr, no `warn:`.
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        GOOD_PLAN.replace("- [ ] Implement report", "- [~] Implement report")
+    )
+    assert plan_lint.main([str(plan)]) == 1
+    err = capsys.readouterr().err
+    assert f"{_MARKER}Phase 2 — Reporting (A8):- [~] Implement report" in err
+    assert "warn:phase-task" not in err
+
+
+def test_every_non_standard_marker_is_flagged_not_just_tilde():
+    for marker in ("~", "-", ">", "?", "/"):
+        text = GOOD_PLAN.replace(
+            "- [ ] Implement report", f"- [{marker}] Implement report"
+        )
+        reasons = plan_lint.lint(text)
+        assert (
+            f"{_MARKER}Phase 2 — Reporting (A8):- [{marker}] Implement report"
+            in reasons
+        ), marker
+
+
+def test_all_partial_phase_reports_no_tasks_once_plus_one_finding_per_line():
+    # An all-`[~]` phase already fires phase-no-tasks; the marker findings must ADD the
+    # line-level detail, not restate the phase-level one a second time.
+    text = GOOD_PLAN.replace(
+        "- [ ] Write failing tests", "- [~] Write failing tests"
+    ).replace("- [ ] Implement scoring", "- [~] Implement scoring")
+    reasons = plan_lint.lint(text)
+    title = "Phase 1 — Scoring (A3, A4)"
+    assert [r for r in reasons if r.startswith("phase-no-tasks:")] == [
+        f"phase-no-tasks:{title}"
+    ]
+    assert [r for r in reasons if r.startswith(_MARKER)] == [
+        f"{_MARKER}{title}:- [~] Write failing tests",
+        f"{_MARKER}{title}:- [~] Implement scoring",
+    ]
+
+
+def test_standard_markers_and_checklist_refs_produce_no_marker_finding():
+    # `[ ]`, `[x]`, `[X]`, and phase_done's `- [ ] #123` checklist refs are all legitimate.
+    text = GOOD_PLAN.replace("- [ ] Write failing tests", "- [x] Write failing tests")
+    text = text.replace(
+        "- [ ] Implement scoring", "- [X] Implement scoring\n- [ ] #123"
+    )
+    assert plan_lint.lint(text) == []
+
+
+def test_conductors_own_superpowers_plans_carry_no_marker_finding():
+    # Guards against a check so broad it fails plans already committed to this repo.
+    for name in (
+        "2026-08-10-plan-01-run-identity-registry.md",
+        "2026-08-10-plan-04-host-adapters.md",
+    ):
+        path = os.path.join(ROOT, "docs", "superpowers", "plans", name)
+        text = open(path, encoding="utf-8").read()
+        assert [r for r in plan_lint.lint(text) if r.startswith(_MARKER)] == [], name
+
+
+# --- fenced code is not plan content (codex production review, finding 5) ---------------
+# The marker check is a HARD failure, and a plan that documents the rejected shape by
+# showing it — the obvious way to write "do not do this" — hard-failed on its own example.
+# `_TASK_ANY`/`_TASK` are fence-blind and stay that way (a column-0 `- [ ]` inside a fence
+# really does become a sub-issue today); matching an existing SILENT misparse does not
+# justify a new BLOCKING false positive, so only the marker check learns fences here.
+
+
+def _fenced(open_fence: str, close_fence: str, body: str = "- [~] documented example"):
+    """GOOD_PLAN with a fenced example appended to its last phase (Phase 2)."""
+    return (
+        f"{GOOD_PLAN}\nReviewers must reject this shape:\n\n"
+        f"{open_fence}\n{body}\n{close_fence}\n"
+    )
+
+
+def test_odd_marker_inside_a_backtick_fence_is_not_flagged():
+    assert plan_lint.lint(_fenced("```", "```")) == []
+
+
+@pytest.mark.parametrize("info", ["text", "markdown", "md title=example"])
+def test_fence_info_string_does_not_defeat_the_fence(info):
+    assert plan_lint.lint(_fenced(f"```{info}", "```")) == [], info
+
+
+def test_odd_marker_inside_a_tilde_fence_is_not_flagged():
+    assert plan_lint.lint(_fenced("~~~text", "~~~")) == []
+
+
+def test_a_backtick_line_does_not_close_a_tilde_fence():
+    # Different fence chars are independent; a plan showing a ``` fence inside a ~~~ one
+    # must not have its example spill back into plan content halfway through.
+    text = _fenced("~~~text", "~~~", body="```\n- [~] documented example\n```")
+    assert plan_lint.lint(text) == []
+
+
+def test_a_shorter_run_does_not_close_a_longer_fence():
+    # The reason the length rule exists: documenting a ``` fence needs a ```` wrapper.
+    text = _fenced("````text", "````", body="```text\n- [~] documented example\n```")
+    assert plan_lint.lint(text) == []
+
+
+def test_odd_marker_outside_the_fence_is_still_flagged_in_the_same_phase():
+    # The check must survive the fix: fencing one example must not blind the phase.
+    text = _fenced("```text", "```").replace(
+        "- [ ] Implement report", "- [ ] Implement report\n- [?] real dropped task"
+    )
+    assert plan_lint.lint(text) == [
+        f"{_MARKER}Phase 2 — Reporting (A8):- [?] real dropped task"
+    ]
+
+
+def test_a_real_task_outside_a_fence_still_parses():
+    text = _fenced("```text", "```")
+    assert plan_lint.lint(text) == []
+    # ...and it is the UNFENCED task doing that work, not the fenced line.
+    stripped = text.replace("- [ ] Implement report\n", "")
+    assert "phase-no-tasks:Phase 2 — Reporting (A8)" in plan_lint.lint(stripped)
+
+
+def test_an_unterminated_fence_runs_to_the_end_of_its_phase():
+    # CommonMark closes an unclosed fence at the end of its container, and this check's
+    # whole premise is that a false hard-fail costs more than a missed finding. Bounded to
+    # the phase because every marker scan is per-section.
+    text = GOOD_PLAN + "\n```text\n- [~] documented example\n"
+    assert plan_lint.lint(text) == []
+
+
+def test_an_unterminated_fence_does_not_leak_into_the_next_phase():
+    text = GOOD_PLAN.replace(
+        "- [ ] Implement scoring",
+        "- [ ] Implement scoring\n\n```text\n- [~] documented example",
+    ).replace(
+        "- [ ] Implement report", "- [ ] Implement report\n- [~] real dropped task"
+    )
+    assert plan_lint.lint(text) == [
+        f"{_MARKER}Phase 2 — Reporting (A8):- [~] real dropped task"
+    ]
+
+
+def test_fenced_marker_does_not_fail_the_cli(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text(_fenced("```text", "```"))
+    assert plan_lint.main([str(plan)]) == 0
+
+
+# --- a fenced H2 is not a phase (codex round 2, finding 3) -------------------------------
+# `_phase_sections` split on every H2 BEFORE the fence filter ran, so a fenced example that
+# showed a phase heading was parsed as a REAL phase: the marker finding came back, joined by
+# every per-phase pointer failure the example could not possibly satisfy. Fence awareness has
+# to happen during the split, not after it.
+
+_FENCED_PHASE_EXAMPLE = "## Phase example (A99)\n\n- [~] documented example"
+
+
+def test_a_phase_shaped_heading_inside_a_fence_is_not_a_phase():
+    assert plan_lint.lint(_fenced("```md", "```", body=_FENCED_PHASE_EXAMPLE)) == []
+
+
+def test_a_fenced_phase_heading_is_not_claimable_by_title():
+    # `lint_phase_adrs` is autodev's pre-claim check and splits with the same helper: an
+    # example must not be claimable as a phase.
+    reasons, refs = plan_lint.lint_phase_adrs(
+        _fenced("```md", "```", body=_FENCED_PHASE_EXAMPLE), "Phase example (A99)"
+    )
+    assert reasons == ["phase-not-found:Phase example (A99)"]
+    assert refs == []
+
+
+def test_a_real_phase_after_a_fenced_phase_heading_is_still_linted():
+    # The fix must not blind the splitter — a REAL phase following the example still parses,
+    # and still reports its own failures.
+    text = (
+        _fenced("```md", "```", body=_FENCED_PHASE_EXAMPLE)
+        + "\n## Phase 3 — Glue (A9)\n\n- [ ] wire it up\n"
+    )
+    assert sorted(plan_lint.lint(text)) == [
+        "phase-no-adr-pointer:Phase 3 — Glue (A9)",
+        "phase-no-spec-pointer:Phase 3 — Glue (A9)",
+    ]
+
+
+def test_an_unterminated_fence_does_not_hide_the_headings_after_it():
+    # The asymmetry the splitter needs: a CLOSED fence hides a heading, an unclosed one does
+    # not. Reading the whole plan with one fence state would let a forgotten ``` swallow every
+    # following heading, merging the rest of the file into the phase that opened it — the
+    # already-committed leak test above is the same rule seen from the marker side.
+    text = GOOD_PLAN.replace(
+        "- [ ] Implement scoring",
+        "- [ ] Implement scoring\n\n```md\n- [~] documented example",
+    )
+    titles = [t for (t, _s, _i), _sec in plan_lint._phase_sections(text)]
+    assert titles == ["Phase 1 — Scoring (A3, A4)", "Phase 2 — Reporting (A8)"]
+
+
+# --- an info string is not free text (codex round 2, finding 4) --------------------------
+# CommonMark §4.5: a BACKTICK fence's info string may not contain a backtick (the line is
+# inline code, not a fence); a TILDE fence's info string may. Accepting arbitrary info text
+# let a non-fence line open a fence in this parser and suppress every following marker finding
+# to the end of the phase — a false negative introduced by the fence fix itself.
+
+
+def test_a_backtick_in_a_backtick_fence_info_string_opens_no_fence():
+    text = _fenced("```md`not-an-opener", "```")
+    assert plan_lint.lint(text) == [
+        f"{_MARKER}Phase 2 — Reporting (A8):- [~] documented example"
+    ]
+
+
+def test_a_backtick_in_a_tilde_fence_info_string_still_opens_a_fence():
+    # The other half of §4.5 — the rule is backtick-specific, so a tilde fence keeps working.
+    assert plan_lint.lint(_fenced("~~~md`still-an-opener", "~~~")) == []
+
+
+def test_a_run_of_backticks_after_the_opener_is_not_an_info_string():
+    # ```` ``` ```` is the shape a plan uses to show a fence; the info string carries
+    # backticks, so it is not an opener either.
+    text = _fenced("```` ```", "````")
+    assert plan_lint.lint(text) == [
+        f"{_MARKER}Phase 2 — Reporting (A8):- [~] documented example"
+    ]
+
+
+def test_committed_plan_phase_titles_are_unchanged_by_fence_awareness():
+    # The plan in this repo that HAS phases, so "don't change the split for plans without
+    # fenced H2s" is checked against a real file and not only against fixtures.
+    path = os.path.join(ROOT, "docs", "plans", "2026-07-06-plan-self-enforcement.md")
+    text = open(path, encoding="utf-8").read()
+    titles = [t for (t, _s, _i), _sec in plan_lint._phase_sections(text)]
+    assert [t.split(" (")[0] for t in titles] == [
+        "Phase 1 — Session-mode-aware unattended authority",
+        'Phase 2 — README "Unattended authority" + canonical bypass spelling',
+        "Phase 3 — Posture visibility in the generated driver",
+        "Phase 4 — conductor gate lint + freeze covers the assertions source",
+        "Phase 5 — Single-sourced identifiers: run-branch name + default-branch",
+        "Phase 6 — conductor driver install|status",
+    ]
+
+
 # --- **ADRs:** pointer line (0.9.0) ----------------------------------------------------
 # Live finding 2026-08-01: two architectural decisions existed ONLY in ADRs, so nothing
 # carried them to a worker resuming a later phase, which could undo either while the
@@ -431,6 +692,36 @@ def test_phase_check_cli_names_prepare_as_the_fix(tmp_path, capsys):
     assert "/conductor:prepare" in err
 
 
+def test_phase_check_cli_names_prepare_in_the_recorded_hosts_own_form(
+    tmp_path, monkeypatch, capsys
+):
+    """The remedy line is a command an operator is meant to TYPE, and the two hosts do not
+    spell one the same way. A literal here is a Claude slash command: printed to a Codex
+    operator it names something their host cannot invoke, so the one actionable sentence the
+    failure carries sends them nowhere.
+
+    Every expected string comes from the adapters, so a hardcoded remedy fails the loop on
+    whichever host it is not.
+    """
+    from conductor.hosts import base, runhost
+
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    text = GOOD_PLAN.replace("**ADRs:** none\n", "")
+    renderings = {
+        h: base.load(h).native_invocation("conductor:prepare") for h in base.HOST_IDS
+    }
+    assert len(set(renderings.values())) == len(renderings), renderings
+    for host_id in base.HOST_IDS:
+        repo, plan = _repo_with_plan(tmp_path / host_id, text)
+        runhost.record(str(repo), host_id)
+        assert plan_lint.main([plan, "--phase", _P2]) == 1
+        err = capsys.readouterr().err
+        assert renderings[host_id] in err, (host_id, err)
+        for other_id, other in renderings.items():
+            if other_id != host_id:
+                assert other not in err, (host_id, err)
+
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -447,3 +738,129 @@ def test_this_repos_own_current_dialect_plans_lint_clean():
     for path in plans:
         text = open(path, encoding="utf-8").read()
         assert plan_lint.lint(text) == [], os.path.basename(path)
+
+
+# --------------------------------------------------------------------- host-derived recipe
+#
+# A1. The recipe needles used to be the literal tuple ("/code-review", "codex", "merge-gate",
+# "closes #"). Two of those four name ONE host: the opposite-host reviewer and the invocation
+# form of the review command. On a Codex-hosted run the opposite host is Claude, so a plan
+# whose recipe correctly says "claude review" failed a lint that demanded the substring
+# "codex" — the lint rejected the only correct plan it could have been given.
+
+CODEX_HOSTED_PLAN = GOOD_PLAN.replace(
+    "/code-review per task", "$code-review per task"
+).replace("codex review ×2", "claude review ×2")
+
+
+def test_claude_hosted_recipe_still_passes_unchanged():
+    # The regression floor: today's plan text, today's verdict.
+    assert plan_lint.lint(GOOD_PLAN, host_id="claude") == []
+
+
+def test_codex_hosted_recipe_naming_claude_as_reviewer_passes():
+    assert plan_lint.lint(CODEX_HOSTED_PLAN, host_id="codex") == []
+
+
+def test_a_codex_hosted_plan_that_names_codex_as_its_own_reviewer_fails():
+    # Same-host review is the defect the opposite-host policy exists to prevent, and it is
+    # exactly what a plan copied from a Claude run would say.
+    reasons = plan_lint.lint(GOOD_PLAN, host_id="codex")
+    assert "recipe-missing:claude" in reasons
+
+
+def test_a_claude_hosted_plan_that_names_claude_as_its_own_reviewer_fails():
+    reasons = plan_lint.lint(CODEX_HOSTED_PLAN, host_id="claude")
+    assert "recipe-missing:codex" in reasons
+
+
+def test_the_review_command_needle_is_rendered_in_the_hosts_own_form():
+    assert plan_lint.recipe_needles("claude")[0] == "/code-review"
+    assert plan_lint.recipe_needles("codex")[0] == "$code-review"
+
+
+def test_the_reviewer_needle_is_always_the_opposite_host():
+    assert "codex" in plan_lint.recipe_needles("claude")
+    assert "claude" in plan_lint.recipe_needles("codex")
+    assert "claude" not in plan_lint.recipe_needles("claude")
+    assert "codex" not in plan_lint.recipe_needles("codex")
+
+
+def test_the_host_neutral_needles_are_identical_on_both_hosts():
+    shared = set(plan_lint.recipe_needles("claude")) & set(
+        plan_lint.recipe_needles("codex")
+    )
+    assert shared == {"merge-gate", "closes #"}
+
+
+def test_lint_defaults_to_the_recorded_host_when_none_is_passed(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_HOST", "codex")
+    assert plan_lint.lint(CODEX_HOSTED_PLAN) == []
+    assert "recipe-missing:claude" in plan_lint.lint(GOOD_PLAN)
+
+
+def test_an_unknown_host_is_refused_rather_than_silently_linted_as_claude():
+    with pytest.raises(Exception) as excinfo:
+        plan_lint.recipe_needles("gemini")
+    assert "gemini" in str(excinfo.value)
+
+
+# Every host case above hands `lint` its answer — as `host_id=` or through `$CONDUCTOR_HOST`.
+# The CLI derives it instead, from the PLAN'S OWN repo, and that derivation had no coverage.
+
+
+def _repo_with_plan(tmp_path, text):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, timeout=30)
+    plan = repo / "plan.md"
+    plan.write_text(text, encoding="utf-8")
+    return repo, str(plan)
+
+
+def test_the_cli_derives_claude_for_a_repo_with_nothing_recorded(
+    tmp_path, monkeypatch, capsys
+):
+    """No `host_id=`, no `$CONDUCTOR_HOST`, no `.conductor/host`: the pre-A1 state, which must
+    keep linting for a Claude-hosted run and keep demanding a Codex reviewer."""
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    _repo, good = _repo_with_plan(tmp_path, GOOD_PLAN)
+    assert plan_lint.main([good]) == 0
+
+    _repo2, codex_plan = _repo_with_plan(tmp_path / "b", CODEX_HOSTED_PLAN)
+    assert plan_lint.main([codex_plan]) == 1
+    assert "recipe-missing:codex" in capsys.readouterr().err
+
+
+def test_the_cli_derives_codex_from_the_repos_durable_recording(
+    tmp_path, monkeypatch, capsys
+):
+    """The same derivation with the recording as its only input — no environment at all. A
+    Codex-hosted plan passes and a copied Claude-hosted one is refused for naming its own
+    host as reviewer."""
+    from conductor.hosts import runhost
+
+    monkeypatch.delenv("CONDUCTOR_HOST", raising=False)
+    repo, codex_plan = _repo_with_plan(tmp_path, CODEX_HOSTED_PLAN)
+    runhost.record(str(repo), "codex")
+    assert plan_lint.main([codex_plan]) == 0
+
+    (repo / "claude-plan.md").write_text(GOOD_PLAN, encoding="utf-8")
+    assert plan_lint.main([str(repo / "claude-plan.md")]) == 1
+    assert "recipe-missing:claude" in capsys.readouterr().err
+
+
+def test_plan_lint_and_the_ledger_parser_agree_on_phases():
+    # plan-lint grades the phases `convert` will create issues for; if the two splitters
+    # disagree, a lint-clean plan gets a phase issue for a fenced example (or loses one)
+    from ledger import sync
+
+    text = (
+        _fenced("```md", "```", body=_FENCED_PHASE_EXAMPLE)
+        + "\n## Phase 3 — Glue (A9)\n\n- [ ] wire it up\n"
+    )
+    lint_titles = [t for (t, _s, _i), _sec in plan_lint._phase_sections(text)]
+    ledger_titles = [p["title"] for p in sync.parse_plan_md(text)["phases"]]
+    assert lint_titles == ledger_titles

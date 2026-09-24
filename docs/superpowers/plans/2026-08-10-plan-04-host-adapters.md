@@ -234,7 +234,9 @@ Contract tests are parametrized over `("claude", "codex")` wherever the contract
 
 **Design note for the implementer.** The roadmap's protocol block (roadmap lines 309–326) lists twelve members and the design calls them "eleven adapter capabilities" (design lines 85–95). Neither count survives contact with the ground truth. The final surface is nineteen members; §"Where this plan corrects the roadmap and the design" justifies each addition. Write the Protocol with every member now, as `...` bodies, so later tasks fill in implementations against a fixed interface rather than growing the interface underneath each other.
 
-`id` is not merely a label: **`adapter.id` is also the basename of the host's executable** (`claude`, `codex`). Tasks 7 and 8 rely on that, and Task 2 asserts it, so it cannot drift.
+`id` is not merely a label: **`adapter.id` is also the basename of the host's LAUNCHER PATH** (`claude`, `codex`). Task 2 asserts it, so it cannot drift.
+
+**It is a fact about the path Conductor invokes, and NOT a fact about the running process.** Claude's `~/.local/bin/claude` is a symlink into `~/.local/share/claude/versions/<version>`, so the launcher's basename is `claude` while every resulting process's `comm` and `exe` basename is the version string. Use this for building an argv, never for recognising a process: **Task 7 (liveness) used to rely on it and no longer does** — see the deletion note in that task — and any future use of it as a process predicate is the banned `pgrep` guard returning in a new form.
 
 - [ ] **Step 1: Create the package markers**
 
@@ -464,7 +466,8 @@ class DispatchResult:
 class HostAdapter(Protocol):
     """Everything that genuinely differs between Claude Code and Codex.
 
-    ``id`` is also the basename of the host's executable. Tasks 7 and 8 depend on that.
+    ``id`` is also the basename of the host's LAUNCHER PATH — not of the running process,
+    whose name is the version string on Claude. Task 8 depends on that; Task 7 must not.
     """
 
     id: str
@@ -805,7 +808,13 @@ _ROOT_ENV = {"claude": "CLAUDE_PLUGIN_ROOT", "codex": "CODEX_PLUGIN_ROOT"}
 
 @pytest.mark.parametrize("host_id", HOSTS)
 def test_id_is_the_executable_basename(host_id, fake_host):
-    """Tasks 7 and 8 match live processes by this basename. If it drifts, both break."""
+    """The LAUNCHER PATH's basename, which is what every argv builder invokes.
+
+    NOT a process predicate. Task 7 was specified to match live processes by this basename
+    and that specification was deleted 2026-08-27: a Claude session's process name is its
+    version string, so the match returns False for every real session and fails OPEN. Task 8
+    still uses it; Task 7 must not, and neither must anything added later.
+    """
     fake_host(host_id)
     adapter = base.load(host_id)
     assert os.path.basename(adapter.executable()) == adapter.id
@@ -2257,9 +2266,40 @@ git commit -m "conductor/hosts/{base,claude,codex}.py — permission postures + 
 
 **Why the identity carries start ticks.** A bare PID is not an identity. Between one heartbeat and the next, the kernel can hand the same PID to an unrelated process, and a lease check that trusts a bare PID reports a dead worker as alive — which is exactly the case Plan 02's residual list calls "expiry is necessary but never sufficient". Field 22 of `/proc/<pid>/stat` is the process start time in clock ticks since boot; a PID plus its start time is unique for the machine's uptime. Parsing that field requires care: field 2 (`comm`) is parenthesised and may itself contain spaces and parentheses, so the parse splits on the **last** `)` and indexes from there.
 
-**Why liveness is per-host and not shared.** `proc.py` knows no host name — it is process-table mechanics, and sharing mechanics is fine. The *predicate* "is this one of my processes" is per-host: each adapter matches a live process by its own executable basename, which is `adapter.id` (asserted in Task 2). That is what makes `ClaudeAdapter.process_alive` and `CodexAdapter.process_alive` genuinely different functions rather than one function with a parameter.
+> **DELETED 2026-08-27 — the executable-basename predicate. Do not reinstate it.**
+>
+> This paragraph used to read: *"The predicate 'is this one of my processes' is per-host: each
+> adapter matches a live process by its own executable basename, which is `adapter.id` (asserted
+> in Task 2). That is what makes `ClaudeAdapter.process_alive` and `CodexAdapter.process_alive`
+> genuinely different functions rather than one function with a parameter."*
+>
+> **It is false for Claude, and it fails OPEN.** The Claude Code binary is named after its
+> VERSION, not after the product, so both `comm` and the `exe` basename of a real session read
+> `2.1.227` / `2.1.241` / `2.1.246` — never `claude`. Measured on the machine this project is
+> developed on: six live Claude sessions, `pgrep -x claude` matched **one**, and that one was a
+> shim, not a session
+> (`docs/reviews/2026-08-27-interactive-identity-probe.md` §Part 2).
+>
+> A `process_alive` built on it therefore returns `False` for every live human session. `False`
+> is the exit proof: the caller concludes nobody is there, clears the ownership record, and the
+> cron driver fires into an occupied worktree. Silent on Codex, where the predicate happens to
+> hold, and data-losing on Claude — the worst possible shape, because the host it is broken on
+> is the host it will be tested least on.
+>
+> It is also **process-name matching**, which is banned outright on both hosts. It is the same
+> mistake as the deleted `pgrep -f 'claude'` guard wearing a narrower mask: that guard matched
+> Conductor's own shells because their argv mentions `~/.claude/`, and this one matches nothing
+> at all. Over-match and under-match are the two halves of one wrong question.
+>
+> **What replaced it, with no name predicate at all:** `starttime` already answers "is this the
+> same process I recorded", which is the only question ownership asks. "Is this one of *my*
+> host's processes" is answered by `OwnerRecord.host` — a fact Conductor wrote down — never by
+> interrogating the process table. See `conductor/hosts/proc.py` and
+> `ClaudeAdapter.process_alive` / `CodexAdapter.process_alive` as shipped.
 
-Handing a Codex identity to the Claude adapter **raises**, it does not return `False`. Returning `False` would be a second fail-open: a caller asking the wrong adapter would conclude the worker had exited and take over a live run.
+**Why liveness is per-host and not shared.** `proc.py` knows no host name — it is process-table mechanics, and sharing mechanics is fine. What differs per host is the KERNEL ARTIFACT that proves a session live, and the two are not variations of one function: Claude offers only `(pid, starttime, boot_id)` from `/proc`, because it holds no locks and its socket is not one-per-session; Codex offers no usable pid at all but holds an exclusive `flock` on `$CODEX_HOME/thread-writer-locks/<thread-id>.lock` for the session's life, which is strictly stronger and gives two positive exit proofs instead of one (the file is deleted on a clean exit; on `SIGKILL` the file survives but the kernel drops the lock). Forcing one identity format onto both would mean recording the Codex *process* id, which is many-to-one against threads — one Codex process was observed holding two thread locks — and would discard the better proof for uniformity.
+
+Handing a Codex identity to the Claude adapter returns **`None`**, not `False` and not an exception. `False` would be a second fail-open: a caller asking the wrong adapter would conclude the worker had exited and take over a live run. Raising was the original specification and is also wrong here, for a reason the probe surfaced: `identity_is_live` is consulted on paths that must degrade to "cannot tell" rather than abort, and routing the third answer through an exception makes every caller re-derive the tri-state with a `try`. `None` says exactly what is true — this adapter cannot interpret that identity — and every consumer already treats `None` as occupied.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2393,17 +2433,22 @@ def test_pid_reuse_does_not_read_as_alive(host_id, live_host_process):
     assert adapter.process_alive(forged) is False
 
 
-@pytest.mark.parametrize("host_id", HOSTS)
-def test_a_live_process_that_is_not_this_host_reads_as_dead(host_id, live_host_process):
-    """A recycled PID now held by some unrelated program is not our worker."""
-    adapter = base.load(host_id)
-    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
-    try:
-        forged = f"{host_id}:{other.pid}:{proc.start_ticks(other.pid)}"
-        assert adapter.process_alive(forged) is False
-    finally:
-        other.kill()
-        other.wait(timeout=10)
+# DELETED 2026-08-27 along with the predicate it enforced:
+#
+#     def test_a_live_process_that_is_not_this_host_reads_as_dead(host_id, live_host_process):
+#         """A recycled PID now held by some unrelated program is not our worker."""
+#         other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+#         forged = f"{host_id}:{other.pid}:{proc.start_ticks(other.pid)}"
+#         assert adapter.process_alive(forged) is False
+#
+# This test is the executable-basename check's only support, and it is unsound: it forges an
+# identity with a start-tick value it reads from the SAME live process, so the only thing that
+# can make it go red is the name predicate. The case it claims to cover — "a recycled PID now
+# held by some unrelated program" — is already covered without any name matching by
+# `test_pid_reuse_does_not_read_as_alive`, because a recycled pid has a DIFFERENT start time by
+# construction. A pid whose start time still matches the recorded one IS the recorded process;
+# there is no such thing as a live process that matches the tuple and is nevertheless somebody
+# else. Do not restore it. See the deletion note under "Why liveness is per-host and not shared".
 
 
 @pytest.mark.parametrize("host_id", HOSTS)
@@ -2439,7 +2484,7 @@ def test_process_identity_of_a_missing_pid_raises(host_id):
 Run: `pytest tests/conductor/hosts/test_liveness.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'conductor.hosts.proc'`
 
-**Falsifier:** make `CodexAdapter.process_alive` `return False` unconditionally — `test_a_live_host_process_reads_as_alive[codex]` fails. Drop the start-ticks comparison and `test_pid_reuse_does_not_read_as_alive` fails for both hosts. Drop the executable-basename check and `test_a_live_process_that_is_not_this_host_reads_as_dead` fails for both hosts. Change `parse_start_ticks` to `line.split()[21]` and `test_start_ticks_survives_a_command_name_containing_spaces_and_parentheses` fails.
+**Falsifier:** make `CodexAdapter.process_alive` `return False` unconditionally — `test_a_live_host_process_reads_as_alive[codex]` fails. Drop the start-ticks comparison and `test_pid_reuse_does_not_read_as_alive` fails for both hosts. Drop the `boot_id` comparison and a record written before a reboot reads as live. Change `parse_start_ticks` to `line.split()[21]` and `test_start_ticks_survives_a_command_name_containing_spaces_and_parentheses` fails. (The fourth falsifier here used to be "drop the executable-basename check"; the check itself was deleted 2026-08-27 — see the note above.)
 
 - [ ] **Step 3: Write the process-table mechanics**
 
@@ -2556,30 +2601,34 @@ def parse_identity(identity: str, *, host_id: str) -> tuple[int, int]:
 Append to **both** `ClaudeAdapter` and `CodexAdapter` — written out in each module, not shared, because the predicate is the host-specific part:
 
 ```python
-    def _is_own_process(self, pid: int) -> bool:
-        """Whether ``pid`` is one of THIS host's processes.
-
-        Matches on the executable basename, which equals ``self.id``. Deliberately narrower
-        than the shipped guard: ``pgrep -f 'claude'`` (conductor/resume_script.py:214) matches
-        the whole command line, so any process whose argv merely CONTAINS the string — a
-        python process running out of ~/.claude/conductor, for instance — counts as a live
-        Claude. Token-basename matching does not.
-        """
-        return any(os.path.basename(token) == self.id for token in proc.cmdline(pid))
-
     def process_identity(self, pid: int) -> str:
-        """``"<host>:<pid>:<start-ticks>"``. Plan 02 stores this verbatim in owner.lock."""
-        return f"{self.id}:{pid}:{proc.start_ticks(pid)}"
+        """``"<host>:<pid>:<start-ticks>:<boot-id>"``. Stored verbatim in owner.json."""
+        return f"{self.id}:{pid}:{proc.start_ticks(pid)}:{proc.boot_id()}"
 
-    def process_alive(self, identity: str) -> bool:
-        pid, ticks = base.parse_identity(identity, host_id=self.id)
-        try:
-            if proc.start_ticks(pid) != ticks:
-                return False  # the pid was recycled
-        except proc.ProcessGone:
-            return False
-        return self._is_own_process(pid)
+    def process_alive(self, identity: str) -> bool | None:
+        """Tri-state. NO NAME PREDICATE — see the deletion note in this task's preamble."""
+        return proc.pid_identity_liveness(identity, scheme=self.id)
 ```
+
+> **DELETED 2026-08-27 — `_is_own_process`. Do not reinstate it.** It read:
+>
+> ```python
+>     def _is_own_process(self, pid: int) -> bool:
+>         """Whether ``pid`` is one of THIS host's processes.
+>
+>         Matches on the executable basename, which equals ``self.id``. Deliberately narrower
+>         than the shipped guard: ``pgrep -f 'claude'`` matches the whole command line, so any
+>         process whose argv merely CONTAINS the string counts as a live Claude. Token-basename
+>         matching does not.
+>         """
+>         return any(os.path.basename(token) == self.id for token in proc.cmdline(pid))
+> ```
+>
+> The docstring's diagnosis of `pgrep -f` is right and its remedy is wrong. "Narrower" was the
+> wrong axis: `pgrep -f 'claude'` over-matches to 22 processes including Conductor's own shells,
+> and basename matching under-matches to zero live sessions, because the Claude binary's
+> basename is its version string. Narrowing a name match does not fix a name match. Nothing in
+> the shipped adapters calls `proc.cmdline` for a liveness decision, and nothing should.
 
 Add `from conductor.hosts import base, proc` to both adapter modules' imports.
 

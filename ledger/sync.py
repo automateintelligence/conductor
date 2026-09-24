@@ -1,4 +1,5 @@
 import re
+from collections.abc import Iterator
 from typing import Any
 
 from ledger import gate_link
@@ -46,12 +47,104 @@ def _phase_heading(raw: str) -> tuple[str, str, list[str]] | None:
     return title, status, _assertion_tokens(title)
 
 
+# CommonMark fence: 3+ backticks or tildes, indented up to 3 spaces, optional info string.
+_FENCE = re.compile(r"^ {0,3}(?P<f>`{3,}|~{3,})(?P<info>.*)$")
+
+
+def _opens_fence(m: re.Match[str]) -> bool:
+    """Whether a fence-shaped line actually OPENS a fenced block (CommonMark §4.5).
+
+    A backtick fence's info string may not contain a backtick — ```` ```md`x ```` is inline
+    code in a paragraph, not a fence. A tilde fence's info string may, and that asymmetry is
+    the spec's, not a shortcut here. Accepting any info text let a line that opens no fence in
+    any renderer open one in this parser, which then SUPPRESSED every marker finding to the end
+    of the phase: a false negative, and the quietest possible failure for a hard check."""
+    return not (m.group("f")[0] == "`" and "`" in m.group("info"))
+
+
+def _fence_scan(text: str) -> Iterator[tuple[int, str, bool, str | None]]:
+    """(line-start offset, line without its newline, inside-a-fenced-block, fence still open
+    after this line) per line.
+
+    THE fence state machine for plan parsing. The section splitter (`_h2_headings`, used by
+    this module, `phase_done` and plan-lint) and plan-lint's per-line marker check all read
+    it, so "what is fenced" cannot mean two things between the lint and the ledger. A fence's
+    own delimiter lines count as inside: they are markup, never plan content.
+
+    A fence closes only on the SAME character, run at least as long, and nothing but
+    whitespace after it — so a ``` inside a ~~~ block, and a ``` inside a ```` block, are
+    both content. Plans document markdown, so nested fences are ordinary here.
+
+    An UNTERMINATED fence runs to the end of `text`, which is what CommonMark does with an
+    unclosed fence at the end of its container. It is also the safe direction for the marker
+    check: that check is a hard failure, so a missed finding costs a warning nobody got, while
+    a false one costs a legitimate plan its exit 0. The fourth element is what lets the
+    splitter take the OPPOSITE reading — see `_closed_fence_offsets`.
+    """
+    fence: str | None = None
+    pos = 0
+    for line in text.split("\n"):
+        m = _FENCE.match(line)
+        if fence is None:
+            if m is not None and _opens_fence(m):
+                inside = True
+                fence = m.group("f")
+            else:
+                inside = False
+        else:
+            inside = True
+            if (
+                m is not None
+                and m.group("f")[0] == fence[0]
+                and len(m.group("f")) >= len(fence)
+                and not m.group("info").strip()
+            ):
+                fence = None
+        yield pos, line, inside, fence
+        pos += len(line) + 1
+
+
+def _closed_fence_offsets(text: str) -> set[int]:
+    """Line-start offsets of lines inside a CLOSED fenced block, delimiters included.
+
+    Closed only, and that asymmetry against plan-lint's `_unfenced_lines` is the point. The
+    splitter reads the WHOLE plan, so an unterminated fence would run past every following
+    heading and merge
+    the rest of the file into one phase — a forgotten ``` costing the plan its remaining
+    phases, their pointers reported as duplicates of the phase that swallowed them. A heading
+    is markup strong enough to bound the damage: an unterminated fence keeps suppressing the
+    marker check to the end of ITS OWN section (`_unfenced_lines`, which never sees more than
+    one section) while the headings after it stay headings."""
+    out: set[int] = set()
+    pending: list[int] = []
+    for pos, _line, inside, still_open in _fence_scan(text):
+        if inside:
+            pending.append(pos)
+        # Nothing open after this line, so any pending fence CLOSED on it.
+        if still_open is None:
+            out.update(pending)
+            pending.clear()
+    # A leftover `pending` is an unterminated fence — deliberately left unfenced.
+    return out
+
+
+def _h2_headings(text: str) -> list[re.Match[str]]:
+    """Every H2 in ``text`` that is a real heading: an H2 inside a CLOSED fenced block is
+    example text and is skipped. THE section splitter's heading list — ``parse_plan_md``,
+    ``phase_done`` and plan-lint all split on it, so the phases plan-lint grades are exactly
+    the phases ``convert`` creates issues for and the worker ticks. A skipped heading does not
+    end the enclosing section either: the fence it sits in is part of that section's body.
+    An UNTERMINATED fence hides nothing (see ``_closed_fence_offsets``)."""
+    fenced = _closed_fence_offsets(text)
+    return [m for m in _H2_ANY.finditer(text) if m.start() not in fenced]
+
+
 def parse_plan_md(text: str) -> dict[str, Any]:
     title_match = _H1.search(text)
     title = title_match.group(1).strip() if title_match else ""
 
     phases: list[dict[str, Any]] = []
-    headings = list(_H2_ANY.finditer(text))
+    headings = _h2_headings(text)
     for i, m in enumerate(headings):
         parsed = _phase_heading(m.group(1))
         if parsed is None:

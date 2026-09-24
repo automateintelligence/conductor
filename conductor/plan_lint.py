@@ -17,6 +17,8 @@ import re
 import sys
 from collections.abc import Iterator
 
+from conductor.hosts import runhost
+from conductor.hosts.base import load, opposite
 from ledger import sync
 
 _NORMATIVE = re.compile(r"(?im)^\s*(?:[>*-]\s*)*\*{0,2}normative spec\*{0,2}\s*:")
@@ -50,9 +52,28 @@ _EMPHASIS = " \t\r*`_"
 _ADR_DIRS = ("docs/adr", "docs/ADR", "docs/adrs", "docs/decisions")
 
 
+def _unfenced_lines(section: str) -> Iterator[str]:
+    """The section's lines with fenced code blocks removed, newlines stripped.
+
+    Scope is one phase section — every caller iterates per section — so a fence someone
+    forgot to close can silently swallow at most the rest of its own phase, never the file.
+    """
+    for _pos, line, inside, _open in sync._fence_scan(section):
+        if not inside:
+            yield line
+
+
 def _phase_sections(text: str) -> Iterator[tuple[tuple[str, str, list[str]], str]]:
-    """Yield ((title, status, assertion-ids), section-body) per phase heading."""
-    headings = list(sync._H2_ANY.finditer(text))
+    """Yield ((title, status, assertion-ids), section-body) per phase heading.
+
+    An H2 inside a CLOSED fenced block is EXAMPLE TEXT, not a heading, and is skipped. This
+    happens during the split, not after it: filtering the lines of an already-split section
+    (what `_unfenced_lines` does for the marker check) is too late — a fenced
+    `## Phase example (A99)` had already become a section of its own, and every per-phase
+    requirement it could not satisfy became a hard failure against a heading nobody wrote as
+    a phase. A skipped heading does not end the enclosing phase's section either; the fence
+    it sits in is part of that phase's body, where the marker check already ignores it."""
+    headings = sync._h2_headings(text)
     for i, m in enumerate(headings):
         parsed = sync._phase_heading(m.group(1))
         if parsed is None:
@@ -106,9 +127,61 @@ def _adr_refs(value: str) -> tuple[list[str], list[str]]:
 # phases forever). issue-sync's parser stays unchecked-only by design (done work must not
 # respawn sub-issues); only the lint uses this broader form.
 _TASK_ANY = re.compile(r"^- \[[ xX]\] .+$", re.MULTILINE)
-# The per-phase recipe's load-bearing markers: self-review per task, codex review of the PR,
-# the merge gate, and the PR<->phase-issue link. Substring, case-insensitive.
-_RECIPE_NEEDLES = ("/code-review", "codex", "merge-gate", "closes #")
+# A task-shaped line whose marker is neither ` ` nor `x`/`X` is counted as NOTHING: it is
+# not a task (issue-sync's `_TASK` is `^- \[ \] (.+)$`, so no sub-issue is ever created for
+# it), not done, and not tickable (phase-done's `_UNTICKED` rewrites `- [ ]` only, so the
+# marker survives every phase-done forever). The work vanishes silently. `_TASK_ANY` only
+# catches the case where a phase's tasks are ALL non-standard; one `[~]` beside one `[ ]`
+# left nothing to fire at all, which is why this is a hard finding and not a warning.
+# The fix is at lint time, deliberately: teaching `_TASK` to accept `[~]` would spawn
+# sub-issues for half-done work, which is a different — and unrequested — behaviour.
+# Anchored at column 0 exactly like `_TASK`/`_TASK_ANY`, so an INDENTED checkbox is out of
+# scope here for the same reason it is out of scope there: it was never going to become a
+# task, whatever its marker.
+# Matched per UNFENCED line (`_unfenced_lines`), unlike `_TASK`/`_TASK_ANY`, which scan the
+# raw section. That asymmetry is deliberate. Symmetry was the original argument — a column-0
+# `- [ ] x` inside a fence really does become a sub-issue today, so a `[~]` there is a real
+# inconsistency — but this check HARD-FAILS, and those do not. A plan documenting the
+# rejected shape the obvious way (showing it in a fenced example) failed its own lint, which
+# costs more than the misparse it mirrored: matching an existing SILENT bug does not justify
+# a new BLOCKING one. Teaching `_TASK` about fences is a real fix with a different blast
+# radius (it would stop creating sub-issues that today exist), so it is not made here.
+_TASK_ODD_MARKER = re.compile(r"^- \[[^ xX\]\n]\] .+$")
+
+
+# The two markers that mean the same thing on either host: the merge gate, and the
+# PR<->phase-issue link. Substring, case-insensitive.
+_HOST_NEUTRAL_NEEDLES = ("merge-gate", "closes #")
+# The skill a phase's per-task self-review invokes. A NAME, not an invocation — each host
+# renders it in its own form.
+_REVIEW_SKILL = "code-review"
+# The onboarding skill the per-phase ADR failure tells an operator to run, same rule: a
+# plugin-qualified NAME, rendered by the run's host when it is printed.
+_PREPARE_SKILL = "conductor:prepare"
+
+
+def recipe_needles(host_id: str) -> tuple[str, ...]:
+    """The per-phase recipe's load-bearing markers for a run hosted on ``host_id``.
+
+    Two of the four are host-derived, and it matters which two.
+
+    The first is the self-review command, rendered in the host's own invocation form —
+    `/code-review` under Claude, `$code-review` under Codex. A recipe that names the other
+    host's form names something the worker cannot dispatch.
+
+    The second is the REVIEWER, which is always ``opposite(host_id)`` (design line 25). This
+    is the line that made a correct plan fail: the needle was the literal ``"codex"``, so a
+    Codex-hosted plan naming Claude as its reviewer — the only correct thing it could say —
+    was rejected, while a Codex-hosted plan naming *Codex* passed and set up a same-host
+    review. Deriving it inverts both verdicts.
+
+    ``UnknownHost`` on a bad id rather than a fallback: a lint that silently graded a plan
+    against the wrong host's recipe is worse than one that refuses to grade it.
+    """
+    adapter = load(host_id)
+    return (adapter.native_invocation(_REVIEW_SKILL), opposite(host_id)) + (
+        _HOST_NEUTRAL_NEEDLES
+    )
 
 
 def _adr_reasons(title: str, section: str) -> list[str]:
@@ -155,7 +228,11 @@ def lint_phase_adrs(text: str, phase_title: str) -> tuple[list[str], list[str]]:
     return [f"phase-not-found:{phase_title}"], []
 
 
-def lint(text: str, spec_path: str | None = None) -> list[str]:
+def lint(
+    text: str, spec_path: str | None = None, host_id: str | None = None
+) -> list[str]:
+    """Reasons the plan is not fit to drive a run on ``host_id`` (default: this run's host)."""
+    host = host_id or runhost.resolve(os.getcwd())
     reasons: list[str] = []
     if not _NORMATIVE.search(text):
         reasons.append("normative-spec-missing")
@@ -170,6 +247,10 @@ def lint(text: str, spec_path: str | None = None) -> list[str]:
         title = parsed[0]
         if not _TASK_ANY.search(section):
             reasons.append(f"phase-no-tasks:{title}")
+        # The whole line, so the reason is greppable straight back to the source line.
+        for line in _unfenced_lines(section):
+            if _TASK_ODD_MARKER.match(line):
+                reasons.append(f"phase-task-marker-unknown:{title}:{line.rstrip()}")
         if not _SPEC_POINTER.search(section):
             reasons.append(f"phase-no-spec-pointer:{title}")
         # The decisions leg of the same binding. `**ADRs:** none` passes; a MISSING line
@@ -184,7 +265,7 @@ def lint(text: str, spec_path: str | None = None) -> list[str]:
         reasons.append("no-phases")
 
     lowered = text.lower()
-    for needle in _RECIPE_NEEDLES:
+    for needle in recipe_needles(host):
         if needle not in lowered:
             reasons.append(f"recipe-missing:{needle}")
     return reasons
@@ -295,6 +376,12 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"plan-unreadable: {exc}", file=sys.stderr)
         return 2
+    # The plan's OWN repo decides the host, not the caller's cwd: `conductor plan-lint` is run
+    # from anywhere, and the run's recorded host is what `runhost` resolves from that repo.
+    # Resolved once, ahead of both branches, because BOTH of them name a skill back to the
+    # operator and each host writes one differently.
+    root = _project_root(args.plan_md)
+    host = runhost.resolve(root)
     if args.phase is not None:
         # `-` = read the title from stdin. The ONLY form with no quoting failure mode,
         # which matters because the caller is a model composing a shell command around a
@@ -307,11 +394,13 @@ def main(argv: list[str] | None = None) -> int:
         for reason in reasons:
             print(reason, file=sys.stderr)
         if reasons:
+            # Named as THIS host writes it: the line is a remedy an operator is meant to
+            # type, and one host's spelling is not invocable on the other.
             print(
                 f"{args.plan_md}: this phase carries no usable **ADRs:** line, so nothing "
                 "would carry its architectural decisions to the worker. Run "
-                "/conductor:prepare on this repo to backfill the 0.9.0 plan dialect, "
-                "then re-fire.",
+                f"{load(host).native_invocation(_PREPARE_SKILL)} on this repo to backfill "
+                "the 0.9.0 plan dialect, then re-fire.",
                 file=sys.stderr,
             )
         return 1 if reasons else 0
@@ -319,12 +408,12 @@ def main(argv: list[str] | None = None) -> int:
     # resolving it (unreadable dir, vanished path, permission change mid-walk) costs the
     # warnings and nothing else. The lint's verdict is never the warning leg's to change.
     try:
-        warnings = adr_warnings(text, _project_root(args.plan_md))
+        warnings = adr_warnings(text, root)
     except OSError as exc:
         warnings = [f"warn:phase-adr-unresolvable: {exc}"]
     for warning in warnings:
         print(warning, file=sys.stderr)
-    reasons = lint(text, spec_path=args.spec)
+    reasons = lint(text, spec_path=args.spec, host_id=host)
     for reason in reasons:
         print(reason, file=sys.stderr)
     return 1 if reasons else 0

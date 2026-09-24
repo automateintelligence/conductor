@@ -7,10 +7,13 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 
 **Idempotent (amendment B): each step probes durable state first and SKIPS if already done.**
 
-> **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
-> below). Installed plugins are not on `PATH`; if `$CLAUDE_PLUGIN_ROOT` is unset (dev/`--plugin-dir`),
-> run the plugin's `bin/conductor` by absolute path and export `CONDUCTOR_PLUGIN_DIRS` with the
-> spec-craft dir so preflight can see it.
+> **Conductor CLI path:** installed plugins are not on `PATH`, so invoke the CLI by ABSOLUTE path
+> as `<conductor-plugin-root>/bin/conductor` (written `conductor` below). Resolve
+> `<conductor-plugin-root>` in this order: `$CLAUDE_PLUGIN_ROOT` when your host exports it (Claude
+> Code does; Codex has no verified equivalent); otherwise **the directory this `SKILL.md` lives in,
+> two levels up** — `<root>/skills/start/SKILL.md` means `<root>/bin/conductor`. That second form
+> works on every host and never goes stale, because you already know the path you read this from.
+> Then export `CONDUCTOR_PLUGIN_DIRS` with the spec-craft dir so preflight can see it.
 >
 > **Plugin dir vs project (where things live):** the plugin dir is read-only tool code; the **run
 > state and the done-gate live in the PROJECT** — the git repo you invoke conductor from. **Run
@@ -23,10 +26,36 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 > exports `CONDUCTOR_GATE_SLUG` so `conductor gate freeze|lint` and `assert run` resolve that dir
 > during setup, before the goal/run-branch that carry the slug at run time are written.
 
-0. **PREFLIGHT (`conductor preflight`).** Confirm every conducted command resolves (Codex #1):
-   `/spec-craft:*`, `/superpowers:*`, and environment-provided `/code-review`, `/codex`,
-   `/document-release`. Any **missing → STOP** and tell the user to install it (fail-closed,
-   amendment E). Do not launch a loop that dies at the first conducted call.
+0. **PREFLIGHT (`conductor preflight`).** Confirm every conducted command resolves (Codex #1).
+   **Do not re-list the required commands here or in your report — run the command and read what
+   it prints.** It resolves the set for THIS run's host and names every one of them in your
+   host's own invocation form, including the **opposite-host review wrapper**, which is the one
+   requirement that differs: a Claude-hosted run needs the Codex wrapper, a Codex-hosted run
+   needs the Claude one. A list copied into prose is a list that drifts from the checker.
+   The checker has THREE outcomes and **exits non-zero on two of them** — treat its exit status
+   as the decision, never your reading of the report. Any **missing → STOP** and tell the user to
+   install exactly what preflight named. Any **UNVERIFIED → STOP** as well: that skill is present
+   and invocable, but this host cannot establish it is the plugin's — a hand-copied skill
+   directory, or two installed plugins claiming one name — so `install it` is the wrong advice
+   and preflight prints the right one on that line. Pass it on verbatim. Only an `ok` result
+   proceeds (fail-closed, amendment E). Do not launch a loop that dies at the first conducted
+   call, and do not launch one whose conducted skills are not the ones they claim to be.
+0b. **REGISTER OWNERSHIP — only when this run ALREADY EXISTS.** `conductor run owner-busy`
+   first; exit 11 means nothing owns it and you may proceed, exit 0 means something does — read
+   the line it printed, **stop**, and tell the user rather than starting work in a checkout
+   another worker is writing to.
+
+   Then `conductor run own` and release with `conductor run disown` at the end of step 6.
+
+   **Skip both on a genuinely first run** — there is no run record to own yet, and no cron
+   driver either, so nothing can collide. The case this exists for is the RE-INVOCATION this
+   skill is designed to support: `/conductor:start` is reconcile-first and idempotent, so it is
+   normal to run it again on a live run — and by then step 6 has installed a crontab line that
+   fires every twenty minutes. Steps 4 and 5 dispatch subagents that write plans, gate tests and
+   issue state; a fire landing in the middle of that is two workers editing one checkout.
+   `owner-busy` printing `state=free reason=no-run` is the first-run case answering for itself,
+   so running the check unconditionally costs nothing.
+
 1. **Detect spec source**; load spec + Expectations. The **executable-assertion specs** live in
    `<spec>.assertions.md` — the sibling file `/spec-craft:executable-assertions` writes — **not**
    inline in the spec; load them from there if it exists.
@@ -37,13 +66,24 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    point the user at `/spec-craft:expectations` then `/spec-craft:executable-assertions` (or, with
    `--auto-assert`, launch them — which writes `<spec>.assertions.md`).
 3. **Resolve the per-spec gate dir FIRST:** `GATE_DIR="$(conductor gate-dir <spec>)"` (→
-   `assertions/<slug>/`), then export both `CONDUCTOR_GATE_SLUG="$(basename "$GATE_DIR")"` AND
-   `CONDUCTOR_ASSERTIONS_SOURCE="<spec>"` for this whole step. The slug points the build, lint,
-   freeze, and probe at the run's own gate instead of the flat `assertions/` slot; the assertions
-   source **binds the freeze to THIS spec's `<spec>.assertions.md`** — freeze runs here, BEFORE the
-   goal/run_branch that carry the selection at run time are written (steps 5b/6), so without it a
-   repo holding another spec's `docs/specs/*.assertions.md` freezes ambiguously or against the wrong
-   source. **Implement assertions as runnable tests** via `/conductor:assertions-to-tests`
+   `assertions/<slug>/`), export `CONDUCTOR_GATE_SLUG="$(basename "$GATE_DIR")"` for this whole
+   step, and **write the gate's assertions-source pointer and COMMIT it**:
+
+   ```bash
+   mkdir -p "$GATE_DIR" && printf '%s\n' "<spec>" > "$GATE_DIR/.assertions-source"
+   ```
+
+   The slug points the build, lint, freeze, and probe at the run's own gate instead of the flat
+   `assertions/` slot. The pointer **binds the freeze to THIS spec's `<spec>.assertions.md`** —
+   freeze runs here, BEFORE the goal/run_branch that carry the selection at run time are written
+   (steps 5b/6), so without it a repo holding another spec's `docs/specs/*.assertions.md`
+   freezes ambiguously or against the wrong source. It is a TRACKED file for the same reason:
+   `$CONDUCTOR_ASSERTIONS_SOURCE` (still honored, higher precedence) lives for one command and
+   `.conductor/goal.md` is git-ignored, so a baseline resolved through either re-resolves to
+   something else on a fresh clone and `gate verify` reports TAMPERED. Do not export
+   `CONDUCTOR_ASSERTIONS_SOURCE` here — it would win over the pointer and stamp
+   `sources_via: env` into the baseline, which is exactly the run-local binding the pointer
+   exists to avoid. **Implement assertions as runnable tests** via `/conductor:assertions-to-tests`
    (it writes `$GATE_DIR/manifest.yaml` + `$GATE_DIR/tests/`). **SKIP only if
    `start_probe.assertions_ready(expected_ids, "$GATE_DIR/manifest.yaml", <assert-run --level spec
    exit>)` is True** — i.e. the manifest has one entry per `/spec-craft:executable-assertions` id
@@ -64,7 +104,7 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    that gates objective expectations; the spec's spirit and intent — architecture, behaviors,
    qualities — is the actual work, and there is far more of it than the assertions capture.
    The plan MUST carry every item below. `conductor plan-lint` mechanically enforces their
-   **presence** (the floor); the step-4b codex review judges their **substance** — coverage
+   **presence** (the floor); the step-4b opposite-host review judges their **substance** — coverage
    and intent (the same division of labor as the done-gate itself):
    - a `**Normative spec:** <path>` header line (plus the assertions path) directly after the H1,
      stating the spec is normative over the plan on any conflict and that workers read the phase's
@@ -93,16 +133,23 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      BRANCH → `/code-review` per task (against the phase's Spec sections and ADRs, not just the
      diff) →
      commit per task → one PR per phase with **base = the run branch** (`Closes #<phase-issue>`)
-     → codex review ×2 — each run as `/codex $superpowers:requesting-code-review Please provide a
-     read-only, pre-merge review for PR#<pr> against the phase's Spec sections and ADRs` — posted as "Codex
-     review" PR comments → `conductor merge-gate` → merge
+     → **opposite-host review ×2** — each run through the wrapper for the host you are NOT
+     (`conductor preflight` names it), asking for a read-only, pre-merge review of PR#<pr>
+     against the phase's Spec sections and ADRs — posted as PR comments carrying the gate's
+     review marker → `conductor merge-gate` → merge
      into the run branch → `/document-release` → `conductor ledger phase-done`.
+     **Write the reviewer's host NAME into the recipe** (`codex` on a Claude-hosted run,
+     `claude` on a Codex-hosted one). `conductor plan-lint` checks for it and reports
+     `recipe-missing:<host>` when it is absent — naming your OWN host there describes a
+     same-host review, which is the thing the gate exists to prevent.
    SKIP if a plan/milestone exists.
-4b. **LINT + CODEX-REVIEW THE PLAN** — it dictates every phase and must not stay the
+4b. **LINT + OPPOSITE-HOST REVIEW OF THE PLAN** — it dictates every phase and must not stay the
    least-reviewed setup artifact. `conductor plan-lint <plan.md> --spec <spec.md>` must exit 0:
-   fix the plan, never bypass the lint. Then codex-review the plan **against the spec** (does
-   every spec section land in a phase? is intent preserved, not just assertion coverage?) and
-   apply the fixes. SKIP only if both were already done for this plan.
+   fix the plan, never bypass the lint. Then send the plan for an **opposite-host review**
+   **against the spec** (does every spec section land in a phase? is intent preserved, not just
+   assertion coverage?) and apply the fixes. Review it on the host you are NOT — the same
+   independence rule the per-phase recipe follows, for the artifact that dictates every phase.
+   SKIP only if both were already done for this plan.
    **Upgraded conductor while a run was in flight? Rerun `/conductor:prepare` before resuming.**
    A plan written before 0.9.0 has no `**ADRs:**` lines, and an in-flight run never comes back
    through this step — `autodev` step 4b will refuse to claim its phases until the dialect is
@@ -116,8 +163,20 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    reviewed ONCE, by the owner, at the end.
    - **Reconcile-first, EXACT name:** `RB="$(conductor run-branch name <spec>)"` — the
      single-sourced resolver; never derive the slug in prose — then
-     `git ls-remote "$(conductor remote)" "refs/heads/$RB"` — exists → reuse; absent → create off
-     `$(conductor default-branch)` and push. NEVER bind by wildcard scan
+     `git ls-remote "$(conductor remote)" "refs/heads/$RB"` — exists → reuse; absent → create it
+     off the resolved default and push, as ONE `&&` chain so an unresolved default cannot fall
+     through into a branch created off a guess:
+
+     ```bash
+     R="$(conductor remote)" && D="$(conductor default-branch)" \
+       && git fetch "$R" "$D" && git branch "$RB" "$R/$D" && git push "$R" "$RB"
+     ```
+
+     `conductor default-branch` FAILS CLOSED — it prints nothing and exits non-zero when the
+     repo's default cannot be resolved from remote metadata. The `&&` is the enforcement: on a
+     non-zero exit no branch is created. STOP setup there and tell the owner to fix the remote
+     metadata rather than branching off a guess.
+     NEVER bind by wildcard scan
      (`conductor/run-*`): with two active runs a scan grabs the wrong spec's branch.
    - **Stale-run cleanup first:** if `.conductor/run_branch` names a branch that no longer exists
      on the remote (the owner merged the final PR and deleted it — the run is over), remove the
@@ -153,12 +212,22 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    call.** Current CLI builds silently ignore `durable: true`: the response says "Session-only
    (not written to disk…)" and no `scheduled_tasks.json` appears (verified live 2026-07-02). Do
    NOT gate the OS fallback on judging that response — for an unattended run ALWAYS run
-   `conductor driver install --worktree <run-worktree>` (from the repo; project defaults to
-   `CONDUCTOR_HOME`/cwd), then `conductor driver status` to **verify durability** and surface
-   recent failed fires. `driver install` writes the resume script (via `conductor resume-script
-   write`, respecting its inline-owner-env no-clobber guard) AND the marker-tagged crontab lines
-   (via `install-cron`) in one tested step; `driver status` exits non-zero unless a durable
-   driver exists (crontab marker or a matching scheduled task) with a clean recent log tail.
+   `conductor driver install --worktree <run-worktree> --host <this-host>` (from the repo;
+   project defaults to `CONDUCTOR_HOME`/cwd), then `conductor driver status` to **verify
+   durability** and surface recent failed fires. `driver install` writes the resume script (via
+   `conductor resume-script write`, respecting its inline-owner-env no-clobber guard) AND the
+   marker-tagged crontab lines (via `install-cron`) in one tested step; `driver status` exits
+   non-zero unless a durable driver exists (crontab marker or a matching scheduled task) with a
+   clean recent log tail.
+   - **`--host` is `claude` or `codex`, and it is YOUR OWN id — you are the host** executing
+     this skill. State it; do not omit it and do not make the CLI guess. Nothing below this
+     point can work it out: `driver install` runs as a subprocess, Claude Code exports
+     `CLAUDECODE`/`CLAUDE_PLUGIN_ROOT` but the Codex ground truth records no exported
+     equivalent, so "neither variable" is indistinguishable from a plain shell. An omitted
+     `--host` therefore leaves the run on the legacy `claude` default — which on a Codex machine
+     installs a driver that fires an agent that is not there, and logs nothing about it. The
+     recorded answer lands in `<main-root>/.conductor/host` and every later fire, preflight,
+     plan-lint and merge-gate reads it from there.
    - **The resume driver is GENERATED mechanically — never hand-write it.** (`conductor
      resume-script write --project <main-root> --worktree <run-worktree> --out
      <main-root>/.conductor/resume-autodev.sh` is exactly what `driver install` runs;
@@ -170,10 +239,15 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      hand-written generation-time-pinned path did (live-run silent stall 2026-07-05, see
      `docs/reviews/2026-07-05-conductor-tier-b-driver-robustness.md`). It fires `claude -p
      "/conductor:autodev"` from the RUN WORKTREE (never the owner's checkout; autodev, not start —
-     a headless one-shot must do a phase, not register a cron that dies with it), guarding: (a)
-     exit if a claude process already holds the worktree/project cwd (never double-drive); (b)
-     exit once `conductor assert run --level spec` is green; (c) `flock -n
-     <project>/.conductor/resume.lock` for the whole fire.
+     a headless one-shot must do a phase, not register a cron that dies with it), guarding: (a) one
+     driver at a time — `flock -n <project>/.conductor/resume.lock`, held by the driver (never
+     inherited by the worker or its descendants) for the whole fire, which is the ONLY thing that
+     decides it (never a `pgrep` for the host's name: that matched nothing on Codex and matched
+     the driver's own command line on Claude); a lock that cannot be taken for any reason other
+     than contention fails LOUD (`lock-unavailable`, exit 101) instead of skipping; (a2) skip
+     while the run's ownership record names a live worker (`conductor run owner-busy`); (b) exit
+     once `conductor assert run --level spec` is green. Every skip logs `fire-skipped
+     reason=...`, so an exit 0 can never mean "permanently blocked" with nothing on the record.
    - **Machine/run-specific env goes in `<main-root>/.conductor/resume-env.sh`** (gitignored),
      which the driver sources — NEVER inline in the driver, so regeneration can't clobber it. Put
      the owner-owned `CONDUCTOR_MERGE_VERIFY` there (plus any dev-mode `CONDUCTOR_PLUGIN_DIRS` or
@@ -228,8 +302,13 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    - **Surface a stalled driver — silence was the original defect.** On reconcile, run
      `conductor driver status`: it exits non-zero when the durable driver is missing (printing
      why, with the install command) or when recent fires in
-     `<main-root>/.conductor/resume-autodev.log` show `driver-unresolved` / `fire-end rc=`
-     non-zero (the generated driver logs both) — those offending log lines are NAMED verbatim.
+     `<main-root>/.conductor/resume-autodev.log` show `driver-unresolved`, `plugin-list-timeout`
+     (a Codex plugin lookup cut off at its bound — logged before the fire ever starts),
+     `fire-timeout` (the fire showed no progress for its whole silence window and was killed),
+     `fire-unsupervised` (no `ps` on the machine, so nothing bounded the fire),
+     `lock-unavailable` (the driver could not lock at all — not contention),
+     `fire-unkillable` (part of a fire survived SIGKILL; the driver exited anyway) or
+     `fire-end rc=` non-zero (the generated driver logs all seven) — those offending log lines are NAMED verbatim.
      On a non-zero status, WARN the owner loudly — the run has been failing to make
      headless progress. (The driver already fails loud per-fire; the tested status command makes
      a repeated failure visible at the next owner check-in instead of accumulating unnoticed.)
@@ -246,10 +325,15 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    `experiments/E5-end-to-end/recovery.md`).
    **Tell the user one limit:** recurring in-session crons **auto-expire after 7 days** —
    re-invoke `/conductor:start` to extend a longer run (the Tier-B heartbeat does this itself).
-   **Tell the user one gap:** when you resume from the owner's main checkout with a live session
-   open, the Tier-B driver's guard (a) no-ops on every fire (a claude process holds the cwd), so
-   the run makes **zero headless progress until this session goes idle or closes**. Say so
-   explicitly rather than leaving the owner to assume it is progressing.
+   **Tell the user one gap:** an open session does not by itself stop a Tier-B fire — the
+   driver never looks at process names. What stops one is the run's ownership record: while
+   ANY worker holds it (this skill from step 0b to the end of step 6, or an in-session
+   `/conductor:autodev` tick mid-phase), each fire logs `fire-skipped reason=owner-busy` and
+   exits without working, and while another driver fire holds `.conductor/resume.lock` it logs
+   `fire-skipped reason=lock-held`. So the run makes **no headless progress while a session
+   owns it**; fires resume on the first tick after the record is released (`conductor run
+   disown`, or the owner's exit is proven). Say so explicitly rather than leaving the owner to
+   assume it is progressing.
 7. **(Phase 2 only)** start the dispatcher loop — the supervisor that caps concurrency and assigns
    eligible phases to parallel workers. Single-loop needs no cap (`CronCreate` can't overlap fires);
    controlled parallelism is the dispatcher's job, not the cron cadence.

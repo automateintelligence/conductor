@@ -5,6 +5,8 @@ pin the public interface; these unit tests cover the same contract plus the edge
 import os
 import stat
 
+import pytest
+
 from conductor import authority
 
 # ---- RECIPE_PRIVILEGED_OPS: one declared set, each recipe verb a DISTINCT entry ----
@@ -166,6 +168,71 @@ def test_simple_value_round_trips_through_sh(tmp_path):
     assert proc.stdout == "cd backend && pytest -q"
 
 
+# ---- write_resume_env: the values must reach the driver's CHILD processes ----
+#
+# The driver SOURCES this file (resume_script.render: `. "$ENV_FILE"`) and then execs
+# `conductor assert run` and `claude -p /conductor:autodev`. Every variable here except
+# CONDUCTOR_RESUME_CLAUDE_FLAGS is consumed by one of those CHILDREN, not by the driver shell:
+# CONDUCTOR_SPEC_ROOTS and CONDUCTOR_PLUGIN_DIRS by `conductor`, CONDUCTOR_MERGE_VERIFY by
+# `conductor merge` (a grandchild), DOCKER_HOST by the docker CLI below that. A bare
+# `KEY=value` assignment is a SHELL variable: present in the driver, absent from every child.
+#
+# That is why the round-trip test above passed while the feature did nothing under cron — it
+# read the value back in the sourcing shell, which is the one place it was never missing.
+# `export` is the mechanism rather than passing values explicitly on each child's command line
+# because this file is OWNER-OWNED and hand-editable (resume_script's docstring: owner config
+# is never baked into the generated driver). An explicit pass would need the driver template to
+# enumerate every key the owner might set — a TEMPLATE_VERSION bump and a regeneration of every
+# installed driver per new variable, which is the rot this module exists to prevent — and it
+# would still only reach the direct child, not the docker grandchild.
+
+
+def _child_env(env_file: str, var: str) -> str:
+    """The value a CHILD process of the driver sees, having sourced the env file exactly as
+    `resume_script.render` does. The nested `sh -c` is a separate process, so it inherits only
+    what was EXPORTED — the precise distinction the bare assignment lost."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["sh", "-c", f'. "{env_file}" && sh -c \'printf %s "${var}"\''],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_spec_roots_reaches_a_child_process(tmp_path):
+    p = authority.write_resume_env(
+        str(tmp_path), {"CONDUCTOR_SPEC_ROOTS": "docs/specs:docs/superpowers/specs"}
+    )
+    assert _child_env(p, "CONDUCTOR_SPEC_ROOTS") == "docs/specs:docs/superpowers/specs"
+
+
+def test_every_owner_variable_reaches_a_child_process(tmp_path):
+    # the same defect applied to every key this writer emits, not just the new one
+    env = {
+        "CONDUCTOR_MERGE_VERIFY": "cd backend && pytest -q",
+        "CONDUCTOR_PLUGIN_DIRS": "/plugins/a:/plugins/b",
+        "DOCKER_HOST": "unix:///s",
+        "CONDUCTOR_RESUME_CLAUDE_FLAGS": "--settings /path/with space",
+    }
+    p = authority.write_resume_env(str(tmp_path), env)
+    for key, value in env.items():
+        assert _child_env(p, key) == value, key
+
+
+def test_quoting_survives_the_export(tmp_path):
+    # export must not change the serialization contract the driver's unquoted expansion needs
+    p = authority.write_resume_env(
+        str(tmp_path),
+        {"CONDUCTOR_RESUME_CLAUDE_FLAGS": "--settings /path/with space"},
+    )
+    text = open(p).read()
+    assert "CONDUCTOR_RESUME_CLAUDE_FLAGS='--settings /path/with space'\n" in text
+    assert "\"'" not in text  # never KEY="'...'"
+
+
 def test_invalid_key_names_are_rejected(tmp_path):
     import pytest
 
@@ -269,3 +336,74 @@ def test_main_rejects_unknown_subcommand():
 
     with pytest.raises(SystemExit):
         authority.main(["wibble"])
+
+
+# ---- A1: the permission vocabulary belongs to the HOST, not to this module ----
+
+# Literal, never `base.HOST_IDS`: parametrizing over the value under test would let a
+# falsifier that shrinks HOST_IDS DELETE cases instead of failing them.
+A1_HOSTS = ("claude", "codex")
+
+
+def test_the_host_matrix_covers_exactly_the_supported_hosts():
+    from conductor.hosts import base
+
+    assert A1_HOSTS == base.HOST_IDS
+
+
+def test_the_default_host_keeps_the_frozen_claude_contract():
+    """`resolve_posture(mode)` with no host is pinned by frozen assertion A2 and by
+    skills/start/SKILL.md. It must keep meaning exactly what it meant before A1."""
+    assert authority.resolve_posture("bypassPermissions") == "full-bypass"
+    assert authority.resolve_posture("acceptEdits") == "scoped"
+    assert authority.resolve_posture("danger-full-access") == "supervised"
+
+
+def test_codex_sandbox_modes_resolve_on_the_codex_host():
+    assert (
+        authority.resolve_posture("danger-full-access", host="codex") == "full-bypass"
+    )
+    assert authority.resolve_posture("workspace-write", host="codex") == "scoped"
+    assert authority.resolve_posture("read-only", host="codex") == "supervised"
+
+
+def test_a_permission_mode_does_not_transfer_between_hosts():
+    """Claude's `bypassPermissions` grants nothing on a Codex session and vice versa. A mode
+    string that over-grants across hosts is the fail-closed invariant A2 exists to prevent,
+    now with two vocabularies to confuse."""
+    assert authority.resolve_posture("bypassPermissions", host="codex") == "supervised"
+    assert authority.resolve_posture("acceptEdits", host="codex") == "supervised"
+    assert (
+        authority.resolve_posture("danger-full-access", host="claude") == "supervised"
+    )
+    assert authority.resolve_posture("workspace-write", host="claude") == "supervised"
+
+
+@pytest.mark.parametrize("host_id", A1_HOSTS)
+def test_every_host_fails_closed_on_garbage(host_id):
+    for mode in GARBAGE + [None, 0, [], object()]:
+        p = authority.resolve_posture(mode, host=host_id)  # type: ignore[arg-type]
+        assert p == "supervised", (host_id, mode, p)
+
+
+@pytest.mark.parametrize("host_id", A1_HOSTS)
+def test_every_hosts_posture_vocabulary_is_the_shared_closed_set(host_id):
+    from conductor.hosts import base
+
+    for mode in [
+        "bypassPermissions",
+        "acceptEdits",
+        "default",
+        "plan",
+        "read-only",
+        "workspace-write",
+        "danger-full-access",
+    ] + GARBAGE:
+        assert authority.resolve_posture(mode, host=host_id) in base.POSTURES
+
+
+def test_an_unsupported_host_is_refused_rather_than_defaulted_to_claude():
+    from conductor.hosts import base
+
+    with pytest.raises(base.UnknownHost):
+        authority.resolve_posture("bypassPermissions", host="gemini")

@@ -16,8 +16,13 @@ verified end-to-end before it became a skill.)
 repo's artifacts (plan text, issue titles, milestone), so the owner sees every dry-run report
 before `--apply`. Contrast issue-sync/autodev, which never prompt.
 
-> **Conductor CLI path:** invoke it as `"$CLAUDE_PLUGIN_ROOT/bin/conductor"` (written `conductor`
-> below); installed plugins are not on `PATH`. Run from the project root.
+> **Conductor CLI path:** installed plugins are not on `PATH`, so invoke the CLI by ABSOLUTE path
+> as `<conductor-plugin-root>/bin/conductor` (written `conductor` below). Resolve
+> `<conductor-plugin-root>` in this order: `$CLAUDE_PLUGIN_ROOT` when your host exports it (Claude
+> Code does; Codex has no verified equivalent); otherwise **the directory this `SKILL.md` lives in,
+> two levels up** — `<root>/skills/prepare/SKILL.md` means `<root>/bin/conductor`. That second form
+> works on every host and never goes stale, because you already know the path you read this from.
+> Run from the project root.
 
 0. **INVENTORY.** Locate: the spec (with `## Expectations`), `<spec>.assertions.md`, the run's
    done-gate — the per-spec `assertions/<slug>/manifest.yaml` + `.frozen` (`<slug>` =
@@ -39,9 +44,9 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
    plan to compliance — normative-spec header, per-phase `Spec:` pointers, per-phase `**ADRs:**`
    pointers, assertion ids in
    headings (or explicit `gate: none`), `- [ ]` tasks, the per-phase recipe — the spec is
-   normative for content; show the owner the diff before committing it. Then codex-review the
-   plan **against the spec** (does every spec section land in a phase? intent preserved?) and
-   apply fixes. Lint must exit 0 before step 3.
+   normative for content; show the owner the diff before committing it. Then send the plan for an
+   **opposite-host review** — on the host you are NOT — **against the spec** (does every spec
+   section land in a phase? intent preserved?) and apply fixes. Lint must exit 0 before step 3.
    **`**ADRs:**` BACKFILL — this is the migration path for the 0.9.0 plan dialect; dry-run
    FIRST, like everything else here.** Any plan written before 0.9.0 has no `**ADRs:**` lines, so
    EVERY phase now fails lint with `phase-no-adr-pointer:<title>`. Mechanical fix: insert
@@ -65,8 +70,39 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
    for a value that is only delimiters or emphasis.
 3. **LEDGER ALIGNMENT — dry-run FIRST, always.** `conductor ledger align <plan.md>` and show
    the owner the report: matches (by **assertion-id set** — titles lie, id sets don't),
-   renames planned for issues + milestone, unmatched phases/issues, ambiguities. Ambiguities →
-   resolve WITH the owner (never guess; align withholds those renames by design). Then
+   renames planned for issues + milestone, unmatched phases/issues, ambiguities,
+   `gateless_phases` (every `gate: none` phase, for information), `gateless_pairs`,
+   `gateless_unpaired`, and `markerless_issues`. Ambiguities →
+   resolve WITH the owner (never guess; align withholds those renames by design).
+   **PAIRING GATE — the precondition is `gateless_unpaired == []`: do not run `convert` while
+   that bucket has an entry the owner has not explicitly dispositioned.** A `gate: none` phase
+   has no assertion-id set to match on, so align resolves it the way `convert` will — by EXACT
+   title, inside the one milestone convert looks in (the milestone carrying the plan title
+   after `--apply`) — and splits the outcome in two: `gateless_pairs` (an issue already carries the phase
+   heading character for character, so convert reuses it) and `gateless_unpaired` (none does,
+   so convert WILL create one). That second bucket is the whole risk: convert resolves each
+   phase issue by exact title, so a paraphrased issue is missed and a second, duplicate phase
+   issue is created for a phase that already has one. `ledger align` exits nonzero for
+   AMBIGUITY only, so a zero exit does not mean this is handled — read the bucket.
+   `markerless_issues` is the candidate list for making a pairing, **not** part of this gate:
+   it holds every issue with no assertion tokens, which includes every task sub-issue
+   (`convert` creates them with an empty body), so it is **never expected to be empty**.
+   Take exactly one decision per `gateless_unpaired` entry:
+   - some markerless issue IS this phase → **rename the issue to the phase heading exactly**
+     — character for character, em dash and all; this string is the match key, not a label —
+     and, if it sits in a different milestone, move it into the plan's milestone; then re-run
+     the dry run and confirm the phase moved into `gateless_pairs`; or
+   - no existing issue is this phase → the owner says so explicitly, accepting that `convert`
+     will create one. Record the decision: after the fact, a duplicate phase issue created by
+     surprise and an issue created on purpose look identical.
+
+   Both dispositions need the owner, and neither is inferable from the repo — so if no owner is
+   available to decide, **stop and report which phases are waiting on the decision**; never
+   re-run align hoping the bucket empties on its own, and never proceed on the assumption that
+   creating a duplicate is fine. Two issues both carrying a phase heading come back as an
+   ambiguity, not a pair: convert would reuse one of them silently.
+
+   prepare never pairs these itself — same rule as every other match here, never guess. Then
    `conductor ledger align <plan.md> --apply`, then `conductor ledger convert <plan.md>` —
    which now reuses every aligned issue and creates whatever is missing: `conductor-assertions`
    markers and task sub-issues (completed `[x]` tasks never respawn as new sub-issues).

@@ -2,15 +2,19 @@
 
 `run_branch_name` must be a pure deterministic function of the spec path so start and
 autodev can never derive different names for the same spec; `default_branch` must resolve
-the repo's real default (gh, then origin/HEAD) and fail OPEN to `main` — never empty —
-because a downstream `git fetch "$R" ""` would operate on the wrong ref. Mirrors the
-`conductor remote` precedent: one implementation per cross-skill string contract.
+the repo's real default from authoritative remote metadata (gh, then origin/HEAD) and fail
+CLOSED when neither answers — raising, and exiting non-zero from the CLI with NOTHING on
+stdout, rather than substituting a literal (A-DH-6). Never an empty line either, because a
+downstream `git fetch "$R" ""` would operate on the wrong ref. Mirrors the `conductor remote`
+precedent: one implementation per cross-skill string contract.
 """
 
 import os
 import re
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from conductor import branches
 
@@ -101,7 +105,7 @@ def test_non_alnum_leading_stem_falls_back_to_hash_slug():
     assert NAME_RE.fullmatch(name), name
 
 
-# --- default_branch: resolve for real, fail OPEN to main ---
+# --- default_branch: resolve for real, fail CLOSED when unresolvable ---
 
 
 def _git(repo: Path, *args: str):
@@ -175,15 +179,18 @@ def test_default_branch_resolves_origin_head_when_gh_fails(tmp_path, monkeypatch
     assert branches.default_branch() == "trunk"
 
 
-def test_default_branch_falls_open_to_main(tmp_path, monkeypatch):
+def test_default_branch_refuses_when_no_probe_can_answer(tmp_path, monkeypatch):
     stub_bin = _stub_gh(tmp_path)
     repo = _mk_repo(tmp_path, "unresolvable", with_origin_head=False)
     monkeypatch.setenv("PATH", f"{stub_bin}:{os.environ['PATH']}")
     monkeypatch.setenv("CONDUCTOR_HOME", str(repo))
     monkeypatch.chdir(repo)
-    out = branches.default_branch()
-    assert out == "main"
-    assert out != ""  # must-not: never empty
+    with pytest.raises(branches.DefaultBranchUnresolvable) as excinfo:
+        branches.default_branch()
+    message = str(excinfo.value)
+    # must-not: the refusal may not name a literal fallback as the answer
+    assert "main" not in message.split()
+    assert "master" not in message.split()
 
 
 def test_default_branch_prefers_gh_answer(tmp_path, monkeypatch):
@@ -229,13 +236,17 @@ def test_git_probe_answers_for_conductor_home_not_cwd(tmp_path, monkeypatch):
     assert branches.default_branch() == "trunk"
 
 
-def test_default_branch_swallows_any_probe_exception(monkeypatch):
+def test_default_branch_refuses_when_every_probe_raises(monkeypatch):
+    """A probe that explodes is still an unanswered probe: swallow the crash, refuse the
+    answer. Never convert a broken probe into a guessed branch name."""
+
     def boom():
         raise RuntimeError("probe exploded")
 
     monkeypatch.setattr(branches, "_gh_default", boom)
     monkeypatch.setattr(branches, "_git_default", boom)
-    assert branches.default_branch() == "main"
+    with pytest.raises(branches.DefaultBranchUnresolvable):
+        branches.default_branch()
 
 
 # --- CLI dispatch (bin/conductor) ---
@@ -273,9 +284,11 @@ def test_cli_default_branch_resolvable_trunk(tmp_path):
     assert proc.stdout == "trunk\n"
 
 
-def test_cli_default_branch_fails_open_to_main(tmp_path):
+def test_cli_default_branch_refuses_when_unresolvable(tmp_path):
     stub_bin = _stub_gh(tmp_path)
-    repo = _mk_repo(tmp_path, "cli-main", with_origin_head=False)
+    repo = _mk_repo(tmp_path, "cli-unresolvable", with_origin_head=False)
     proc = _cli(repo, stub_bin, "default-branch")
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout == "main\n"
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    # must-not: no branch name, and not even an empty line, on stdout
+    assert proc.stdout == ""
+    assert "default branch" in proc.stderr

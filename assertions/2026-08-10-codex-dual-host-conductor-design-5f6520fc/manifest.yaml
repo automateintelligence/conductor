@@ -1,0 +1,78 @@
+# Done-gate manifest for docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md
+#
+# Gate directory = assertions/<run-key>, and the run key is derived, never typed:
+#   conductor.core.runkey.run_key(normalize_spec_path(repo, <spec>))
+#     -> 2026-08-10-codex-dual-host-conductor-design-5f6520fc
+#   conductor.core.names.derived_names(<run-key>).gate_dir -> assertions/<run-key>
+# which is exactly what conductor.paths.resolve_gate(run_key=...) verifies a run.json against.
+#
+# Run this gate with the slug named explicitly, because `conductor assert run` has no --run
+# flag and the ambient resolver in this checkout still points at the flat self-enforcement gate:
+#   CONDUCTOR_GATE_SLUG=2026-08-10-codex-dual-host-conductor-design-5f6520fc \
+#     ./bin/conductor assert run
+#
+# A-DH-5/6/7 are PRESENT AND RED, deliberately. They govern relocation and merge automation,
+# which the roadmap defers to Track B (docs/superpowers/plans/2026-08-10-codex-dual-host-ROADMAP.md):
+# Plan 00 owns the relocation safety scan, Plan 02 the owner records A-DH-5 variant (b) needs,
+# Plan 05 the resume/finish/heartbeat/status verbs A-DH-7 sweeps, Plan 06 fail-closed
+# default-branch resolution and final-PR protection. Absent, they were hidden in the denominator
+# and the gate read "3/4 green"; present, the gate measures all seven and names what is missing.
+# Each red assertion FAILS with the absent feature and its owning plan in the message — none of
+# them skips, xfails, or passes vacuously. Do not green them by implementing product code here.
+assertions:
+  - id: a-dh-1-host-vocabulary-confined-to-adapters
+    claim: "no Python module outside the host-adapter layer contains a Claude slash-command invocation, a Codex dollar-prefixed skill invocation, CLAUDE_PLUGIN_ROOT, or a host-specific permission or sandbox flag string"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_1_host_vocabulary.py"
+    setup: ""
+    teardown: ""
+    timeout: 60
+    level: spec
+    kind: property
+  - id: a-dh-2-worker-launch-targets-the-recorded-host
+    claim: "for a run whose recorded worker host is H the fire spawns H's executable exactly once with a real argument vector, byte-identical prompt and no session-continuation token, and spawns the opposite host's executable zero times"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_2_worker_launch_targets_recorded_host.py"
+    setup: ""
+    teardown: ""
+    timeout: 180
+    level: spec
+    kind: property
+  - id: a-dh-3-codex-launch-resolves-only-conductor-artifacts
+    claim: "every artifact the Codex worker launch depends on to resolve the autodev skill was shipped or written by Conductor, identified by SKILL.md frontmatter, and follows the package root when it is relocated"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_3_codex_launch_resolves_installed_artifacts.py"
+    setup: ""
+    teardown: ""
+    timeout: 180
+    level: spec
+    kind: contract
+  - id: a-dh-4-host-invocations-are-time-bounded
+    claim: "every adapter-layer entry point that spawns a host process returns within its configured timeout against a hanging host with a non-zero actionable failure and no orphaned child, and reports no timeout against a responsive one"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_4_host_invocations_are_time_bounded.py"
+    setup: ""
+    teardown: ""
+    timeout: 600
+    level: spec
+    kind: property
+  - id: a-dh-5-relocation-refuses-live-run-artifacts
+    claim: "the relocation safety check refuses, before mutating anything, when a live process, a registered linked worktree, or an installed schedule resolves beneath the checkout being relocated"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_5_relocation_refuses_live_run_artifacts.py"
+    setup: ""
+    teardown: ""
+    timeout: 300
+    level: spec
+    kind: property
+  - id: a-dh-6-unresolvable-default-branch-refuses-every-merge
+    claim: "when the repository's default branch cannot be resolved from authoritative remote metadata every automated merge is refused and no code path substitutes a literal fallback branch name, while the same otherwise-eligible merge succeeds against a resolvable default branch named neither main nor master"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_6_unresolvable_default_branch_refuses_merge.py"
+    setup: ""
+    teardown: ""
+    timeout: 600
+    level: spec
+    kind: property
+  - id: a-dh-7-final-pull-request-is-never-completed
+    claim: "no Conductor CLI verb performs, requests, or enables any action that could complete the final integration-to-default pull request, while a phase pull request still merges into its run integration branch and finish refuses the unmerged final pull request"
+    command: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest -p no:cacheprovider assertions/2026-08-10-codex-dual-host-conductor-design-5f6520fc/test_a_dh_7_final_pull_request_is_never_completed.py"
+    setup: ""
+    teardown: ""
+    timeout: 600
+    level: spec
+    kind: property

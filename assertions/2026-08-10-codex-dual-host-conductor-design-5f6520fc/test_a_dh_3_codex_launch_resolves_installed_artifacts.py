@@ -1,0 +1,476 @@
+"""A-DH-3 — the Codex worker launch resolves using only artifacts Conductor installs (contract).
+
+Source: docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
+
+Claim: every artifact the Codex worker launch depends on in order to resolve Conductor's
+autodev skill was written by Conductor itself, so the launch does not depend on any
+pre-existing third-party convention.
+
+The quietest failure in the spec. ``$conductor:autodev`` is a prompting convention a dispatch
+table in ``~/.codex/AGENTS.md`` supplies, and that file is a third-party install — so a launch
+that depends on it works on the author's machine and silently does nothing on a stock Codex.
+The scratch ``HOME`` and ``CODEX_HOME`` here therefore start EMPTY and are snapshotted before
+the fire, so anything the launch resolves through is provably Conductor's own artifact.
+
+WHAT A FIRE IS. The launch is not a Python call: it is the generated Tier-B cron driver
+executing. ``worker_argv``/``launch_prompt`` are declared on the ``HostAdapter`` Protocol and
+implemented by neither adapter, because Track A rejected resolving the executable and the
+prompt at GENERATION time — that is the shape the 2026-07-05 stall had. Track A resolves at
+FIRE time, inside the driver: the Codex driver derives ``CONDUCTOR_SOURCE`` from ``readlink -f``
+of whichever ``conductor`` bin resolves on that fire, never from ``CodexAdapter.source_root()``.
+So this test renders the real driver with the product's own entry point
+(``conductor resume-script write``) and RUNS it, and measures the prompt bytes the fake codex
+recorded.
+
+The package root is at a path chosen at test time and the whole fire is repeated at a SECOND
+test-chosen path. A resolution artifact that does not follow the relocation is a hardcoded
+constant that happens to exist on this machine.
+
+DELIBERATELY MECHANISM-NEUTRAL. The ground-truth review *recommends* emitting an explicit
+``SKILL.md`` path instead of a bare ``$conductor:autodev`` token, but records that as a
+recommendation the plan writer owns, not a decision. Either form passes here: a path named in
+the prompt, or a dispatch/convention file Conductor installed that the prompt's token resolves
+through. What fails is depending on something Conductor did not install.
+
+EVERY DEPENDENCY, NOT ONE GOOD ARTIFACT. The claim is universal — *every* artifact the launch
+depends on was written by Conductor — so finding one valid artifact proves nothing about the
+rest. A prompt reading "do not read <a valid SKILL.md path>; resolve ``$conductor:autodev``
+through the user-installed convention" carries a perfectly good artifact and still depends
+entirely on the absent third-party table. So the prompt's dependencies are enumerated in BOTH
+of the forms a Codex prompt can carry one — a filesystem path, and a ``$``-prefixed dispatch
+token — and each is required to be Conductor's independently:
+``test_every_path_the_prompt_names_is_a_conductor_artifact`` for the first,
+``test_every_dispatch_token_resolves_through_a_conductor_installed_convention`` for the second.
+A token with no Conductor-installed expansion is exactly the quiet failure this assertion
+exists to catch, and it is now a failure whatever else the prompt also says.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+import pytest
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from conductor.hosts import runhost  # noqa: E402  (needs ROOT on sys.path)
+
+SKILL = "autodev"
+
+#: What identifies Conductor's autodev skill. Read out of SKILL.md FRONTMATTER, never off the
+#: filename: a launch pointing at any file that happens to be called SKILL.md would otherwise
+#: pass while resolving to a stranger's skill.
+FRONTMATTER_NAME = re.compile(r"^name:\s*(\S+)\s*$", re.MULTILINE)
+
+#: A Codex dispatch token — the ``$name`` / ``$plugin:name`` prompting convention a table in
+#: ``AGENTS.md`` expands. A prompt carrying one DEPENDS on whatever supplies that table, which is
+#: precisely the third-party dependency this assertion governs.
+DISPATCH_TOKEN = re.compile(r"\$[A-Za-z][\w:-]*")
+
+#: The system directories the generated driver puts on ``PATH`` behind ``$HOME/.local/bin``.
+#: The fire's own ``PATH`` is exactly these (coreutils, python3, the ``env bash`` shebang); the
+#: harness fakes live in the scratch ``$HOME/.local/bin``, which the driver searches FIRST, so a
+#: real ``codex`` or ``conductor`` installed in any of these can never be what the fire runs.
+DRIVER_SYSTEM_PATH = ("/usr/local/bin", "/usr/bin", "/bin")
+
+_FAKE_CODEX = """#!/usr/bin/env python3
+import json, os, sys
+record = {{"argv": sys.argv, "cwd": os.getcwd(), "env": dict(os.environ)}}
+with open({log!r}, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\\n")
+"""
+
+
+class Fire:
+    def __init__(self) -> None:
+        self.package = pathlib.Path()
+        self.home = pathlib.Path()
+        self.codex_home = pathlib.Path()
+        self.before: set[pathlib.Path] = set()
+        self.after: set[pathlib.Path] = set()
+        self.prompt = ""
+        self.argv: list[str] = []
+        self.workdir = pathlib.Path()
+        self.driver_rc: int | None = None
+        self.driver_log = ""
+
+    @property
+    def written_by_conductor(self) -> set[pathlib.Path]:
+        """Files that appeared under the scratch HOME/CODEX_HOME during the fire."""
+        return self.after - self.before
+
+    def is_conductors(self, path: pathlib.Path) -> bool:
+        """Conductor shipped it (under the package root) or wrote it during the fire."""
+        return path in self.written_by_conductor or self.package in path.parents
+
+    @property
+    def diagnosis(self) -> str:
+        return (
+            f"\ndriver rc={self.driver_rc}\ndriver log:\n{self.driver_log or '(empty)'}"
+        )
+
+
+def _snapshot(
+    *roots: pathlib.Path, harness: frozenset[pathlib.Path] = frozenset()
+) -> set[pathlib.Path]:
+    """Every file under ``roots``, by its literal path, except the ``harness``'s own fakes.
+    Deliberately NOT resolved: a symlink planted under the scratch HOME is a file under the
+    scratch HOME, and resolving it would move it out of the snapshot and out of this
+    assertion's reach. The excluded paths are exactly the files the harness created — a
+    recording ``codex`` and a ``conductor`` symlink — never a directory, so anything else
+    appearing beside them is still seen."""
+    return {
+        p for root in roots for p in root.rglob("*") if p.is_file() and p not in harness
+    }
+
+
+def _seed_package_root(root: pathlib.Path) -> None:
+    """Conductor's own shipped tree, copied to a path chosen at test time."""
+    shutil.copytree(ROOT / "skills", root / "skills")
+    (root / "bin").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / "bin" / "conductor", root / "bin" / "conductor")
+    (root / "bin" / "conductor").chmod(0o755)
+
+
+def _fire(label: str) -> Fire:
+    """One fire in a fresh scratch tree. A fire that fails or refuses removes its tree before
+    re-raising: only a returned fire is registered for the module teardown, so nothing else
+    would."""
+    fire = Fire()
+    fire.workdir = pathlib.Path(tempfile.mkdtemp(prefix=f"a-dh-3-{label}-")).resolve()
+    try:
+        return _fire_in(fire)
+    except BaseException:
+        shutil.rmtree(fire.workdir, ignore_errors=True)
+        raise
+
+
+def _fire_in(fire: Fire) -> Fire:
+    fire.package = fire.workdir / "package"
+    fire.home = fire.workdir / "home"
+    fire.codex_home = fire.workdir / "codex-home"
+    project = fire.workdir / "project"
+    worktree = fire.workdir / "worktree"
+    # The harness's fakes live in the scratch `$HOME/.local/bin` — the FIRST directory the
+    # driver puts on PATH — so no binary installed on this machine can shadow them. They are
+    # excluded from the snapshots by exact path, so the host roots still start — and are
+    # asserted — empty of anything else: no AGENTS.md, no skills/, no dispatch convention.
+    bindir = fire.home / ".local" / "bin"
+    for directory in (fire.codex_home, project, worktree, bindir):
+        directory.mkdir(parents=True)
+    _seed_package_root(fire.package)
+
+    log = fire.workdir / "codex.jsonl"
+    log.write_text("", encoding="utf-8")
+    fake = bindir / "codex"
+    fake.write_text(_FAKE_CODEX.format(log=str(log)), encoding="utf-8")
+    fake.chmod(0o755)
+    # `conductor` resolves through PATH to a SYMLINK into the test-chosen package tree. The
+    # driver derives Conductor's source root from `readlink -f` of the bin it resolved, so the
+    # symlink is what makes "the resolution artifact follows the package root" a property of
+    # the product's derivation rather than of an environment variable the test handed it.
+    os.symlink(fire.package / "bin" / "conductor", bindir / "conductor")
+    harness = frozenset({fake, bindir / "conductor"})
+
+    base_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {runhost.HOST_ENV, "CONDUCTOR_HOME", "CODEX_PLUGIN_ROOT"}
+    }
+    base_env["HOME"] = str(fire.home)
+    base_env["CODEX_HOME"] = str(fire.codex_home)
+
+    previous = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(base_env)
+    try:
+        runhost.record(str(project), "codex")
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
+
+    script = project / ".conductor" / "resume-autodev.sh"
+    render = subprocess.run(
+        [
+            str(ROOT / "bin" / "conductor"),
+            "resume-script",
+            "write",
+            "--project",
+            str(project),
+            "--worktree",
+            str(worktree),
+            "--out",
+            str(script),
+        ],
+        env=base_env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert render.returncode == 0, (
+        f"the product refused to render the codex driver "
+        f"(rc={render.returncode}):\n{render.stderr}"
+    )
+
+    # The FIRE's PATH is exactly the system bin dirs, for coreutils, python3 and the script's
+    # own `env bash` shebang. `codex` and `conductor` resolve from the scratch
+    # `$HOME/.local/bin`, which the driver prepends ahead of all of them, so this machine's real
+    # binaries — wherever they are installed — are never what the fire runs.
+    fire_env = dict(base_env)
+    fire_env["PATH"] = os.pathsep.join(DRIVER_SYSTEM_PATH)
+
+    fire.before = _snapshot(fire.home, fire.codex_home, harness=harness)
+    proc = subprocess.run(
+        [str(script)],
+        env=fire_env,
+        cwd=str(fire.workdir),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    fire.driver_rc = proc.returncode
+    fire.after = _snapshot(fire.home, fire.codex_home, harness=harness)
+    log_path = project / ".conductor" / "resume-autodev.log"
+    fire.driver_log = (
+        log_path.read_text(encoding="utf-8", errors="replace")
+        if log_path.is_file()
+        else ""
+    )
+
+    records = [
+        json.loads(line)
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert len(records) == 1, (
+        f"expected one codex launch, recorded {len(records)}{fire.diagnosis}"
+    )
+    fire.argv = records[0]["argv"]
+    # The prompt is whatever the launch put in front of the model: the trailing positional.
+    fire.prompt = fire.argv[-1]
+    return fire
+
+
+_FIRES: dict[str, Fire] = {}
+
+
+def fire_at(label: str) -> Fire:
+    if label not in _FIRES:
+        _FIRES[label] = _fire(label)
+    return _FIRES[label]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup():
+    yield
+    for fire in _FIRES.values():
+        shutil.rmtree(fire.workdir, ignore_errors=True)
+
+
+def _path_tokens(prompt: str) -> list[pathlib.Path]:
+    """Absolute filesystem paths named anywhere in the prompt."""
+    return [
+        pathlib.Path(match.rstrip(".,;:)\"'"))
+        for match in re.findall(r"/[^\s\"']+", prompt)
+    ]
+
+
+def _skill_name(path: pathlib.Path) -> str | None:
+    """The skill a file declares about itself, from SKILL.md frontmatter."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if not text.startswith("---"):
+        return None
+    match = FRONTMATTER_NAME.search(text.split("---", 2)[1])
+    return match.group(1) if match else None
+
+
+def _token_resolvers(fire: Fire, token: str) -> list[pathlib.Path]:
+    """The Conductor-installed files that expand one dispatch ``token`` to autodev.
+
+    A file qualifies only if Conductor wrote it during the fire AND it names the token AND it
+    names a path that declares itself autodev in frontmatter. Naming the token is not enough:
+    a file that mentions ``conductor:autodev`` without saying what it resolves to expands
+    nothing, and accepting it would let any stray mention stand in for the convention.
+    """
+    bare = token.lstrip("$")
+    resolvers = []
+    for installed in sorted(fire.written_by_conductor):
+        try:
+            text = installed.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if bare not in text:
+            continue
+        if any(
+            path.is_file() and _skill_name(path) == SKILL for path in _path_tokens(text)
+        ):
+            resolvers.append(installed)
+    return resolvers
+
+
+def _resolution_artifacts(fire: Fire) -> list[pathlib.Path]:
+    """Every artifact the prompt resolves the autodev skill THROUGH.
+
+    Branch one: a path named in the prompt that declares itself autodev in frontmatter.
+    Branch two (the convention form): a file Conductor installed under the scratch roots that
+    names one of the prompt's dispatch tokens and points at such a file. Both are collected —
+    this assertion does not settle which mechanism the plan writer chooses, and it does NOT
+    stop at the first branch that answers: a prompt can carry a good path AND a dependency on
+    an absent convention at the same time, which is exactly the shape a short-circuit hides.
+    """
+    artifacts = [
+        path
+        for path in _path_tokens(fire.prompt)
+        if path.is_file() and _skill_name(path) == SKILL
+    ]
+    for token in dict.fromkeys(DISPATCH_TOKEN.findall(fire.prompt)):
+        for resolver in _token_resolvers(fire, token):
+            artifacts.extend(
+                path
+                for path in _path_tokens(
+                    resolver.read_text(encoding="utf-8", errors="replace")
+                )
+                if path.is_file() and _skill_name(path) == SKILL
+            )
+    return artifacts
+
+
+@pytest.mark.parametrize("label", ["first", "second"])
+def test_the_fire_launched_the_harness_fake_whatever_the_machine_has_installed(
+    label: str,
+) -> None:
+    """Setup guarantee, independent of this machine. The driver puts ``$HOME/.local/bin`` ahead
+    of every system bin dir, and the harness's fakes live there under the scratch ``HOME`` — so
+    a real ``codex`` or ``conductor`` in ``/usr/local/bin`` is never what the fire launched."""
+    fire = fire_at(label)
+    assert fire.argv[0] == str(fire.home / ".local" / "bin" / "codex"), fire.argv[0]
+
+
+def test_the_scratch_host_roots_start_empty() -> None:
+    """Setup guarantee, asserted rather than assumed: with no AGENTS.md, no skills/ and no
+    dispatch convention present before the fire, nothing the launch resolves through can be a
+    pre-seeded third-party file."""
+    for label in ("first", "second"):
+        fire = fire_at(label)
+        assert fire.before == set(), sorted(fire.before)
+
+
+@pytest.mark.parametrize("label", ["first", "second"])
+def test_the_launch_resolves_through_a_conductor_artifact(label: str) -> None:
+    """Must-contain: a resolution artifact that exists, is readable, is Conductor's own, and
+    identifies the autodev skill by frontmatter rather than by filename."""
+    fire = fire_at(label)
+    artifacts = _resolution_artifacts(fire)
+    assert artifacts, (
+        "the Codex launch names no artifact that resolves to Conductor's autodev skill.\n"
+        f"prompt={fire.prompt!r}\npackage_root={fire.package}\n"
+        f"files Conductor wrote under HOME/CODEX_HOME: {sorted(fire.written_by_conductor)}"
+        f"{fire.diagnosis}"
+    )
+    for artifact in artifacts:
+        assert os.access(artifact, os.R_OK), artifact
+        assert fire.is_conductors(artifact), (
+            f"{artifact} is neither under the package root {fire.package} nor written by "
+            "Conductor during the fire — the launch depends on a foreign artifact"
+        )
+
+
+@pytest.mark.parametrize("label", ["first", "second"])
+def test_no_prompt_dependency_lives_in_a_file_conductor_did_not_write(
+    label: str,
+) -> None:
+    """Must-not-contain: any dependency on a file under the scratch HOME/CODEX_HOME that
+    Conductor did not write."""
+    fire = fire_at(label)
+    scratch = (fire.home, fire.codex_home)
+    foreign = [
+        path
+        for path in _path_tokens(fire.prompt)
+        if any(root in path.parents for root in scratch)
+        and not fire.is_conductors(path)
+    ]
+    assert not foreign, f"prompt depends on non-Conductor artifacts: {foreign}"
+
+
+@pytest.mark.parametrize("label", ["first", "second"])
+def test_every_path_the_prompt_names_is_a_conductor_artifact(label: str) -> None:
+    """Must-not-contain, and the universal half of the claim: EVERY filesystem path the prompt
+    names must exist, be readable, and be Conductor's own.
+
+    The clause above is scoped to the scratch host roots, which is where a pre-seeded foreign
+    convention would live. This one is scoped to nothing: a launch that reaches for a file
+    anywhere Conductor did not write or ship depends on that machine happening to have it, and
+    a path the prompt names but that is not there is a dependency that is already broken."""
+    fire = fire_at(label)
+    named = _path_tokens(fire.prompt)
+    missing = [path for path in named if not path.is_file()]
+    assert not missing, (
+        f"the prompt names path(s) that are not files on this machine: {missing}\n"
+        f"prompt={fire.prompt!r}{fire.diagnosis}"
+    )
+    foreign = [
+        path
+        for path in named
+        if not fire.is_conductors(path) or not os.access(path, os.R_OK)
+    ]
+    assert not foreign, (
+        "the Codex launch depends on path(s) Conductor neither shipped under the package root "
+        f"{fire.package} nor wrote during the fire: {foreign}\nprompt={fire.prompt!r}"
+    )
+
+
+@pytest.mark.parametrize("label", ["first", "second"])
+def test_every_dispatch_token_resolves_through_a_conductor_installed_convention(
+    label: str,
+) -> None:
+    """Must-not-contain, and the quiet failure this assertion exists for: a ``$``-prefixed
+    dispatch token in the prompt that no Conductor-installed file expands.
+
+    ``$conductor:autodev`` is a prompting convention a table in ``AGENTS.md`` supplies, and that
+    table is a third-party install. On the scratch roots here — empty before the fire — a token
+    with no Conductor-written expansion resolves to nothing at all, which is precisely the
+    launch that works on the author's machine and does nothing on a stock Codex. Carrying a
+    valid SKILL.md path alongside such a token does not rescue it: the launch still depends on
+    the convention, and this clause is what says so."""
+    fire = fire_at(label)
+    tokens = list(dict.fromkeys(DISPATCH_TOKEN.findall(fire.prompt)))
+    unowned = [token for token in tokens if not _token_resolvers(fire, token)]
+    assert not unowned, (
+        f"the Codex prompt depends on dispatch token(s) {unowned} that no artifact Conductor "
+        "installed expands to its autodev skill, so the launch depends on a pre-existing "
+        "third-party convention.\n"
+        f"prompt={fire.prompt!r}\n"
+        f"files Conductor wrote under HOME/CODEX_HOME: {sorted(fire.written_by_conductor)}"
+        f"{fire.diagnosis}"
+    )
+
+
+def test_the_resolution_artifact_follows_the_package_root() -> None:
+    """Two test-chosen package roots, two fires. An artifact that does not move with the
+    package root is a hardcoded constant that happens to exist on this machine."""
+    first, second = fire_at("first"), fire_at("second")
+    assert first.package != second.package
+    first_artifacts = _resolution_artifacts(first)
+    second_artifacts = _resolution_artifacts(second)
+    assert first_artifacts and second_artifacts, (first_artifacts, second_artifacts)
+    assert set(first_artifacts).isdisjoint(second_artifacts), (
+        "the same artifact path resolved from two different package roots: "
+        f"{first_artifacts} vs {second_artifacts}"
+    )
+    for artifact in second_artifacts:
+        assert second.is_conductors(artifact), artifact

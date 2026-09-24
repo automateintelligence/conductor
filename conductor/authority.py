@@ -5,8 +5,8 @@ it invents NO permission flags or tokens of its own. This module is the tested c
 decision:
 
 - ``RECIPE_PRIVILEGED_OPS`` — the ONE declared set of privileged operations an autodev
-  phase performs. `authority preview` (and `/conductor:start`'s less-privileged dry-run)
-  iterate THIS set, so the report can never drift from the declaration.
+  phase performs. `authority preview` (and the `conductor:start` skill's less-privileged
+  dry-run) iterate THIS set, so the report can never drift from the declaration.
 - ``resolve_posture`` — maps a detected (possibly unknown/unreadable) session permission
   mode to the run's posture, FAIL-CLOSED: a misread can only ever under-grant, never
   over-grant (frozen invariant A2).
@@ -23,6 +23,7 @@ import re
 import shlex
 import sys
 
+from conductor.hosts import base
 from ledger.sync import parse_plan_md
 
 # The privileged operations one autodev phase performs (the per-phase recipe: implement on
@@ -41,37 +42,57 @@ RECIPE_PRIVILEGED_OPS: frozenset[str] = frozenset(
     }
 )
 
-# Affirmative EXACT matches only — substring/prefix matching would let an ambiguous or
-# token-embedded mode string over-grant ("bypassPermissions extra" MUST stay supervised).
-_BYPASS_MODES = frozenset({"bypassPermissions"})
-_MODE_POSTURE = {"default": "supervised", "plan": "supervised", "acceptEdits": "scoped"}
-
 _KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
 
-def resolve_posture(mode: str | None) -> str:
-    """Fail-closed: anything not an affirmatively-recognized bypass mode never returns a
-    bypass posture; unknown/empty/None/ambiguous resolves to supervised (spec A2)."""
+def resolve_posture(mode: str | None, *, host: str = "claude") -> str:
+    """Fail-closed: anything not an affirmatively-recognized mode for THIS host resolves to
+    supervised (spec A2). Never returns a bypass posture for an unrecognized string.
+
+    The mode vocabulary belongs to the host, not to this module: Claude's is a permission mode
+    (``bypassPermissions``, ``acceptEdits``) and Codex's is a sandbox
+    (``danger-full-access``, ``workspace-write``). They do not map onto each other and they do
+    not transfer — a stray ``bypassPermissions`` on a Codex session grants nothing there, and
+    resolving it to full-bypass would be exactly the over-grant A2 forbids.
+
+    ``host`` defaults to claude because that is what this function has always meant, and
+    frozen assertion A2 pins the single-argument form.
+    """
+    adapter = base.load(host)
     if not isinstance(mode, str):
         return "supervised"
-    m = mode.strip()
-    if m in _BYPASS_MODES:
-        return "full-bypass"
-    return _MODE_POSTURE.get(m, "supervised")
+    return adapter.session_posture(mode.strip())
 
 
 def write_resume_env(project_root: str, env: dict[str, str]) -> str:
     """Write ``<project_root>/.conductor/resume-env.sh`` (mode 0600, always) and return its
-    path. Each line is ``KEY={shlex.quote(value)}`` — never wrapped in extra double quotes,
-    which would smuggle literal quote characters into the driver's unquoted
+    path. Each line is ``export KEY={shlex.quote(value)}`` — never wrapped in extra double
+    quotes, which would smuggle literal quote characters into the driver's unquoted
     ``${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}`` expansion. Keys are validated BEFORE anything is
-    written, so a bad env never leaves a partial file behind."""
+    written, so a bad env never leaves a partial file behind.
+
+    ``export`` is load-bearing, not cosmetic. The driver SOURCES this file
+    (``resume_script.render``: ``. "$ENV_FILE"``) and then execs ``conductor assert run`` and
+    the host's worker launch (the ``conductor:autodev`` skill). Every variable here except
+    ``CONDUCTOR_RESUME_CLAUDE_FLAGS`` — which the driver itself expands — is read by one of
+    those CHILDREN: ``CONDUCTOR_SPEC_ROOTS`` and ``CONDUCTOR_PLUGIN_DIRS`` by ``conductor``,
+    ``CONDUCTOR_MERGE_VERIFY`` by ``conductor merge`` a level below that, ``DOCKER_HOST`` by
+    the docker CLI below THAT. A bare ``KEY=value`` is a shell variable: it exists in the
+    driver and in nothing it launches, so the whole file worked interactively (where the
+    values are already in the operator's environment) and silently did nothing under cron.
+
+    Exporting at the point of definition is preferred to having the driver pass values on each
+    child's command line because this file is OWNER-OWNED and hand-editable — the generated
+    driver deliberately bakes in none of its contents, so an explicit pass would force the
+    template to enumerate every key an owner might set, and each new variable would then need
+    a ``TEMPLATE_VERSION`` bump plus a regeneration of every installed driver. It also reaches
+    only the direct child, while ``DOCKER_HOST`` is needed two processes deeper."""
     for key in env:
         if not _KEY_RE.match(key):
             raise ValueError(f"invalid env key name: {key!r}")
     path = os.path.join(project_root, ".conductor", "resume-env.sh")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    body = "".join(f"{key}={shlex.quote(value)}\n" for key, value in env.items())
+    body = "".join(f"export {key}={shlex.quote(value)}\n" for key, value in env.items())
     # 0600 at creation (never umask-dependent), then an unconditional chmod so a
     # pre-existing looser file is tightened, not inherited.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

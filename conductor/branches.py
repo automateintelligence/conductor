@@ -9,9 +9,19 @@ as a CLI verb the prose calls instead of re-deriving.
 byte-identical `conductor/run-<slug>`, different spec STEMS → different names (the slug
 carries the filename's stem — the a11-pinned granularity — so two specs sharing a stem in
 different directories map to the same run branch; one run per spec stem). `default_branch`
-resolves the repo's real default (gh repo view, then the origin/HEAD symbolic ref) and
-fails OPEN to `main` — exit 0, NEVER an empty string, which would make a downstream
-`git fetch "$R" ""` operate on the wrong ref.
+resolves the repo's real default from AUTHORITATIVE remote metadata (gh repo view, then the
+origin/HEAD symbolic ref) and fails CLOSED: when neither probe can name the branch it raises
+`DefaultBranchUnresolvable` and the CLI verb exits non-zero having printed NOTHING on stdout.
+
+It used to fail OPEN to the literal `main` (design §"Branch, worktree, and pull-request
+model", assertion A-DH-6: "If the default branch cannot be resolved, every automated merge is
+refused; there is no fallback default"). A guessed default is worse than no default: on a repo
+whose default is `trunk` the guess silently names a branch that either does not exist or is
+somebody else's, and the fetch/merge/PR-base built from it is wrong while looking healthy. The
+empty-string hazard the fail-open was guarding — `git fetch "$R" ""` operating on the wrong ref
+— is closed the other way: the verb never emits an empty line, because on failure it emits no
+line at all and a non-zero status the shell caller must check (`D="$(conductor default-branch)"
+|| exit 1`).
 """
 
 from __future__ import annotations
@@ -37,12 +47,14 @@ def run_branch_name(spec_path: str) -> str:
     return f"conductor/run-{spec_slug(spec_path)}"
 
 
-def _gh_default() -> str | None:
+def _gh_default(root: str | None = None) -> str | None:
     """gh knows the server truth; time-bounded, any failure → None (next probe).
 
-    Bound to `project_root()` (like `_git_default`) — gh resolves the repo from its cwd,
-    and the process cwd may be a DIFFERENT repo than `$CONDUCTOR_HOME`; both probes must
-    answer for the same project."""
+    Bound to `root`, defaulting to `project_root()` (like `_git_default`) — gh resolves the repo
+    from its cwd, and the process cwd may be a DIFFERENT repo than `$CONDUCTOR_HOME`; both probes
+    must answer for the same project. `$CONDUCTOR_HOME` is itself ambient when a verb was given
+    an explicit `--project`, which is why `root` is threaded rather than read from the
+    environment here."""
     out = subprocess.run(
         [
             "gh",
@@ -56,25 +68,30 @@ def _gh_default() -> str | None:
         capture_output=True,
         text=True,
         timeout=_GH_TIMEOUT,
-        cwd=project_root(),
+        cwd=root or project_root(),
     )
     if out.returncode != 0:
         return None
     return (out.stdout or "").strip() or None
 
 
-def _git_default() -> str | None:
+def _git_default(root: str | None = None) -> str | None:
     """The `refs/remotes/<remote>/HEAD` symbolic ref — local, no network. The remote comes
     from `conductor.remote`'s resolver (the same one the merge gate uses), falling back to
-    `origin` when discovery fails."""
+    `origin` when discovery fails.
+
+    `root` is passed on to that resolver as well as used for `-C`: asking repository A which
+    remote to look up and then reading the symbolic ref in repository B is the same ambient
+    mismatch in two halves."""
+    project = root or project_root()
     try:
         from conductor.remote import resolve
 
-        remote = resolve() or "origin"
+        remote = resolve(project) or "origin"
     except Exception:
         remote = "origin"
     out = subprocess.run(
-        ["git", "-C", project_root(), "symbolic-ref", f"refs/remotes/{remote}/HEAD"],
+        ["git", "-C", project, "symbolic-ref", f"refs/remotes/{remote}/HEAD"],
         capture_output=True,
         text=True,
         timeout=_GIT_TIMEOUT,
@@ -88,22 +105,45 @@ def _git_default() -> str | None:
     return target[len(prefix) :] or None
 
 
-def default_branch() -> str:
-    """The repo's default branch; ANY failure or empty result fails open to `main`."""
+class DefaultBranchUnresolvable(RuntimeError):
+    """No authoritative probe could name the repository's default branch.
+
+    Raised instead of returning a guess. Callers must propagate the refusal: nothing that
+    consumes a default branch (fetch base, merge base, final-PR base, protection probe) has a
+    safe thing to do without one."""
+
+
+def default_branch(root: str | None = None) -> str:
+    """The repo's default branch, from authoritative remote metadata only — fail CLOSED.
+
+    Tries `gh repo view` (server truth), then the `refs/remotes/<remote>/HEAD` symbolic ref.
+    If neither answers, raises `DefaultBranchUnresolvable` naming both probes. NEVER
+    substitutes a literal (`main`/`master`/anything): A-DH-6 forbids a fallback default, and a
+    wrong-but-plausible branch name is undetectable downstream.
+
+    `root` names WHICH repository is being asked. Omitted it is `$CONDUCTOR_HOME`/cwd, which is
+    the ambient project — right for a bare invocation and wrong for any verb given an explicit
+    `--project`, where the answer becomes that other repository's pull-request base."""
     for probe in (_gh_default, _git_default):
         try:
-            name = probe()
+            name = probe(root)
         except Exception:  # timeout/missing binary/bad repo → try the next probe
             name = None
         if name:
             return name
-    return "main"
+    raise DefaultBranchUnresolvable(
+        "unresolvable-default-branch: neither `gh repo view --json defaultBranchRef` nor the "
+        "refs/remotes/<remote>/HEAD symbolic ref could name this repository's default branch. "
+        "Refusing rather than substituting a fallback name. Fix the repository's remote "
+        "metadata (authenticate `gh`, or run `git remote set-head <remote> -a`) and retry."
+    )
 
 
 _USAGE = (
     "usage:\n"
     "  conductor run-branch name <spec.md>   emit the canonical conductor/run-<slug>\n"
-    "  conductor default-branch              emit the repo default (fail-open: main)\n"
+    "  conductor default-branch              emit the repo default (fail-closed: refuses,\n"
+    "                                        printing nothing, when it cannot be resolved)\n"
 )
 
 
@@ -115,7 +155,15 @@ def main(argv: list[str]) -> int:
         print(run_branch_name(argv[1]))
         return 0
     if argv and argv[0] == "default":
-        print(default_branch())
+        try:
+            name = default_branch()
+        except DefaultBranchUnresolvable as exc:
+            # stdout stays EMPTY — not an empty line. A shell caller doing
+            # D="$(conductor default-branch)" gets "" plus a non-zero status to check;
+            # printing a blank line here would look like a resolved value to `read`.
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(name)
         return 0
     print(_USAGE, file=sys.stderr, end="")
     return 64

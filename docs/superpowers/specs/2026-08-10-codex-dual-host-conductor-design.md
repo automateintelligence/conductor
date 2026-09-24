@@ -453,7 +453,7 @@ The local execution lease in owner.lock prevents duplicate Claude or Codex proce
 
 Every actionable failure reports:
 
-- run key and current state
+- the run key and current state, when the failure occurs within a resolved run; a pre-run capability probe (version probe, preflight, plugin capability check) reports the host id and the project root in their place
 - failed invariant or operation
 - affected branch, worktree, pull request, or state path
 - whether any write occurred

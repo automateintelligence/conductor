@@ -60,3 +60,23 @@ def git_repo(tmp_path, git_env, git):
     git(root, "add", "-A")
     git(root, "commit", "-qm", "init")
     return root
+
+
+def stale_version_siblings(version: str) -> tuple[str, str]:
+    """Two version-directory names that BRACKET `version` lexicographically.
+
+    Every fixture for the Codex plugin parsers created exactly ONE version directory per
+    marketplace/plugin, which made the version segment unobservable: both parsers were mutated
+    to ignore the `version` codex reported and glob any on-disk version instead, and 374 of the
+    375 parser, preflight and driver tests still passed. With a stale `1.0` sitting beside a
+    listed `2.0` — which is what an upgrade or a half-cleaned cache actually leaves behind —
+    that regression blesses the wrong tree.
+
+    BOTH sides, because one is not enough: a wildcarding parser may take the first match, the
+    last, or the newest, and a single stale sibling only catches one of those. Derived from the
+    real version and asserted rather than written down, so a fixture that changes its version
+    cannot silently stop bracketing it.
+    """
+    older, newer = f"0-stale-{version}", f"zz-stale-{version}"
+    assert older < version < newer, (older, version, newer)
+    return older, newer
