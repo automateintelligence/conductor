@@ -53,6 +53,11 @@ _FAILURE_MARKERS = (
     # is the pre-fix behaviour, deliberately degraded to rather than a false kill — and it is a
     # stall waiting to happen, so status has to see it.
     "fire-unsupervised",
+    # The driver could not take `.conductor/resume.lock` for a reason OTHER than contention: no
+    # `flock`, a lock file it cannot open, a flock usage or OS error. Every fire exits loud and
+    # none will ever work until someone fixes the machine. `lock-held` is deliberately absent
+    # — that is contention, which is the lock doing its job.
+    "lock-unavailable",
     # --- the ownership check, and why only HALF of it is a failure -------------------------
     #
     # The driver writes `fire-skipped reason=owner-busy` in two situations that look alike in

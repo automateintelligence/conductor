@@ -252,7 +252,7 @@ def test_render_preserves_the_two_guards():
     # (a)+(c) ONE driver at a time, decided by the Conductor-owned lock and nothing else. The
     # third guard was `pgrep -f 'claude'`, which matched nothing on Codex and matched the driver
     # itself on Claude; the lock is what replaced it.
-    assert "flock -n 9" in s
+    assert 'flock -n -E "$LOCK_BUSY" 9' in s
     assert "assert run --level spec" in s  # (b) done-gate-green no-op
     assert (
         'CONDUCTOR_HOME="$WORKTREE"' in s
@@ -1109,7 +1109,7 @@ def test_every_hosts_render_shell_escapes_paths(host_id, tmp_path):
 def test_every_hosts_render_keeps_the_three_guards_and_the_rot_ban(host_id, tmp_path):
     project, worktree = _project_recorded_as(tmp_path, host_id)
     s = rs.render(project, worktree)
-    assert "flock -n 9" in s
+    assert 'flock -n -E "$LOCK_BUSY" 9' in s
     assert "assert run --level spec" in s
     assert 'CONDUCTOR_HOME="$WORKTREE"' in s
     assert "driver-unresolved" in s and "exit 3" in s
@@ -2460,6 +2460,286 @@ def test_a_fire_skipped_because_the_gate_is_green_says_so_in_the_log(
     assert "fire-skipped reason=gate-green" in log, log
 
 
+# ---- the lock belongs to the DRIVER, and only a busy lock is a skip -------------------------
+#
+# Two defects in the same six lines, ported from #86 onto the ownership stack.
+#
+# fd 9 is opened by `exec`, so it is NOT close-on-exec: every child the driver starts after
+# taking the lock inherits the locked open-file-description, and the kernel releases a flock
+# only when the LAST descriptor on that description closes. A phase (or the done-gate, which
+# runs the project's own assertion commands, or the ownership probe) that leaves ONE detached
+# descendant behind therefore keeps `.conductor/resume.lock` held after the driver has logged a
+# healthy `fire-end rc=0` and exited, and every later tick skips `lock-held` forever.
+#
+# `flock -n 9 || skip` treated every non-zero status as contention: no `flock` binary (127), a
+# bad descriptor because `exec 9>` failed, a usage error, a filesystem that cannot lock. Each was
+# logged as `fire-skipped reason=lock-held` with exit 0 — a machine that CANNOT lock stalled
+# forever behind the line that means "someone else is working".
+
+#: Records its own pid, leaves ONE descendant running in a session of its own (the dev server /
+#: docker helper / stray nohup a real phase can leave), and exits 0 at once. The descendant's
+#: wait is bounded so a pytest killed outright cannot strand it; its stdio goes to /dev/null so
+#: it holds nothing but what it inherited — which is the point.
+_LEAKING_FIRE = """#!/usr/bin/env bash
+printf '%s\\n' "$$" >> {pids}
+# Once per test, so the processes a test must reap are known before its second run starts.
+if [ ! -e {pids}.leaked ]; then
+    touch {pids}.leaked
+    setsid bash -c 'printf "%s\\n" "$$" >> "$1"; exec sleep 30' _ {pids} </dev/null >/dev/null 2>&1 &
+fi
+exit 0
+"""
+
+#: A `conductor` whose PROBE leaves the detached descendant: `assert run` (the done-gate runs
+#: arbitrary owner assertion code) or `run owner-busy`. Every other answer is the harness default.
+_LEAKING_CONDUCTOR = """#!/bin/sh
+# Once per test (a non-empty pids file means it already happened), for the same reason as above.
+leak() {{ [ -s {pids} ] || setsid sh -c 'echo $$ >> "$1"; exec sleep 30' _ {pids} </dev/null >/dev/null 2>&1 & }}
+case "$1 $2" in
+  "run owner-busy") [ {where} = owner-check ] && leak; exit 11 ;;
+  "assert run") [ {where} = gate ] && leak; exit {gate_rc} ;;
+esac
+exit 1
+"""
+
+#: A fire that holds until released, so a second driver can be run while it is in flight.
+_HOLDING_FIRE = """#!/usr/bin/env bash
+printf '%s\\n' "$$" >> {pids}
+touch {started}
+deadline=$(( $(date +%s) + 30 ))
+while [ ! -f {hold} ] && [ "$(date +%s)" -lt "$deadline" ]; do sleep 0.05; done
+exit 0
+"""
+
+#: A fire that records itself and exits 0 at once — for tests whose subject happens before it.
+_QUICK_FIRE = """#!/usr/bin/env python3
+import os
+with open({pids!r}, "a", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()) + "\\n")
+"""
+
+#: A contended lock, reported ONLY through the documented channel: util-linux exits with the
+#: `-E` status on conflict under `-n`. If the caller never asked for a distinguishable conflict
+#: code this stub reports the lock FREE, so a driver that treats any non-zero status as busy
+#: cannot satisfy the test that uses it.
+_FLOCK_CONFLICTS = """#!/usr/bin/env bash
+code=""
+while [ $# -gt 0 ]; do
+    case "$1" in -E) shift; code="$1" ;; esac
+    shift
+done
+exit "${code:-0}"
+"""
+
+
+def _plant_flock(home, body):
+    """Shadow `flock` through the driver's own PATH repair, which puts `$HOME/.local/bin` first
+    — a chosen exit status without needing `flock` to be absent from the test machine."""
+    stub = home / ".local" / "bin" / "flock"
+    stub.write_text(body)
+    os.chmod(stub, 0o755)
+
+
+def _log_of(project):
+    path = project / ".conductor" / "resume-autodev.log"
+    return path.read_text() if path.exists() else ""
+
+
+def _needs_lock_tools():
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    if not _which("flock") or not _which("setsid"):
+        pytest.skip("exercises real kernel locking and a detached session")
+
+
+def test_a_detached_descendant_of_a_finished_fire_does_not_hold_the_lock(tmp_path):
+    """The fire must not inherit fd 9. Its descendant outliving it is a normal phase outcome;
+    that descendant owning the run's lock is the defect."""
+    _needs_lock_tools()
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path, _LEAKING_FIRE.format(pids=shlex.quote(str(tmp_path / "fire.pids")))
+    )
+    try:
+        first, _ = _fire_supervised(driver, home, pids, timeout=60)
+        _wait_for_pids(pids, 2)  # the fire AND its detached descendant
+        free = _lock_is_free(project)
+        second, _ = _fire_supervised(driver, home, pids, timeout=60)
+        log = _log_of(project)
+    finally:
+        _reap(pids)
+
+    assert first.returncode == 0 and second.returncode == 0, (first, second, log)
+    assert free, (
+        "`.conductor/resume.lock` is still held after the driver exited — the fire's detached "
+        f"descendant inherited fd 9. log={log!r}"
+    )
+    assert "reason=lock-held" not in log, log
+    assert log.count("fire-start") == 2, log
+
+
+@pytest.mark.parametrize("where,gate_rc", [("gate", 0), ("owner-check", 1)])
+def test_a_detached_descendant_of_a_driver_probe_does_not_hold_the_lock(
+    tmp_path, where, gate_rc
+):
+    """Same inheritance, one step earlier: the driver already holds the lock when it asks
+    `run owner-busy` and `assert run --level spec`, and the gate executes the project's own
+    assertion commands. A green-gate project stranded this way logs `gate-green` perfectly
+    while no later run on it can ever fire."""
+    _needs_lock_tools()
+    leaks = tmp_path / "probe.pids"
+    leaks.write_text("")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _QUICK_FIRE.format(pids=str(tmp_path / "fire.pids")),
+        conductor_text=_LEAKING_CONDUCTOR.format(
+            pids=shlex.quote(str(leaks)), where=where, gate_rc=gate_rc
+        ),
+    )
+    try:
+        first, _ = _fire_supervised(driver, home, pids, timeout=60)
+        _wait_for_pids(leaks, 1)
+        free = _lock_is_free(project)
+        second, _ = _fire_supervised(driver, home, pids, timeout=60)
+        log = _log_of(project)
+    finally:
+        _reap(leaks)
+        _reap(pids)
+
+    assert first.returncode == 0 and second.returncode == 0, (first, second, log)
+    assert free, f"a {where} descendant inherited fd 9 and kept the lock. log={log!r}"
+    assert "reason=lock-held" not in log, log
+
+
+def test_two_driver_invocations_serialize_on_the_lock(tmp_path):
+    """Driver vs driver: while one fire is in flight a second invocation must not start a
+    worker, and must say why in the log."""
+    _needs_lock_tools()
+    started = tmp_path / "worker.started"
+    hold = tmp_path / "worker.hold"
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _HOLDING_FIRE.format(
+            pids=shlex.quote(str(tmp_path / "fire.pids")),
+            started=shlex.quote(str(started)),
+            hold=shlex.quote(str(hold)),
+        ),
+    )
+    first = subprocess.Popen(
+        ["bash", str(driver)],
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        cwd=str(home),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert started.exists(), _log_of(project)
+        second, _ = _fire_supervised(driver, home, pids, timeout=60)
+        in_flight = pids.read_text().split()
+    finally:
+        hold.write_text("go\n")
+        try:
+            first_rc = first.wait(timeout=30)
+        finally:
+            first.kill()
+            _reap(pids)
+    log = _log_of(project)
+
+    assert second.returncode == 0, (second.returncode, log)
+    assert "fire-skipped reason=lock-held" in log, log
+    assert len(in_flight) == 1, (in_flight, log)
+    assert first_rc == 0, (first_rc, log)
+
+
+def test_an_unopenable_lock_file_is_not_reported_as_contention(tmp_path):
+    """No stub: the lock path is a directory, so `exec 9>` fails and there is no descriptor to
+    lock. Locking is broken, not busy, and stays broken on every future fire."""
+    _needs_lock_tools()
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _QUICK_FIRE.format(pids=str(tmp_path / "fire.pids")),
+    )
+    (project / ".conductor" / "resume.lock").mkdir()
+    try:
+        proc = _fire_driver(driver, home)
+    finally:
+        _reap(pids)
+    log = _log_of(project)
+
+    assert "reason=lock-held" not in log, log
+    assert "lock-unavailable" in log, log
+    assert proc.returncode == rs.EXIT_LOCK_UNAVAILABLE, (proc.returncode, proc.stderr)
+    assert pids.read_text().split() == [], "a driver that cannot lock must not fire"
+
+
+def _assert_a_failing_flock_fails_loud(tmp, rc):
+    """Every flock status that is NOT the documented conflict value is broken locking: logged
+    as `lock-unavailable` with the status NAMED, exit `EXIT_LOCK_UNAVAILABLE`, and no fire."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp, _QUICK_FIRE.format(pids=str(tmp / "fire.pids"))
+    )
+    _plant_flock(home, f"#!/usr/bin/env bash\nexit {rc}\n")
+    try:
+        proc = _fire_driver(driver, home)
+    finally:
+        _reap(pids)
+    log = _log_of(project)
+
+    assert "reason=lock-held" not in log, (rc, log)
+    assert "lock-unavailable" in log and f"rc={rc}" in log, (rc, log)
+    # The exact status, not merely non-zero: a lock-unavailable exit that shares a value with
+    # the worker's propagated rc (or the done-gate runner's 0-6) cannot be told apart from it.
+    assert proc.returncode == rs.EXIT_LOCK_UNAVAILABLE, (
+        rc,
+        proc.returncode,
+        proc.stderr,
+    )
+    assert pids.read_text().split() == [], (
+        rc,
+        "a driver that cannot lock must not fire",
+    )
+
+
+def test_a_flock_binary_that_cannot_run_fails_loud_instead_of_skipping(tmp_path):
+    """127 is bash's command-not-found — a machine without util-linux, the one host class where
+    this driver's lock handling matters most. Stubbed so it runs everywhere."""
+    _assert_a_failing_flock_fails_loud(tmp_path, 127)
+
+
+@pytest.mark.parametrize("rc", [64, 71])
+def test_a_flock_usage_or_os_error_fails_loud_instead_of_skipping(tmp_path, rc):
+    """flock's own errors are sysexits — 64 usage (a build too old for `-E`), 71 OS error (a
+    filesystem that cannot lock). None of them is contention."""
+    _assert_a_failing_flock_fails_loud(tmp_path, rc)
+
+
+def test_only_the_documented_conflict_status_reports_lock_held(tmp_path):
+    """The other side of the discrimination: a skip must come from flock's documented `-E`
+    conflict status, not from any non-zero exit."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path, _QUICK_FIRE.format(pids=str(tmp_path / "fire.pids"))
+    )
+    _plant_flock(home, _FLOCK_CONFLICTS)
+    try:
+        proc = _fire_driver(driver, home)
+    finally:
+        _reap(pids)
+    log = _log_of(project)
+
+    assert proc.returncode == 0, (proc.returncode, proc.stderr, log)
+    assert "fire-skipped reason=lock-held" in log, log
+    assert "lock-unavailable" not in log, log
+    assert pids.read_text().split() == [], "a contended lock must not fire"
+
+
 # ---- progress made before the first sample is progress --------------------------------------
 #
 # The defect this closes (H2): the zero-progress baseline was a sample taken AFTER the fire was
@@ -2551,9 +2831,13 @@ def test_output_produced_before_the_first_sample_counts_as_the_first_sign_of_lif
 # failed `flock -n` and exited 0, which is the permanently-blocked run this whole supervisor
 # exists to eliminate. The signal trap had the same hole and a worse one: a bare TERM to the
 # group and an immediate `exit 143`, with no grace and no KILL at all.
+#
+# The fire now runs with `9>&-`, so an orphan no longer holds the lock (see the fd-9 tests
+# above). These still matter: an orphan that survives keeps working in the run worktree while
+# the next fire takes the freed lock and starts on the same checkout.
 
 #: A fire whose LEADER dies politely and whose DESCENDANT does not. Both are in the fire's own
-#: process group (`set -m`) and both inherited the driver's fd 9. Neither writes a byte nor burns
+#: process group (`set -m`). Neither writes a byte nor burns
 #: a whole second of CPU, so the STARTUP window is what expires.
 _ORPHANING_FIRE = """#!/usr/bin/env python3
 import os, signal, subprocess, sys
@@ -2584,8 +2868,9 @@ def _lock_is_free(project):
 
     The lock itself, not a proxy for it. `flock -n` on that file is exactly what the next
     twenty-minute tick does, so asking the same question the same way is the only check that
-    cannot pass while the run is in fact blocked. A descendant that inherited fd 9 keeps this
-    False for as long as it lives, whatever the driver's own exit status said.
+    cannot pass while the run is in fact blocked. Any process still holding the driver's
+    open-file-description keeps this False for as long as it lives, whatever the driver's own
+    exit status said.
     """
     path = str(project / ".conductor" / "resume.lock")
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -2641,8 +2926,8 @@ def test_an_expiry_kills_the_whole_group_not_only_the_leader(
         f"TERM, so a supervisor that checks only the leader never sends the KILL."
     )
     assert free, (
-        "`.conductor/resume.lock` is still held after the driver exited — an orphaned "
-        "descendant inherited fd 9, so every later tick fails `flock -n` and exits 0"
+        "`.conductor/resume.lock` is still held after the driver exited — something of the "
+        "fire kept fd 9, so every later tick fails `flock -n` and exits 0"
     )
     assert proc.returncode in (124, 137), (proc.returncode, log)
     assert elapsed < 45, (elapsed, log)
@@ -2688,8 +2973,8 @@ def test_a_signalled_driver_takes_the_whole_group_down_with_it(
         f"politely once and exited; nothing escalated."
     )
     assert free, (
-        "`.conductor/resume.lock` is still held after the signalled driver exited — the "
-        "orphaned descendant inherited fd 9"
+        "`.conductor/resume.lock` is still held after the signalled driver exited — "
+        "something of the fire kept fd 9"
     )
 
 
