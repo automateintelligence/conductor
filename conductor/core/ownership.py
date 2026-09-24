@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import fcntl
 import os
 from collections.abc import Iterator, Mapping
 from typing import NamedTuple
@@ -128,6 +129,96 @@ class OwnerRecord(NamedTuple):
 #: be the recorded owner and still be live, so at worst a descendant declines to block on a
 #: record that is already about to be released.
 INHERITED_IDENTITY_ENV = "CONDUCTOR_OWNER_IDENTITY"
+
+
+#: The generated driver's fire lock, ``$PROJECT/.conductor/resume.lock``, held for the WHOLE of
+#: one fire (``exec 9>"$LOCK"; flock -n 9``) and by every descendant that inherits that
+#: descriptor. See ``running_fire`` for why ownership consults it.
+FIRE_LOCK_NAME = "resume.lock"
+
+
+def fire_lock_path(state_root: str) -> str:
+    return os.path.join(state_root, FIRE_LOCK_NAME)
+
+
+def _has_open(pid: int, key: tuple[int, int]) -> bool:
+    """Does ``pid`` hold a descriptor on the file ``key`` = ``(st_dev, st_ino)`` names? An
+    unreadable descriptor table answers no, which keeps the caller on the refusing side."""
+    directory = f"/proc/{pid}/fd"
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return False
+    for name in names:
+        try:
+            st = os.stat(os.path.join(directory, name))
+        except OSError:
+            continue
+        if (st.st_dev, st.st_ino) == key:
+            return True
+    return False
+
+
+def running_fire(state_root: str) -> str | None:
+    """A refusal sentence while a driver fire OTHER THAN THE CALLER'S OWN holds the project's
+    fire lock, else ``None``.
+
+    WHY OWNERSHIP ASKS. The record names the heartbeat WRAPPER, and the wrapper is not the last
+    thing running: the driver it launched, and the host session under that, outlive a killed
+    wrapper. Judged by the record alone the run then reads as free — the wrapper is provably
+    gone — while a fire is still editing the checkout. ``resume.lock`` is the fact that outlives
+    the wrapper: the driver takes it before firing and the kernel releases it only once every
+    process sharing that descriptor has exited. So an owner's exit is an exit proof for the RUN
+    only while this lock is free. (This is the ``same fact from the Python side`` the driver's
+    own comment promises.) Recording the driver's identity instead was the alternative; it would
+    widen the record's schema and still miss a host session that outlives a killed driver.
+
+    A NON-BLOCKING PROBE, NOT ``/proc/locks``. The driver takes the lock through the ``flock``
+    helper, which exits at once; the kernel files the lock under that helper's pid, and
+    ``/proc/locks`` omits locks whose pid no longer exists — so a held driver lock is invisible
+    there. Taking the lock with ``LOCK_NB`` and dropping it is the one test that sees it. The cost
+    is that a driver starting in the same instant skips that one tick, logged as
+    ``fire-skipped reason=lock-held``.
+
+    THE CALLER'S OWN FIRE IS NOT A RIVAL. A cron-launched driver holds the lock while its worker
+    registers with ``conductor run own``; refusing that worker would stop the run. The holder is
+    identified by parentage plus a kernel fact — an ancestor of this process (or this process)
+    has the lock file open — never by a process name. A caller outside that tree is refused."""
+    path = fire_lock_path(state_root)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return (
+            f"the driver fire lock {path} could not be opened ({exc}), so whether a fire is "
+            "still running is unknown"
+        )
+    try:
+        st = os.fstat(fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        except OSError as exc:
+            return (
+                f"the driver fire lock {path} could not be tested ({exc}), so whether a fire "
+                "is still running is unknown"
+            )
+        else:
+            return (
+                None  # free: closing the descriptor below releases the probe's own lock
+            )
+    finally:
+        os.close(fd)
+    key = (st.st_dev, st.st_ino)
+    if any(_has_open(pid, key) for pid in proc.ancestor_pids(os.getpid())):
+        return None
+    return (
+        f"a driver fire still holds {path} — its heartbeat wrapper may have exited, but the "
+        "fire it launched has not. Let that fire finish (conductor driver status shows its "
+        "log), or stop it, then retry"
+    )
 
 
 def record_path(state_root: str, run_key: str) -> str:
@@ -321,6 +412,12 @@ def claim(
                     f"{existing.wrapper_identity} "
                     + ("(live)" if live else "(liveness unknown)")
                     + f", recorded at {record_path(state_root, run_key)}; no write occurred."
+                )
+        if existing is None or existing.wrapper_identity != identity:
+            fire = running_fire(state_root)
+            if fire:
+                raise OwnerBusy(
+                    f"run {run_key!r} is not free: {fire}; no write occurred."
                 )
         record = OwnerRecord(
             run_key=run_key,

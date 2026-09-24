@@ -218,11 +218,12 @@ def _live_owner(state_root: str, run_key: str) -> str | None:
     holding ownership across the write would be a lock-order violation. ``ownership.read`` is
     lock-free by construction and answers the only question a refusal needs."""
     record = ownership.read(state_root, run_key)
-    if record is None:
-        return None
-    live = ownership.identity_is_live(record)
-    if live is False:
-        return None
+    live = None if record is None else ownership.identity_is_live(record)
+    if record is None or live is False:
+        fire = ownership.running_fire(state_root)
+        return (
+            f"run {run_key!r} is not free: {fire}; no write occurred." if fire else None
+        )
     return (
         f"run {run_key!r} is owned by {record.host} identity {record.wrapper_identity} "
         + ("(live)" if live else "(liveness unknown)")

@@ -478,16 +478,22 @@ def cmd_owner_busy(args: argparse.Namespace) -> int:
     except ownership.OwnerAmbiguous as exc:
         print(f"owner-busy state=unreadable run={key} detail={exc}")
         return EXIT_OK
-    if record is None:
-        print(f"owner-busy state=free run={key} reason=no-record")
-        return EXIT_OWNER_FREE
-    if ownership.is_inherited(record, os.environ):
+    if record is not None and ownership.is_inherited(record, os.environ):
         print(
             f"owner-busy state=free run={key} reason=inherited "
             f"identity={record.wrapper_identity}"
         )
         return EXIT_OWNER_FREE
-    live = ownership.identity_is_live(record)
+    live = None if record is None else ownership.identity_is_live(record)
+    if record is None or live is False:
+        # No live RECORDED owner. The run is free only if no fire outlives it either.
+        fire = ownership.running_fire(state_root)
+        if fire:
+            print(f"owner-busy state=live run={key} reason=fire-running detail={fire}")
+            return EXIT_OK
+    if record is None:
+        print(f"owner-busy state=free run={key} reason=no-record")
+        return EXIT_OWNER_FREE
     if live is False:
         print(
             f"owner-busy state=free run={key} reason=owner-exited "

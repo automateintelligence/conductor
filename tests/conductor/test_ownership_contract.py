@@ -806,3 +806,132 @@ def test_releasing_never_drops_someone_elses_record(harness, monkeypatch):
     finally:
         owner.kill()
         owner.wait(timeout=30)
+
+
+# --- a killed wrapper does not free a run its driver is still firing -------------------------
+
+
+def _orphaned_fire(harness) -> subprocess.Popen:
+    """A process holding the project's fire lock EXACTLY as the generated driver does —
+    ``exec 9>"$LOCK"; flock -n 9`` — and then staying alive, like a driver whose heartbeat
+    wrapper was killed underneath it. Returns once the lock is provably held."""
+    lock = os.path.join(harness.state_root, "resume.lock")
+    ready = Path(harness.state_root) / "fire-lock-held"
+    holder = subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            'exec 9>"$1"; flock -n 9 || exit 7; : > "$2"; sleep 300',
+            "fire",
+            lock,
+            str(ready),
+        ]
+    )
+    deadline = time.monotonic() + 30
+    while not ready.exists() and time.monotonic() < deadline:
+        assert holder.poll() is None, (
+            "the fire-lock holder exited before holding the lock"
+        )
+        time.sleep(0.02)
+    if not ready.exists():
+        holder.kill()
+        raise AssertionError("the fire-lock holder never took the lock")
+    # Anti-fooling: the lock really is held, by a process that is not this test.
+    probe = subprocess.run(["flock", "-n", lock, "true"], capture_output=True)
+    assert probe.returncode != 0, "resume.lock is not held; nothing below is about it"
+    return holder
+
+
+def _dead_wrapper_record(harness) -> ownership.OwnerRecord:
+    wrapper = _sleeper()
+    identity = _identity(wrapper.pid)
+    wrapper.kill()
+    wrapper.wait(timeout=30)
+    record = ownership.OwnerRecord(
+        run_key=harness.run_key,
+        host="claude",
+        tier="wrapper",
+        wrapper_identity=identity,
+        acquired_at="2026-08-10T12:00:00+00:00",
+    )
+    ownership._write(harness.state_root, harness.run_key, record)
+    assert ownership.identity_is_live(record) is False, (
+        "the wrapper is not provably gone"
+    )
+    return record
+
+
+def test_a_driver_that_outlives_its_killed_wrapper_keeps_the_run_owned(
+    harness, monkeypatch, capsys
+):
+    """The recorded wrapper is provably dead, but the driver it launched is still firing and
+    still holds ``resume.lock``. Registering, ``owner-busy`` and a fresh claim must all see an
+    OCCUPIED run — and all see a free one the moment that fire is gone."""
+    dead = _dead_wrapper_record(harness)
+    fire = _orphaned_fire(harness)
+    try:
+        harness.claude_session_identity(monkeypatch)
+        capsys.readouterr()
+        assert (
+            run_cmd.main(
+                ["own", "--run", harness.run_key, "--project", str(harness.root)]
+            )
+            == run_cmd.EXIT_FAIL
+        )
+        err = capsys.readouterr().err
+        assert "resume.lock" in err and "no write occurred" in err, err
+        assert harness.owner_doc()["wrapper_identity"] == dead.wrapper_identity
+
+        assert (
+            run_cmd.main(
+                ["owner-busy", "--run", harness.run_key, "--project", str(harness.root)]
+            )
+            == run_cmd.EXIT_OK
+        )
+        assert "state=live" in capsys.readouterr().out
+
+        with pytest.raises(ownership.OwnerBusy):
+            ownership.claim(harness.state_root, harness.run_key, host="claude")
+        assert fire.poll() is None, "the fire exited; this proved nothing"
+    finally:
+        fire.kill()
+        fire.wait(timeout=30)
+
+    assert (
+        run_cmd.main(["own", "--run", harness.run_key, "--project", str(harness.root)])
+        == run_cmd.EXIT_OK
+    )
+
+
+def test_a_worker_launched_by_the_fire_holding_the_lock_can_still_register(harness):
+    """A cron-launched driver holds ``resume.lock`` and its worker then runs ``conductor run
+    own`` — over a record a crashed earlier fire left behind. That worker IS the fire; refusing
+    it would stop the run forever. Its lock descriptor is closed (``9>&-``) so the decision rests
+    on the holder being its ancestor, not on an inherited descriptor."""
+    _dead_wrapper_record(harness)
+    lock = os.path.join(harness.state_root, "resume.lock")
+    script = (
+        'exec 9>"$1"; flock -n 9 || exit 7; '
+        'CLAUDE_PID=$$ "$2" run own --run "$3" --project "$4" 9>&-'
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "fire",
+            lock,
+            str(ROOT / "bin" / "conductor"),
+            harness.run_key,
+            str(harness.root),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            **os.environ,
+            "CONDUCTOR_HOST": "claude",
+        },
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "owned by claude" in result.stdout, result.stdout
