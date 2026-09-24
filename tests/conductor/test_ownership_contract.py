@@ -979,3 +979,22 @@ def test_owner_busy_fails_closed_when_git_cannot_answer(
     assert "state=unreadable" in out and "state=free" not in out, out
     assert "no write occurred" in out and str(tmp_path) in out, out
     assert "git -C" in out, out
+
+
+def test_an_ancestor_merely_having_the_lock_file_open_does_not_make_a_foreign_fire_its_own(
+    harness,
+):
+    """``flock`` belongs to an open file DESCRIPTION, not to whoever has the file open. A process
+    in the caller's ancestry that opened ``resume.lock`` without locking it (a reader, a stale
+    descriptor, a failed ``flock -n``) must not turn a foreign holder's fire into the caller's."""
+    fire = _orphaned_fire(harness)
+    lock = os.path.join(harness.state_root, "resume.lock")
+    unlocked = os.open(lock, os.O_RDONLY)
+    try:
+        refusal = ownership.running_fire(harness.state_root)
+        assert refusal is not None and "resume.lock" in refusal, refusal
+        assert fire.poll() is None, "the fire exited; this proved nothing"
+    finally:
+        os.close(unlocked)
+        fire.kill()
+        fire.wait(timeout=30)

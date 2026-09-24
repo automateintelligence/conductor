@@ -141,9 +141,17 @@ def fire_lock_path(state_root: str) -> str:
     return os.path.join(state_root, FIRE_LOCK_NAME)
 
 
-def _has_open(pid: int, key: tuple[int, int]) -> bool:
-    """Does ``pid`` hold a descriptor on the file ``key`` = ``(st_dev, st_ino)`` names? An
-    unreadable descriptor table answers no, which keeps the caller on the refusing side."""
+def _holds_flock(pid: int, st: os.stat_result) -> bool:
+    """Does one of ``pid``'s open file DESCRIPTIONS hold a ``flock`` on the file ``st`` names?
+
+    Having the file open is not holding the lock: ``flock`` belongs to the open file
+    description, so a descriptor that opened the file and never locked it (or failed ``flock
+    -n``) holds nothing. The kernel says which description holds it in
+    ``/proc/<pid>/fdinfo/<fd>``: a ``lock:`` line carrying ``FLOCK`` and this file's
+    ``major:minor:inode`` appears only on the description the lock belongs to — including one
+    inherited from the ``exec 9>`` of an ancestor, whose locking ``flock`` helper has long exited.
+    Anything unreadable answers no, which keeps the caller on the refusing side."""
+    want = (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
     directory = f"/proc/{pid}/fd"
     try:
         names = os.listdir(directory)
@@ -151,11 +159,29 @@ def _has_open(pid: int, key: tuple[int, int]) -> bool:
         return False
     for name in names:
         try:
-            st = os.stat(os.path.join(directory, name))
+            opened = os.stat(os.path.join(directory, name))
         except OSError:
             continue
-        if (st.st_dev, st.st_ino) == key:
-            return True
+        if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):
+            continue
+        try:
+            with open(f"/proc/{pid}/fdinfo/{name}", encoding="utf-8") as handle:
+                info = handle.read().splitlines()
+        except OSError:
+            continue
+        for line in info:
+            if not line.startswith("lock:") or "FLOCK" not in line.split():
+                continue
+            for token in line.split():
+                parts = token.split(":")
+                if len(parts) != 3:
+                    continue
+                try:
+                    found = (int(parts[0], 16), int(parts[1], 16), int(parts[2]))
+                except ValueError:
+                    continue
+                if found == want:
+                    return True
     return False
 
 
@@ -182,8 +208,9 @@ def running_fire(state_root: str) -> str | None:
 
     THE CALLER'S OWN FIRE IS NOT A RIVAL. A cron-launched driver holds the lock while its worker
     registers with ``conductor run own``; refusing that worker would stop the run. The holder is
-    identified by parentage plus a kernel fact — an ancestor of this process (or this process)
-    has the lock file open — never by a process name. A caller outside that tree is refused."""
+    identified by parentage plus a kernel fact — an open file description of this process or an
+    ancestor HOLDS the lock, per ``_holds_flock`` — never by a process name, and never by merely
+    having the file open. A caller outside that tree is refused."""
     path = fire_lock_path(state_root)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
@@ -211,8 +238,7 @@ def running_fire(state_root: str) -> str | None:
             )
     finally:
         os.close(fd)
-    key = (st.st_dev, st.st_ino)
-    if any(_has_open(pid, key) for pid in proc.ancestor_pids(os.getpid())):
+    if any(_holds_flock(pid, st) for pid in proc.ancestor_pids(os.getpid())):
         return None
     return (
         f"a driver fire still holds {path} — its heartbeat wrapper may have exited, but the "
