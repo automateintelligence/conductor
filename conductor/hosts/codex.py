@@ -180,8 +180,9 @@ def _frontmatter_line_chars(line: str) -> bool:
     return all(_frontmatter_char(c) for c in line)
 
 
-#: A frontmatter line in the subset: an unindented ``key: value`` with a simple key.
-_SUBSET_LINE = re.compile(r"([A-Za-z0-9][A-Za-z0-9_-]*): (.+)")
+#: A frontmatter line in the subset: an unindented ``key: value`` with a simple key of at most 64
+#: characters — well under the 1024-character cap YAML scanners put on an implicit key.
+_SUBSET_LINE = re.compile(r"([A-Za-z0-9][A-Za-z0-9_-]{0,63}): (.+)")
 
 #: Characters that start a YAML indicator (anchor, alias, tag, block scalar, quote, directive,
 #: reserved, sequence, complex key, mapping, flow, comment) and so may not start a plain value.

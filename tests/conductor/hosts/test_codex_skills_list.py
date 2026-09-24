@@ -373,6 +373,7 @@ ACCEPTED = {
     ),
     "crlf": ("---\r\nname: crlf\r\ndescription: d\r\n---\r\n", "crlf"),
     "max-name": (f"---\nname: {'m' * 64}\ndescription: d\n---\n", "m" * 64),
+    "max-key": (f"---\nname: maxkey\ndescription: d\n{'k' * 64}: v\n---\n", "maxkey"),
     "double-space": ('---\nname:  "dbl"\ndescription:   d\n---\n', "dbl"),
     "non-ascii-body": (
         "---\nname: body\ndescription: d\n---\ncafé \u2028 ok\n",
@@ -441,6 +442,9 @@ REJECTED = {
     "control-only-line": "---\nname: ctl\ndescription: d\n\u0001\n---\n",
     "control-only-line-2": "---\nname: ctl\n\u001c\ndescription: d\n---\n",
     "bom": "\ufeff---\nname: bom\ndescription: d\n---\n",
+    # round 4: YAML scanners cap an implicit key at 1024 characters; the subset caps keys at 64
+    "overlong-key": f"---\nname: long\ndescription: d\n{'k' * 1025}: v\n---\n",
+    "long-key": f"---\nname: long\ndescription: d\n{'k' * 65}: v\n---\n",
 }
 
 
