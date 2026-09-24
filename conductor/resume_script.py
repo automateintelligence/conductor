@@ -502,6 +502,23 @@ def fire_watchdog(h: base.HostAdapter) -> str:
         '        wait "$FIRE_PID"\n'
         "        rc=$?\n"
         "    fi\n"
+        "fi\n"
+        "# THE LEADER IS NOT THE FIRE. Everything above waits on the leader's pid, so a phase that\n"
+        "# returned while a child it backgrounded is still running would otherwise end here: this\n"
+        "# driver exits, the lock is released, and the next tick starts a second fire in the same\n"
+        "# checkout beside an orphan nothing bounds. Refusing to release instead is not available —\n"
+        "# the lock goes when this process does, and staying alive until the orphan chooses to\n"
+        "# exit is an unbounded wait. So the group gets FIRE_GRACE to finish on its own, then the\n"
+        "# same TERM-grace-KILL as an expiry. The worker's rc stands: reaping what a phase left\n"
+        "# behind does not rewrite how the phase itself ended, and `fire-orphans` records it.\n"
+        "if fire_alive; then\n"
+        "    fire_drain\n"
+        "    if fire_alive; then\n"
+        "        fire_shutdown\n"
+        '        fire_by=TERM; [ "$fire_rc" = 137 ] && fire_by=KILL\n'
+        "        printf '%s fire-orphans pgid=%s grace=%ss reaped-by=%s\\n' \\\n"
+        '            "$(ts)" "$FIRE_PID" "$FIRE_GRACE" "$fire_by" >> "$LOG"\n'
+        "    fi\n"
         "fi"
     )
 

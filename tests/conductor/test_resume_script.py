@@ -3022,6 +3022,56 @@ def test_a_signalled_driver_kills_a_worker_that_ignores_term(
     )
 
 
+#: A phase whose LEADER finishes normally (rc 0, well inside every window) while a background
+#: child it forked is still running in the fire's own process group — and ignoring TERM, so only
+#: the KILL escalation can end it. The leader waits until the child has recorded its pid, so the
+#: test always knows what it must reap.
+_BACKGROUNDING_FIRE = """#!/usr/bin/env bash
+printf '%s\\n' "$$" >> {pids}
+( trap '' TERM; printf '%s\\n' "$BASHPID" >> {pids}; exec sleep 30 ) </dev/null >/dev/null 2>&1 &
+deadline=$(( $(date +%s) + 10 ))
+while [ "$(wc -l < {pids})" -lt 2 ] && [ "$(date +%s)" -lt "$deadline" ]; do sleep 0.05; done
+exit 0
+"""
+
+
+def test_a_fire_whose_leader_exits_does_not_leave_its_group_running(
+    tmp_path, short_fire_bounds
+):
+    """The NORMAL-completion path, not the expiry or the trap: the leader returns 0 while a
+    child it backgrounded is still working in the run worktree. The driver used to wait for the
+    leader alone, release the lock and exit — so the next tick could start a second fire in the
+    same checkout beside an orphan nothing bounded. The driver must not release the lock while
+    anything of the fire's group is alive: it waits a bounded grace, then TERM, then KILL."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path,
+        _BACKGROUNDING_FIRE.format(pids=shlex.quote(str(tmp_path / "fire.pids"))),
+    )
+    try:
+        proc, elapsed = _fire_supervised(driver, home, pids, timeout=90)
+        alive = _survivors(pids)
+        free = _lock_is_free(project)
+        log = _log_of(project)
+    finally:
+        _reap(pids)
+
+    assert len(pids.read_text().split()) == 2, (
+        f"the fixture never produced a leader AND a child: {pids.read_text().split()}"
+    )
+    assert alive == [], (
+        f"the driver exited (and released the lock) with the fire's group still running: "
+        f"{alive}. log={log!r}"
+    )
+    assert free, log
+    # The phase's own status is the fire's result; reaping what it left behind does not rewrite it.
+    assert proc.returncode == 0, (proc.returncode, log)
+    assert "fire-end rc=0" in log, log
+    assert "fire-orphans" in log, log  # the reap is on the record, not silent
+    assert elapsed < 45, (elapsed, log)  # bounded: grace + TERM grace + KILL grace
+
+
 # ---- the expiry report names WHICH RUN stalled -----------------------------------------------
 #
 # §"Failure handling" requires every actionable failure to report the run key. `fire-timeout`
