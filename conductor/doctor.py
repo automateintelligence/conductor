@@ -282,18 +282,21 @@ def _text_path_tokens(text: str) -> list[str]:
     """The absolute paths free text names, as whole shell words.
 
     Split the way a shell would (quotes honoured, ``&&``/``;``/``|``/parentheses as their own
-    words), then each word's ``=``-separated parts, with sentence punctuation trimmed from the
-    end. Text shlex cannot parse (an unbalanced quote) falls back to whitespace words."""
+    words, ``#`` NOT a comment), then each word's ``=``-separated parts, with quote and backtick
+    wrappers and trailing sentence punctuation trimmed. Text shlex cannot parse (an unbalanced quote) falls back to whitespace words."""
     try:
         lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
+        # Free text, not a script: a `#` does not end what the task names. shlex's default
+        # comment stripping dropped every path after one.
+        lexer.commenters = ""
         words = list(lexer)
     except ValueError:
         words = text.split()
     paths = []
     for word in words:
         for part in word.split("="):
-            part = part.strip("\"'").rstrip(".,;:!?")
+            part = part.strip("\"'`").rstrip(".,;:!?")
             if part.startswith(("/", "~")):
                 paths.append(os.path.abspath(os.path.expanduser(part)))
     return paths

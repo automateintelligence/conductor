@@ -295,6 +295,9 @@ def test_a_scheduled_task_naming_the_checkout_or_beneath_it_in_free_text_blocks(
         f'"{checkout}"',
         f"cd {checkout}&&go",
         f"work in {checkout}.",
+        f"run `{checkout}/bin/x` nightly",
+        f"cd {checkout} #nightly",
+        f"# nightly: cd {checkout}",
     ):
         scheduled_tasks([{"prompt": text, "cwd": "/x"}])
         assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == {
