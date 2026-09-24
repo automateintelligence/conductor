@@ -20,6 +20,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -464,14 +465,28 @@ def _git_detail(exc: subprocess.SubprocessError) -> str:
     return " ".join(str(exc).split())
 
 
+#: git's answer when discovery walked the whole tree and found NO repository: the parenthesised
+#: "(or any of the parent directories)" form, or the "(or any parent up to mount point …)" form
+#: that a filesystem boundary produces. Anchored on the first line of stderr.
+_NO_REPOSITORY = re.compile(
+    r"\Afatal: not a git repository \(or any (?:of the parent directories|parent up to "
+    r"mount point [^)]*)\)"
+)
+
+
 def _definitely_no_repository(exc: subprocess.SubprocessError) -> bool:
-    """Did git ANSWER that there is no repository here? Exit 128 with git's own not-a-repository
-    message, and nothing else: a localized or unfamiliar message stays on the refusing side."""
+    """Did git ANSWER that there is no repository here? Exit 128 with git's discovery-failed
+    message, and nothing else.
+
+    NOT the bare substring "not a git repository": git prints ``fatal: not a git repository:
+    /path/.git/worktrees/x`` for a linked worktree whose gitdir pointer is broken, and that
+    names a repository that existed here, with run state that may still be live. That form, a
+    localized message and anything unfamiliar all stay on the refusing side."""
     return (
         isinstance(exc, subprocess.CalledProcessError)
         and exc.returncode == 128
         and isinstance(exc.stderr, str)
-        and "not a git repository" in exc.stderr
+        and _NO_REPOSITORY.match(exc.stderr.lstrip()) is not None
     )
 
 

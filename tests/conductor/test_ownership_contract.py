@@ -1111,3 +1111,43 @@ def test_a_codex_identity_without_its_recorded_home_is_refused_with_a_recovery(
     with pytest.raises(ownership.OwnerBusy) as refused:
         ownership.claim(harness.state_root, harness.run_key, host="claude")
     assert f"conductor run disown --run {harness.run_key} --force" in str(refused.value)
+
+
+def test_owner_busy_fails_closed_on_a_broken_worktree_pointer(tmp_path, capsys):
+    """git prints "not a git repository" for a linked worktree whose gitdir is gone too — but
+    that names a repository that EXISTED here, with a run state that may still be live. Only the
+    clean "no repository anywhere up the tree" answer is free."""
+    broken = tmp_path / "orphaned-worktree"
+    broken.mkdir()
+    (broken / ".git").write_text(
+        f"gitdir: {tmp_path / 'gone' / '.git' / 'worktrees' / 'x'}\n", encoding="utf-8"
+    )
+    rc = run_cmd.main(["owner-busy", "--project", str(broken)])
+    out = capsys.readouterr().out
+    assert rc == run_cmd.EXIT_OK, out
+    assert "state=unreadable" in out and "state=free" not in out, out
+
+
+@pytest.mark.parametrize(
+    ("stderr", "free"),
+    [
+        (
+            "fatal: not a git repository (or any of the parent directories): .git\n",
+            True,
+        ),
+        (
+            "fatal: not a git repository (or any parent up to mount point /mnt)\n"
+            "Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n",
+            True,
+        ),
+        ("fatal: not a git repository: /r/.git/worktrees/x\n", False),
+        (
+            "fatal: kein Git-Repository (oder irgendeines der Elternverzeichnisse): .git\n",
+            False,
+        ),
+    ],
+    ids=["clean", "mount-boundary", "broken-pointer", "localized"],
+)
+def test_only_gits_discovery_failure_reads_as_no_repository(stderr, free):
+    exc = subprocess.CalledProcessError(128, ["git"], stderr=stderr)
+    assert run_cmd._definitely_no_repository(exc) is free
