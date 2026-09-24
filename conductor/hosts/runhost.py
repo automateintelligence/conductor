@@ -122,3 +122,74 @@ def record(project_root: str, host_id: str) -> str:
 def adapter(project_root: str) -> HostAdapter:
     """The adapter for this project's recorded host."""
     return load(resolve(project_root))
+
+
+class HostConflict(Exception):
+    """The declared host disagrees with what this run is already bound to. Nothing written."""
+
+
+def _bound(project_root: str) -> str | None:
+    """The host this run is already bound to, or ``None`` for a genuinely fresh project.
+
+    A project with no host file but an installed Tier-B driver predates the file and fires
+    ``claude`` — the same absence rule ``resolve`` applies — so it is bound to the default.
+    """
+    found = recorded(project_root)
+    if found is not None:
+        return found
+    # Lazy: resume_script imports this module. `host_file` is `<main>/.conductor/host`, and
+    # the driver lives in that same checkout.
+    from conductor import resume_script
+
+    main_checkout = os.path.dirname(os.path.dirname(host_file(project_root)))
+    driver = resume_script.driver_script_path(main_checkout)
+    return DEFAULT_HOST if os.path.exists(driver) else None
+
+
+def _conflict(bound: str, declared: str, path: str) -> HostConflict:
+    return HostConflict(
+        f"host: this run is bound to `{bound}` ({path}), but you declared `{declared}`. "
+        "Nothing was changed.\n"
+        "  A run's host is what every fire, preflight, plan-lint and merge-gate reads, so a "
+        "start never rewrites it. Either:\n"
+        f"  - continue the run on `{bound}`: invoke "
+        f"{load(bound).native_invocation('conductor:start')} from {bound}; or\n"
+        f"  - move the run to `{declared}` on purpose: confirm no worker owns it "
+        "(`conductor run owner-busy` exits 11), then run "
+        f"`conductor driver install --worktree <run-worktree> --host {declared}`, which "
+        "rewrites the driver and the recording together, and start again. If no driver is "
+        f"installed yet (`conductor driver status` finds none), delete {path} instead."
+    )
+
+
+def declare(project_root: str, host_id: str) -> tuple[str, bool]:
+    """The running agent names itself: record ``host_id`` unless the run is already bound.
+
+    How ``conductor preflight --host`` establishes the host BEFORE preflight, plan-lint or
+    anything else resolves it — ``resolve`` answers the legacy default for an unrecorded
+    project, so a Codex start that recorded late had already been checked as Claude.
+
+    Returns ``(host_file, wrote)``. Same id already recorded: no write. Raises
+    ``HostConflict`` (nothing written) when the run is bound to another host, or when
+    ``$CONDUCTOR_HOST`` names another host — it outranks the recording, so every later check
+    in that shell would answer for it. Raises ``UnknownHost`` for an unsupported id or an
+    unreadable/garbage recording.
+    """
+    chosen = _validated(host_id, source="declare()")
+    path = host_file(project_root)
+    override = (os.environ.get(HOST_ENV) or "").strip()
+    if override and override != chosen:
+        raise HostConflict(
+            f"host: ${HOST_ENV}={override} is set in this environment and outranks any "
+            f"recording, so every check after this would run as `{override}`, not "
+            f"`{chosen}`. Nothing was changed. Unset ${HOST_ENV} (or set it to `{chosen}`) "
+            "and run this again."
+        )
+    bound = _bound(project_root)
+    if bound is not None and bound != chosen:
+        raise _conflict(bound, chosen, path)
+    if recorded(project_root) == chosen:
+        return path, False
+    # Fresh project, or a legacy driver-installed run declaring its own (default) host: write
+    # it down so the answer no longer rests on the absence rule.
+    return record(project_root, chosen), True

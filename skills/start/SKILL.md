@@ -26,7 +26,19 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 > exports `CONDUCTOR_GATE_SLUG` so `conductor gate freeze|lint` and `assert run` resolve that dir
 > during setup, before the goal/run-branch that carry the slug at run time are written.
 
-0. **PREFLIGHT (`conductor preflight`).** Confirm every conducted command resolves (Codex #1).
+0. **PREFLIGHT AS YOUR HOST (`conductor preflight --host <this-host>`).** Run it before any
+   other `conductor` command. `<this-host>` is `claude` or `codex`, YOUR OWN id: you are the
+   host executing this skill, and nothing below you can work it out (see step 6's `--host`).
+   `--host` first writes `<main-root>/.conductor/host`, which plan-lint (step 4b), the merge
+   gate and every fire also read, and then checks THAT host. Without it a fresh project
+   resolves the legacy `claude` default, so a Codex start would check Claude's skills and
+   demand the wrong reviewer. Recording is idempotent (the same id again changes nothing), and
+   it **refuses — exit 3, changing nothing and checking nothing — when this run is already
+   bound to the OTHER host**, or when `$CONDUCTOR_HOST` in your environment names the other
+   host. On exit 3 **STOP** and pass its message to the owner verbatim: it names the two ways
+   forward (resume the run from its recorded host, or move it to this host deliberately, by
+   the command it prints). Never delete or edit `.conductor/host` to get past it.
+   Then confirm every conducted command resolves (Codex #1).
    **Do not re-list the required commands here or in your report — run the command and read what
    it prints.** It resolves the set for THIS run's host and names every one of them in your
    host's own invocation form, including the **opposite-host review wrapper**, which is the one
@@ -220,7 +232,8 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    non-zero unless a durable driver exists (crontab marker or a matching scheduled task) with a
    clean recent log tail.
    - **`--host` is `claude` or `codex`, and it is YOUR OWN id — you are the host** executing
-     this skill. State it; do not omit it and do not make the CLI guess. Nothing below this
+     this skill, the same id step 0 recorded, so this install leaves the recording as it is.
+     State it; do not omit it and do not make the CLI guess. Nothing below this
      point can work it out: `driver install` runs as a subprocess, Claude Code exports
      `CLAUDECODE`/`CLAUDE_PLUGIN_ROOT` but the Codex ground truth records no exported
      equivalent, so "neither variable" is indistinguishable from a plain shell. An omitted

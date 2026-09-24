@@ -31,7 +31,7 @@ import sys
 from typing import TypedDict
 
 from conductor.hosts import discovery, runhost
-from conductor.hosts.base import HostProbeTimeout, opposite
+from conductor.hosts.base import HOST_IDS, HostProbeTimeout, UnknownHost, opposite
 
 
 class CheckResult(TypedDict):
@@ -290,7 +290,53 @@ def check(
     }
 
 
-if __name__ == "__main__":
+#: `preflight --host` refused the host (bound to another, or `$CONDUCTOR_HOST` disagrees).
+#: Distinct from 1 (a skill is missing/unverified) so a caller can tell "wrong host" from
+#: "incomplete stack" by status alone.
+HOST_REFUSED = 3
+
+_ARG_HELP = (
+    "conductor preflight [--host claude|codex]: checks every conducted skill on the run's "
+    "host. `--host` is YOUR OWN id — the agent running start names itself — and records it "
+    "first (idempotent; refuses to move a run bound to the other host)."
+)
+
+
+def _host_arg(args: list[str]) -> tuple[str | None, str | None]:
+    """``(host or None, error or None)``. Hand-rolled on purpose: a verb with one option has no
+    use for argparse, and an argument is either understood or refused — never ignored, which
+    is what let `preflight --host codex` run the Claude check without a word."""
+    if not args:
+        return None, None
+    if len(args) == 1 and args[0].startswith("--host="):
+        value = args[0].split("=", 1)[1]
+    elif len(args) == 2 and args[0] == "--host":
+        value = args[1]
+    else:
+        return None, f"unrecognized arguments: {' '.join(args)}"
+    if value not in HOST_IDS:
+        return None, f"unsupported host {value!r}; supported hosts are {HOST_IDS}"
+    return value, None
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`conductor preflight [--host <id>]` — record the host (when given), then check it."""
+    args = sys.argv[1:] if argv is None else argv
+    declared, error = _host_arg(args)
+    if error:
+        print(f"conductor preflight: {error}\n{_ARG_HELP}", file=sys.stderr)
+        return 64
+    if declared is not None:
+        try:
+            path, wrote = runhost.declare(os.getcwd(), declared)
+        except runhost.HostConflict as e:
+            print(str(e), file=sys.stderr)
+            return HOST_REFUSED
+        except (UnknownHost, OSError) as e:
+            print(f"conductor preflight: cannot record host: {e}", file=sys.stderr)
+            return HOST_REFUSED
+        state = "recorded in" if wrote else "already recorded in"
+        print(f"preflight: host {declared} ({state} {path})")
     host = runhost.resolve(os.getcwd())
     required = required_commands(host)
     result = check(host_id=host)
@@ -309,4 +355,8 @@ if __name__ == "__main__":
             f"preflight OK: {len(required)}/{len(required)} conducted skills resolved "
             f"on host {host}"
         )
-    sys.exit(0 if ok else 1)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
