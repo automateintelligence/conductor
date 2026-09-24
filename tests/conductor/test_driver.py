@@ -292,6 +292,18 @@ def test_status_recent_lock_unavailable_flips_nonzero_and_is_named(
     assert "reason=lock-held" not in out, "contention is evidence, not a failure"
 
 
+def test_status_recent_fire_unkillable_flips_nonzero_and_is_named(
+    tmp_path, monkeypatch, capsys
+):
+    """Part of a fire survived SIGKILL and the driver exited anyway (it must stay bounded), so
+    the lock is free while something of the old fire may still be writing to the worktree."""
+    proj = _durable(tmp_path, monkeypatch)
+    bad = f"{_now()} fire-unkillable pgid=4242 pids=4243 grace=10s"
+    (proj / ".conductor" / "resume-autodev.log").write_text(f"{bad}\n")
+    assert driver.status(str(proj)) == 1
+    assert bad in capsys.readouterr().out
+
+
 def test_status_clean_recent_log_stays_zero(tmp_path, monkeypatch, capsys):
     proj = _durable(tmp_path, monkeypatch)
     (proj / ".conductor" / "resume-autodev.log").write_text(

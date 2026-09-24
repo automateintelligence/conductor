@@ -58,6 +58,10 @@ _FAILURE_MARKERS = (
     # none will ever work until someone fixes the machine. `lock-held` is deliberately absent
     # — that is contention, which is the lock doing its job.
     "lock-unavailable",
+    # Part of a fire survived SIGKILL (D-state I/O). The driver exited anyway because it must stay
+    # bounded, so the lock is free while something of that fire may still be writing to the run
+    # worktree. Only a human can find and clear that process.
+    "fire-unkillable",
     # --- the ownership check, and why only HALF of it is a failure -------------------------
     #
     # The driver writes `fire-skipped reason=owner-busy` in two situations that look alike in

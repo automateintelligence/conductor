@@ -53,6 +53,11 @@ _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 # lock file that cannot be opened, is `EXIT_LOCK_UNAVAILABLE`: locking is broken, not busy.
 EXIT_LOCK_BUSY = 100
 EXIT_LOCK_UNAVAILABLE = 101
+# Part of a fire survived SIGKILL (uninterruptible sleep is the real case). Not
+# `EXIT_LOCK_UNAVAILABLE`: that says the driver never held the lock and nothing ran, while this
+# says a fire DID run and the driver had to release the lock with some of it still alive — a
+# different fault with a different remedy (find the process, not fix the machine's locking).
+EXIT_FIRE_UNKILLABLE = 102
 
 # Antipatterns whose PRESENCE in an installed script means it is a rotted pre-v2 driver: a
 # node-version-pinned bin path, or a plugin path pinned to a specific conductor version.
@@ -372,6 +377,22 @@ def fire_supervision_prologue() -> str:
         "        fire_rc=137\n"
         "    else\n"
         "        fire_rc=124\n"
+        "    fi\n"
+        "    # SOMETHING SURVIVED KILL — uninterruptible sleep (D-state I/O) is the real case.\n"
+        "    # Nothing can force it to die and waiting for it is unbounded, so this driver still\n"
+        "    # exits; what it must not do is exit as if the KILL had settled it, releasing the lock\n"
+        "    # with part of the fire alive and nothing on the record. Loud line, distinct status.\n"
+        "    if fire_alive; then\n"
+        '        fire_left="unknown"\n'
+        '        if [ -n "$FIRE_PS" ]; then\n'
+        '            fire_left="$("$FIRE_PS" -eo pid=,pgid= 2>/dev/null | awk -v g="$FIRE_PID" \'\n'
+        '                $2 == g { printf "%s%s", s, $1; s = "," }\')"\n'
+        "        fi\n"
+        "        printf '%s fire-unkillable pgid=%s pids=%s grace=%ss\\n' \\\n"
+        '            "$(ts)" "$FIRE_PID" "${fire_left:-unknown}" "$FIRE_GRACE" >> "$LOG"\n'
+        "        printf '%s fire-end rc=%s\\n' "
+        f'"$(ts)" "{EXIT_FIRE_UNKILLABLE}" >> "$LOG"\n'
+        f"        exit {EXIT_FIRE_UNKILLABLE}\n"
         "    fi\n"
         "}\n"
         "# The fire gets its OWN process group: the sampler must not read this driver's polling as\n"

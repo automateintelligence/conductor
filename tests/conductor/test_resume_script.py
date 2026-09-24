@@ -3072,6 +3072,55 @@ def test_a_fire_whose_leader_exits_does_not_leave_its_group_running(
     assert elapsed < 45, (elapsed, log)  # bounded: grace + TERM grace + KILL grace
 
 
+#: The two lines of the rendered driver the unkillable-survivor seam rewrites. Asserted present
+#: before rewriting, so a template change that moves them fails loudly instead of silently
+#: testing an unmodified driver.
+_FIRE_ALIVE_LINE = (
+    '    kill -0 -"$FIRE_PID" 2>/dev/null || kill -0 "$FIRE_PID" 2>/dev/null\n'
+)
+_FIRE_KILL_LINE = '        kill -KILL -"$FIRE_PID" 2>/dev/null || kill -KILL "$FIRE_PID" 2>/dev/null || true\n'
+
+
+def test_a_fire_member_that_survives_kill_fails_loud_instead_of_releasing_silently(
+    tmp_path, short_fire_bounds
+):
+    """A process in uninterruptible sleep (D-state I/O) survives SIGKILL. Nothing can force it
+    to die and the driver must stay bounded, so it cannot wait — but it must not exit as if the
+    KILL had settled it either: that releases the lock with part of the fire still alive and
+    says nothing. An unkillable process cannot be manufactured in a test, so the seam is
+    `fire_alive` itself: once the KILL has been sent, it keeps answering "alive"."""
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    from conductor import driver as driver_mod
+
+    project, driver, home, pids = _mk_fire_harness(
+        tmp_path, _HANGING_FIRE.format(pids=str(tmp_path / "fire.pids"))
+    )
+    text = driver.read_text()
+    assert text.count(_FIRE_ALIVE_LINE) == 1 and text.count(_FIRE_KILL_LINE) == 1, (
+        "the seam no longer matches the template"
+    )
+    text = text.replace(
+        _FIRE_ALIVE_LINE,
+        '    [ -n "${SEAM_KILL_SENT:-}" ] && return 0\n' + _FIRE_ALIVE_LINE,
+    ).replace(_FIRE_KILL_LINE, _FIRE_KILL_LINE + "        SEAM_KILL_SENT=1\n")
+    driver.write_text(text)
+    try:
+        proc, elapsed = _fire_supervised(driver, home, pids, timeout=90)
+        log = _log_of(project)
+    finally:
+        _reap(pids)
+
+    assert "fire-unkillable" in log and "pgid=" in log and "pids=" in log, log
+    assert proc.returncode == rs.EXIT_FIRE_UNKILLABLE, (proc.returncode, log)
+    assert f"fire-end rc={rs.EXIT_FIRE_UNKILLABLE}" in log, log
+    assert elapsed < 45, (elapsed, log)  # bounded: it did not wait for the survivor
+    line = next(ln for ln in log.splitlines() if "fire-unkillable" in ln)
+    assert any(m in line for m in driver_mod._FAILURE_MARKERS), (
+        f"`conductor driver status` would not report {line!r} as a failure"
+    )
+
+
 # ---- the expiry report names WHICH RUN stalled -----------------------------------------------
 #
 # §"Failure handling" requires every actionable failure to report the run key. `fire-timeout`
