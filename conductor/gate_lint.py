@@ -194,6 +194,31 @@ def _resolve_test_files(
     return findings, files
 
 
+def _gate_owned_test_files(gate_dir: str) -> list[str]:
+    """The test files THIS gate owns: pytest-collectable files under ``gate_dir``, stopping at
+    any subdirectory that holds its own ``manifest.yaml``.
+
+    Such a subdirectory is a separate gate — the flat ``assertions/manifest.yaml`` sits above
+    every namespaced ``assertions/<slug>/`` gate — and its tests are named by ITS manifest, so
+    walking into it would accuse them of being this gate's orphans.
+
+    Deliberately NOT ``freeze._collect_test_files``'s walk with a boundary added: that walk
+    also expands a directory token in a command into the files it freezes and references,
+    where a nested manifest is irrelevant — pytest collects beneath it regardless."""
+    found: list[str] = []
+    for root, dirs, names in os.walk(gate_dir):
+        dirs[:] = [
+            d
+            for d in dirs
+            if d != "__pycache__"
+            and not os.path.isfile(os.path.join(root, d, "manifest.yaml"))
+        ]
+        found.extend(
+            os.path.join(root, name) for name in names if freeze._is_test_file(name)
+        )
+    return found
+
+
 def _orphan_test_files(
     gate_dir: str, referenced: set[str], repo_root: str
 ) -> list[str]:
@@ -216,7 +241,7 @@ def _orphan_test_files(
     if not os.path.isdir(gate_dir):
         return []
     findings = []
-    for path in freeze._collect_test_files(gate_dir):
+    for path in _gate_owned_test_files(gate_dir):
         if os.path.basename(path) == "conftest.py":
             continue
         if os.path.realpath(path) in referenced:
