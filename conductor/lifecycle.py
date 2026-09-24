@@ -53,6 +53,7 @@ production caller, so a project whose runs all ended kept a permanently wrong ``
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import json
 import os
@@ -596,14 +597,29 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
     # the binding and then launching without it let an install for another run rewrite the
     # script in between, and the rewritten script ran under THIS run's ownership. It is held for
     # the whole fire, not just the spawn, because the writer rewrites the file IN PLACE and bash
-    # reads its script as it executes: a rewrite mid-fire changes the running driver. A writer
-    # arriving during a fire waits `INSTALL_LOCK_TIMEOUT_S` and then fails loudly having changed
-    # nothing. Lock order: this is a `project`-rank lock on its own file, taken before
-    # `_commit`'s project.lock and ownership's owner.lock; no script writer takes either of those,
-    # so no cycle exists.
+    # reads its script as it executes: a rewrite mid-fire changes the running driver.
+    #
+    # TAKEN NON-BLOCKING. A held lock means a fire or an install is in progress right now — the
+    # ordinary overlap of a */20 schedule with a long fire — and this tick has nothing to add:
+    # it skips successfully and at once, the same outcome as a live owner, with no wait before
+    # it. (An operator's `driver install` DOES wait for it, `INSTALL_LOCK_TIMEOUT_S`, then fails
+    # naming the lock: an explicit action should be told, a cron tick should not queue.)
+    #
+    # Lock order: a `project`-rank lock on its own file, taken before `_commit`'s project.lock
+    # and ownership's owner.lock; no script writer takes either of those, so no cycle exists.
     lock = resume_script.install_lock_for(script)
     os.makedirs(os.path.dirname(lock), exist_ok=True)
-    with locks.hold(lock, kind="project", timeout=resume_script.INSTALL_LOCK_TIMEOUT_S):
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(locks.hold(lock, kind="project", timeout=0))
+        except locks.LockTimeout:
+            print(
+                f"run {key} fire skipped: the driver's install lock {lock} is held, so a fire "
+                "or a driver install is in progress; nothing was launched and no write "
+                "occurred.",
+                file=sys.stderr,
+            )
+            return EXIT_OK
         return _fire_bound_driver(resolution, script)
 
 

@@ -679,6 +679,50 @@ def test_a_concurrent_install_cannot_rebind_the_driver_between_check_and_launch(
     assert ours.exists() and not stolen.exists()
 
 
+def test_a_heartbeat_overlapping_a_held_install_lock_skips_at_once(
+    project, capsys
+) -> None:
+    """A fire (or an install) holds the driver's install lock. A cron tick landing on it is the
+    ordinary overlap of a */20 schedule with a long fire: it must skip successfully and at once,
+    exactly like a tick that finds a live owner — not wait, and not fail."""
+    from conductor import resume_script
+
+    marker = project.root / "fired"
+    script = _install_driver(project, f"#!/bin/sh\ntouch {marker}\n")
+    lock = resume_script.install_lock_for(str(script))
+    ready = project.root / "install-lock-held"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys, time\n"
+            "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "open(sys.argv[2], 'w').close()\n"
+            "time.sleep(300)\n",
+            lock,
+            str(ready),
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists(), "the install-lock holder never took the lock"
+        started = time.monotonic()
+        rc = project.verb("heartbeat", "--run", project.run_key)
+        elapsed = time.monotonic() - started
+        err = capsys.readouterr().err
+        assert rc == lifecycle.EXIT_OK, err
+        assert elapsed < 1.0, elapsed
+        assert "fire skipped" in err and "install lock" in err, err
+        assert not marker.exists()
+        assert holder.poll() is None, "the holder exited; this proved nothing"
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
+
+
 def test_heartbeat_refuses_a_same_branch_checkout_of_another_repository(
     project, tmp_path, capsys
 ) -> None:
