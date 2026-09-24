@@ -177,8 +177,8 @@ def spec_roots() -> tuple[str, ...]:
     the run does not care about, with no way for the project to scope it out; a repo that wants
     both lists both.
 
-    Read per call, never cached at import, because tests (and `/conductor:start`) set it after
-    this module is imported — the same reason ``merge_gate`` re-reads its variables per call.
+    Read per call, never cached at import, because tests (and the `conductor:start` skill) set
+    it after this module is imported — the same reason ``merge_gate`` re-reads its variables per call.
 
     Refuses (``InvalidSpecRoots``) an ABSOLUTE root — roots are joined onto the project root and
     matched against repo-relative prose, so an absolute one silently matches nothing — a root

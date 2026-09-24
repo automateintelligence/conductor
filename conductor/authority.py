@@ -73,7 +73,7 @@ def write_resume_env(project_root: str, env: dict[str, str]) -> str:
 
     ``export`` is load-bearing, not cosmetic. The driver SOURCES this file
     (``resume_script.render``: ``. "$ENV_FILE"``) and then execs ``conductor assert run`` and
-    ``claude -p /conductor:autodev``. Every variable here except
+    the host's worker launch (the ``conductor:autodev`` skill). Every variable here except
     ``CONDUCTOR_RESUME_CLAUDE_FLAGS`` — which the driver itself expands — is read by one of
     those CHILDREN: ``CONDUCTOR_SPEC_ROOTS`` and ``CONDUCTOR_PLUGIN_DIRS`` by ``conductor``,
     ``CONDUCTOR_MERGE_VERIFY`` by ``conductor merge`` a level below that, ``DOCKER_HOST`` by

@@ -114,8 +114,9 @@ def _referenced_files(entry: dict, repo_root: str) -> dict:
 def _source_candidates(spec_path: str) -> list[str]:
     """The accepted assertions-source spellings for a spec path, PREFERRED FIRST.
 
-    spec-craft (`/spec-craft:executable-assertions`) WRITES `docs/specs/<stem>.assertions.md`
-    and conductor only READS it, so the stem form is the binding one and is tried first. The
+    spec-craft (the `spec-craft:executable-assertions` skill) WRITES
+    `docs/specs/<stem>.assertions.md` and conductor only READS it, so the stem form is the
+    binding one and is tried first. The
     legacy `<spec>.md.assertions.md` form — what conductor demanded when it appended
     `.assertions.md` to a path that already ended in `.md` — stays accepted so repos that
     bridged the mismatch with a committed file or symlink keep resolving and keep verifying.
