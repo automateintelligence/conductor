@@ -55,6 +55,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -273,9 +274,21 @@ def _task_names_checkout(entry: dict, roots: tuple[str, ...]) -> str | None:
         if not isinstance(value, str):
             continue
         for root in roots:
-            if root in value:
+            if _text_names_path(value, root):
                 return root
     return None
+
+
+def _text_names_path(text: str, root: str) -> bool:
+    """Does free text name ``root`` or a path beneath it — on PATH BOUNDARIES?
+
+    A bare substring test reads ``/projects/app`` inside ``/projects/app-backup``, and inside
+    ``/mirror/projects/app``, so one checkout's scan was blocked by every sibling that happened
+    to extend its name. The occurrence must start where a path can start (not after a path
+    character) and end at the path's end or at a separator."""
+    stem = root.rstrip(os.sep) or root
+    pattern = r"(?<![\w.~/-])" + re.escape(stem) + r"(?![\w.~-])"
+    return re.search(pattern, text) is not None
 
 
 def _scheduled_task_findings(checkout: str, roots: tuple[str, ...]) -> list[Finding]:

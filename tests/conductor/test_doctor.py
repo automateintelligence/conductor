@@ -266,6 +266,38 @@ def test_a_harness_scheduled_task_for_another_project_does_not_block(
     assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == set()
 
 
+def test_a_scheduled_task_naming_a_sibling_path_that_extends_the_checkouts_does_not_block(
+    checkout, stub_crontab, scheduled_tasks
+):
+    """``/projects/app`` is a string prefix of ``/projects/app-backup`` and of
+    ``/projects/app.old``, not a parent of either. Only a path boundary names the checkout."""
+    stub_crontab([])
+    scheduled_tasks(
+        [
+            {"prompt": f"cd {checkout}-backup && /conductor:autodev", "cwd": "/x"},
+            {"prompt": f"cd {checkout}.old && /conductor:autodev", "cwd": "/x"},
+            {"prompt": f"run /mirror{checkout} now", "cwd": "/x"},
+        ]
+    )
+    assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == set()
+
+
+def test_a_scheduled_task_naming_the_checkout_or_beneath_it_in_free_text_blocks(
+    checkout, stub_crontab, scheduled_tasks
+):
+    stub_crontab([])
+    for text in (
+        f"cd '{checkout}' && go",
+        f"--project={checkout}/sub",
+        f"{checkout}",
+        f'"{checkout}"',
+    ):
+        scheduled_tasks([{"prompt": text, "cwd": "/x"}])
+        assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == {
+            "installed-schedule"
+        }, text
+
+
 def test_an_unreadable_harness_scheduled_task_file_blocks(
     checkout, stub_crontab, scheduled_tasks
 ):
