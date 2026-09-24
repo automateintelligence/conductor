@@ -389,6 +389,35 @@ def record(
     return baseline_path
 
 
+_LEGACY_SUFFIX = ".md.assertions.md"
+
+
+def _spec_key(rel: str) -> str:
+    """One key per SPEC, whichever accepted spelling names its assertions source: the legacy
+    ``<spec>.md.assertions.md`` folds onto spec-craft's ``<stem>.assertions.md``."""
+    if rel.endswith(_LEGACY_SUFFIX):
+        return rel[: -len(_LEGACY_SUFFIX)] + ".assertions.md"
+    return rel
+
+
+def _same_sources(current: dict, recorded: dict) -> bool:
+    """Whether the CURRENT assertions-source selection is the one the baseline recorded.
+
+    Raw path keys are not enough across the naming upgrade. Every baseline written before
+    ``_source_candidates`` existed records the legacy ``<spec>.md.assertions.md`` key, and a
+    repo that bridged spec-craft's stem spelling with a committed copy or symlink now has both
+    present — so ``_pick_source`` returns the STEM path for a gate nobody touched. The two
+    spellings of one spec count as one source only when the bytes selected now equal the
+    bytes the baseline recorded; ``_pick_source`` has already refused if the two spellings
+    disagree with each other, and a changed recorded file is reported on its own above."""
+    if set(current) == set(recorded):
+        return True
+    by_key = {_spec_key(rel): dig for rel, dig in recorded.items()}
+    if len(by_key) != len(recorded) or len(current) != len(recorded):
+        return False
+    return all(by_key.get(_spec_key(rel)) == dig for rel, dig in current.items())
+
+
 def verify(
     manifest_path: str = DEFAULT_MANIFEST,
     baseline_path: str = DEFAULT_BASELINE,
@@ -470,7 +499,9 @@ def verify(
             except Exception as exc:  # ambiguous/missing now -> fail closed
                 current_set = None
                 tampered.append(f"assertions-source-unresolvable: {exc}")
-            if current_set is not None and current_set != set(base_sources):
+            if current_set is not None and not _same_sources(
+                current_sources, base_sources
+            ):
                 tampered.append(
                     "assertions-source-set-changed "
                     f"(recorded {sorted(base_sources)}, current {sorted(current_set)})"

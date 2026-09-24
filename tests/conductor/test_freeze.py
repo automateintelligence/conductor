@@ -996,3 +996,60 @@ def test_pointer_selected_unreadable_source_is_a_domain_refusal(tmp_path):
     finally:
         stem_path.chmod(0o644)
     assert not os.path.exists(baseline)
+
+
+# ------------------- a baseline recorded under the legacy spelling survives the upgrade
+#
+# Before the port, conductor could only read `<spec>.md.assertions.md`, so every existing
+# `.frozen` records that key. Repos that bridged spec-craft's `<stem>.assertions.md` did it
+# with a committed copy or symlink, so both spellings are now present and `_pick_source`
+# prefers the stem one. Comparing raw path keys then read "set changed" on a gate nobody
+# touched. The two spellings of ONE spec are one source when their bytes agree; divergent
+# bytes stay a hard failure (issue #73: a frozen gate must verify across an upgrade).
+
+
+def _freeze_legacy_then_bridge(tmp_path, bridge, pointer=False):
+    manifest, baseline = _setup(tmp_path)
+    stem_path, legacy_path = _spec_with_sources(tmp_path, legacy=True)
+    if pointer:
+        _add_pointer(tmp_path, "docs/specs/fixture-spec.md")
+    freeze.record(manifest, baseline, str(tmp_path))
+    doc = json.loads(open(baseline).read())
+    assert list(doc["sources"]) == ["docs/specs/fixture-spec.md.assertions.md"]
+    if bridge == "copy":
+        stem_path.write_text(legacy_path.read_text())
+    elif bridge == "symlink":
+        stem_path.symlink_to(legacy_path.name)
+    elif bridge == "divergent":
+        stem_path.write_text("# a different done-definition\n")
+    return manifest, baseline
+
+
+@pytest.mark.parametrize("pointer", [False, True], ids=["goal", "pointer"])
+@pytest.mark.parametrize("bridge", ["copy", "symlink"])
+def test_a_legacy_spelled_baseline_still_verifies_once_the_stem_spelling_appears(
+    tmp_path, bridge, pointer
+):
+    manifest, baseline = _freeze_legacy_then_bridge(tmp_path, bridge, pointer)
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is True and res["tampered"] == [], res
+
+
+@pytest.mark.parametrize("pointer", [False, True], ids=["goal", "pointer"])
+def test_a_divergent_stem_spelling_beside_a_legacy_baseline_still_fails(
+    tmp_path, pointer
+):
+    manifest, baseline = _freeze_legacy_then_bridge(tmp_path, "divergent", pointer)
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert res["ok"] is False
+    assert any("divergent-assertions-source" in t for t in res["tampered"]), res
+
+
+def test_a_legacy_baseline_does_not_excuse_a_different_specs_source(tmp_path):
+    # the equivalence is per SPEC: a stem file for another spec is still a changed set
+    manifest, baseline = _setup(tmp_path)
+    _add_source(tmp_path, goal=True, specs=("spec-a", "spec-b"))
+    freeze.record(manifest, baseline, str(tmp_path))
+    (tmp_path / ".conductor" / "goal.md").write_text("Implement docs/specs/spec-b.md\n")
+    res = freeze.verify(manifest, baseline, str(tmp_path))
+    assert any("assertions-source-set-changed" in t for t in res["tampered"]), res
