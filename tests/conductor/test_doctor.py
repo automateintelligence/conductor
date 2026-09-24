@@ -266,6 +266,79 @@ def test_a_harness_scheduled_task_for_another_project_does_not_block(
     assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == set()
 
 
+def test_a_scheduled_task_naming_a_sibling_path_that_extends_the_checkouts_does_not_block(
+    checkout, stub_crontab, scheduled_tasks
+):
+    """``/projects/app`` is a string prefix of ``/projects/app-backup`` and of
+    ``/projects/app.old``, not a parent of either. Only a path boundary names the checkout."""
+    stub_crontab([])
+    scheduled_tasks(
+        [
+            {"prompt": f"cd {checkout}-backup && /conductor:autodev", "cwd": "/x"},
+            {"prompt": f"cd {checkout}.old && /conductor:autodev", "cwd": "/x"},
+            {"prompt": f"run /mirror{checkout} now", "cwd": "/x"},
+            {"prompt": f"cd {checkout}+backup && go", "cwd": "/x"},
+            {"prompt": f"cd {checkout}@old && go", "cwd": "/x"},
+        ]
+    )
+    assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == set()
+
+
+def test_a_scheduled_task_naming_the_checkout_or_beneath_it_in_free_text_blocks(
+    checkout, stub_crontab, scheduled_tasks
+):
+    stub_crontab([])
+    for text in (
+        f"cd '{checkout}' && go",
+        f"--project={checkout}/sub",
+        f"{checkout}",
+        f'"{checkout}"',
+        f"cd {checkout}&&go",
+        f"work in {checkout}.",
+        f"run `{checkout}/bin/x` nightly",
+        f"cd {checkout} #nightly",
+        f"# nightly: cd {checkout}",
+    ):
+        scheduled_tasks([{"prompt": text, "cwd": "/x"}])
+        assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == {
+            "installed-schedule"
+        }, text
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        'cd "{c}/my app" # don\'t change branch',
+        "cd '{c}/my app' && go # it's nightly",
+        'run "{c}/my app/bin/x" \'unbalanced',
+        "Work in `{c}/my app`.",
+        "Work in `{c}`.",
+        "(see `{c}`),",
+        "cd {c} #nightly",
+        "# nightly: cd {c}",
+        "run `{c}/bin/x` nightly",
+    ],
+)
+def test_free_text_paths_survive_comments_quotes_and_wrappers(
+    checkout, stub_crontab, scheduled_tasks, template
+):
+    """Every spelling here names the checkout (or beneath it) as a whole path. A lexing failure
+    must never fall back to splitting a quoted path at its space, and wrapper/punctuation
+    stripping must run until nothing more comes off."""
+    stub_crontab([])
+    scheduled_tasks([{"prompt": template.format(c=checkout), "cwd": "/x"}])
+    assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == {"installed-schedule"}
+
+
+def test_a_quoted_path_is_never_truncated_at_its_space(checkout, tmp_path):
+    """``/projects/my`` must not be read out of ``"/projects/my app"``: the truncated word names
+    a DIFFERENT directory, which is a false match in one direction and a miss in the other."""
+    text = f'cd "{tmp_path}/my app" # don\'t change branch'
+    paths = doctor._text_path_tokens(text)
+    assert f"{tmp_path}/my app" in paths, paths
+    assert f"{tmp_path}/my" not in paths, paths
+
+
 def test_an_unreadable_harness_scheduled_task_file_blocks(
     checkout, stub_crontab, scheduled_tasks
 ):
@@ -317,6 +390,42 @@ def test_a_held_driver_fire_lock_blocks_with_no_owner_record_and_no_crontab(
         assert holder.poll() is None, (
             "the holder died, so nothing was observed against it"
         )
+
+
+def test_a_fire_lock_taken_through_the_flock_helper_blocks(checkout, stub_crontab):
+    """Exactly as the generated driver takes it: ``exec 9>"$LOCK"; flock -n 9``. The ``flock``
+    helper that took the lock exits at once, and ``/proc/locks`` omits a lock whose recorded pid
+    is gone — so a scan that read only that table reported CLEAR under a running driver (#95)."""
+    stub_crontab([])
+    lock = checkout / ".conductor" / "resume.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    ready = checkout / "fire-lock-held"
+    holder = subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            'exec 9>"$1"; flock -n 9 || exit 7; : > "$2"; exec sleep 300',
+            "fire",
+            str(lock),
+            str(ready),
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists() and time.monotonic() < deadline:
+            assert holder.poll() is None, "the driver-shaped holder exited early"
+            time.sleep(0.02)
+        assert ready.exists(), "the driver-shaped holder never took the lock"
+        predicates = doctor.scan(str(checkout))
+        assert _names(predicates, doctor.QUIESCE) == {"driver-fire-lock"}
+        finding = next(p for p in predicates if p.name == "driver-fire-lock").findings[
+            0
+        ]
+        assert str(holder.pid) in finding.detail, finding.detail
+        assert holder.poll() is None, "the holder died, so nothing was observed"
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
 
 
 def test_the_scan_refuses_rather_than_clearing_while_a_fire_lock_is_held(

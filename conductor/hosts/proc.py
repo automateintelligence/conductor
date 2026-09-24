@@ -310,3 +310,62 @@ def path_lock_state(path: str) -> tuple[str, tuple[int, ...]]:
     if holders is None:
         return "unheld", ()
     return "held", holders
+
+
+def holds_flock(pid: int, st: os.stat_result) -> bool:
+    """Does one of ``pid``'s open file DESCRIPTIONS hold a ``flock`` on the file ``st`` names?
+
+    Having the file open is not holding the lock: ``flock`` belongs to the open file
+    description. The kernel says which description holds it in ``/proc/<pid>/fdinfo/<fd>``: a
+    ``lock:`` line carrying ``FLOCK`` and the file's ``major:minor:inode`` appears only on the
+    description the lock belongs to — including one inherited from an ancestor's
+    ``exec 9>"$LOCK"; flock -n 9``, whose locking ``flock`` helper has long exited. That helper's
+    exit is also why ``/proc/locks`` cannot be relied on here: it omits a lock whose recorded
+    pid no longer exists. Anything unreadable answers no."""
+    want = (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
+    directory = f"/proc/{pid}/fd"
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return False
+    for name in names:
+        try:
+            opened = os.stat(os.path.join(directory, name))
+        except OSError:
+            continue
+        if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):
+            continue
+        try:
+            with open(f"/proc/{pid}/fdinfo/{name}", encoding="utf-8") as handle:
+                info = handle.read().splitlines()
+        except OSError:
+            continue
+        for line in info:
+            if not line.startswith("lock:") or "FLOCK" not in line.split():
+                continue
+            for token in line.split():
+                parts = token.split(":")
+                if len(parts) != 3:
+                    continue
+                try:
+                    found = (int(parts[0], 16), int(parts[1], 16), int(parts[2]))
+                except ValueError:
+                    continue
+                if found == want:
+                    return True
+    return False
+
+
+def flock_holder_pids(st: os.stat_result) -> list[int]:
+    """Every process whose open file descriptions hold a ``flock`` on the file ``st`` names,
+    per ``holds_flock``. Read-only: the lock is never taken to test it. Processes whose
+    descriptor tables this user cannot read are not seen."""
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    return sorted(
+        int(entry)
+        for entry in entries
+        if entry.isdigit() and holds_flock(int(entry), st)
+    )

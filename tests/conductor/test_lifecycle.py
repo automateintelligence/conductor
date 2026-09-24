@@ -486,12 +486,48 @@ def test_resume_sends_a_merged_final_pull_request_to_finish_instead(
 # --- heartbeat ------------------------------------------------------------------------------
 
 
-def _install_driver(project: Project, body: str) -> Path:
+def _run_worktree(project: Project, branch: str, name: str = "run") -> Path:
+    """A linked worktree with ``branch`` checked out — what ``driver install --worktree`` names."""
+    path = project.root / ".worktrees" / name
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project.root),
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    return path
+
+
+def _install_driver(
+    project: Project, body: str, *, worktree: Path | None = None
+) -> Path:
+    """The project's driver script, bound (as the generated one is) to a run worktree.
+
+    ``body``'s shebang line is kept first; the ``WORKTREE=`` binding follows it, spelled the way
+    ``resume_script.render`` spells it. The default binding is a worktree on THIS run's
+    integration branch."""
+    import shlex
+
     from conductor import resume_script
 
+    if worktree is None:
+        worktree = _run_worktree(project, project.run["integration_branch"])
+    shebang, _, rest = body.partition("\n")
     path = Path(resume_script.driver_script_path(str(project.root)))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    path.write_text(
+        f"{shebang}\nWORKTREE={shlex.quote(str(worktree))}\n{rest}", encoding="utf-8"
+    )
     path.chmod(0o755)
     return path
 
@@ -564,6 +600,250 @@ def test_heartbeat_reports_a_failing_fire(project, capsys) -> None:
     _install_driver(project, "#!/bin/sh\nexit 9\n")
     assert project.verb("heartbeat", "--run", project.run_key) == 1
     assert "fire ended rc=9" in capsys.readouterr().err
+
+
+def test_heartbeat_refuses_a_driver_bound_to_another_runs_worktree(
+    project, capsys
+) -> None:
+    """The project has ONE driver script and it drives ONE worktree. A heartbeat fired for this
+    run must not launch it while it is bound to a worktree carrying some other run's branch."""
+    marker = project.root / "fired"
+    other = _run_worktree(project, "conductor/run-some-other-run-0123abcd", "other")
+    _install_driver(project, f"#!/bin/sh\ntouch {marker}\n", worktree=other)
+    assert project.verb("heartbeat", "--run", project.run_key) == 1
+    err = capsys.readouterr().err
+    assert str(other) in err and project.run["integration_branch"] in err, err
+    assert "no fire was launched" in err
+    assert "conductor driver install --worktree" in err
+    assert not marker.exists()
+    assert ownership.read(project.state_root, project.run_key) is None
+
+
+def test_heartbeat_refuses_a_driver_that_names_no_run_worktree(project, capsys) -> None:
+    from conductor import resume_script
+
+    marker = project.root / "fired"
+    script = Path(resume_script.driver_script_path(str(project.root)))
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    script.chmod(0o755)
+    assert project.verb("heartbeat", "--run", project.run_key) == 1
+    assert "names no run worktree" in capsys.readouterr().err
+    assert not marker.exists()
+
+
+def test_a_concurrent_install_cannot_rebind_the_driver_between_check_and_launch(
+    project, monkeypatch
+) -> None:
+    """The binding is checked, then the script is launched. A ``driver install`` for another
+    run landing in between used to swap in a script bound elsewhere, which then ran under THIS
+    run's ownership. Every writer of the script takes ``install_lock_for(script)``; the heartbeat
+    holds it across the check and the launch, so the rewrite waits (here: is refused)."""
+    from conductor import resume_script
+
+    ours, stolen = project.root / "fired", project.root / "stolen"
+    script = _install_driver(project, f"#!/bin/sh\ntouch {ours}\n")
+    other = _run_worktree(project, "conductor/run-some-other-run-0123abcd", "other")
+    lock = resume_script.install_lock_for(str(script))
+    rebinder = (
+        "import fcntl, os, sys\n"
+        "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "try:\n"
+        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "except BlockingIOError:\n"
+        "    sys.exit(3)\n"
+        "open(sys.argv[2], 'w').write(sys.argv[3])\n"
+    )
+    attempts: list[int] = []
+    real = lifecycle.runhost.resolve
+
+    def install_lands_now(root):
+        attempts.append(
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    rebinder,
+                    lock,
+                    str(script),
+                    f"#!/bin/sh\nWORKTREE={other}\ntouch {stolen}\n",
+                ],
+                timeout=30,
+            ).returncode
+        )
+        return real(root)
+
+    monkeypatch.setattr(lifecycle.runhost, "resolve", install_lands_now)
+    assert project.verb("heartbeat", "--run", project.run_key) == 0
+    assert attempts == [3], attempts
+    assert ours.exists() and not stolen.exists()
+
+
+def test_a_heartbeat_overlapping_a_held_install_lock_skips_at_once(
+    project, capsys
+) -> None:
+    """A fire (or an install) holds the driver's install lock. A cron tick landing on it is the
+    ordinary overlap of a */20 schedule with a long fire: it must skip successfully and at once,
+    exactly like a tick that finds a live owner — not wait, and not fail."""
+    from conductor import resume_script
+
+    marker = project.root / "fired"
+    script = _install_driver(project, f"#!/bin/sh\ntouch {marker}\n")
+    lock = resume_script.install_lock_for(str(script))
+    ready = project.root / "install-lock-held"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys, time\n"
+            "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "open(sys.argv[2], 'w').close()\n"
+            "time.sleep(300)\n",
+            lock,
+            str(ready),
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists(), "the install-lock holder never took the lock"
+        started = time.monotonic()
+        rc = project.verb("heartbeat", "--run", project.run_key)
+        elapsed = time.monotonic() - started
+        err = capsys.readouterr().err
+        assert rc == lifecycle.EXIT_OK, err
+        assert elapsed < 1.0, elapsed
+        assert "fire skipped" in err and "install lock" in err, err
+        assert not marker.exists()
+        assert holder.poll() is None, "the holder exited; this proved nothing"
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
+
+
+def test_heartbeat_refuses_a_same_branch_checkout_of_another_repository(
+    project, tmp_path, capsys
+) -> None:
+    """A branch NAME is only evidence inside this repository. A clone elsewhere with the run's
+    integration branch checked out is another repository's work tree, not this run's."""
+    marker = project.root / "fired"
+    stranger = tmp_path / "stranger-clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(project.root), str(stranger)],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(stranger),
+            "checkout",
+            "-q",
+            "-b",
+            project.run["integration_branch"],
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    _install_driver(project, f"#!/bin/sh\ntouch {marker}\n", worktree=stranger)
+    assert project.verb("heartbeat", "--run", project.run_key) == 1
+    err = capsys.readouterr().err
+    assert str(stranger) in err and "no fire was launched" in err, err
+    assert not marker.exists()
+
+
+def test_heartbeat_launches_a_driver_bound_to_the_runs_recorded_worktree(
+    project,
+) -> None:
+    """``run.json``'s recorded worktree is authoritative even when its checkout is detached."""
+    marker = project.root / "fired"
+    worktree = project.root / ".worktrees" / "detached"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project.root),
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            str(worktree),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    runstate.update(
+        project.state_root,
+        project.run_key,
+        lambda doc: {**doc, "integration_worktree": str(worktree)},
+    )
+    _install_driver(project, f"#!/bin/sh\ntouch {marker}\n", worktree=worktree)
+    assert project.verb("heartbeat", "--run", project.run_key) == 0
+    assert marker.exists()
+
+
+def test_a_lifecycle_write_refuses_a_revision_it_did_not_read(project) -> None:
+    """``run.json`` writes carry the revision they read; a newer one on disk refuses the write."""
+    read_at = project.run["revision"]
+    project.status("checkpointed")
+    with pytest.raises(runstate.RevisionConflict):
+        lifecycle._commit(
+            project.state_root,
+            project.run_key,
+            status="active",
+            expect_revision=read_at,
+        )
+    assert project.run["status"] == "checkpointed"
+
+
+def test_heartbeat_does_not_reactivate_a_run_completed_after_it_was_read(
+    project, monkeypatch, capsys
+) -> None:
+    """The heartbeat reads ``active``; the run reaches ``awaiting-team-merge`` before it writes.
+
+    ``awaiting-team-merge -> active`` is a legal transition, so without a revision check the
+    heartbeat's stale write silently undid the completion and then launched a fire."""
+    marker = project.root / "fired"
+    _install_driver(project, f"#!/bin/sh\ntouch {marker}\n")
+    real = lifecycle.resolve.resolve
+
+    def read_then_complete(**kwargs):
+        resolution = real(**kwargs)
+        project.status("awaiting-team-merge")
+        return resolution
+
+    monkeypatch.setattr(lifecycle.resolve, "resolve", read_then_complete)
+    assert project.verb("heartbeat", "--run", project.run_key) == 1
+    assert "no write occurred" in capsys.readouterr().err
+    assert project.run["status"] == "awaiting-team-merge"
+    assert not marker.exists()
+
+
+def test_heartbeat_does_not_launch_a_run_that_left_work_before_ownership(
+    project, monkeypatch, capsys
+) -> None:
+    """Between the heartbeat's reconciliation write and its ownership, the run leaves the
+    work-capable set. The fire it launches must be judged on the status it holds ownership of."""
+    marker = project.root / "fired"
+    _install_driver(project, f"#!/bin/sh\ntouch {marker}\n")
+    real = lifecycle.runhost.resolve
+
+    def complete_then_resolve(root):
+        project.status("awaiting-team-merge")
+        return real(root)
+
+    monkeypatch.setattr(lifecycle.runhost, "resolve", complete_then_resolve)
+    assert project.verb("heartbeat", "--run", project.run_key) == 1
+    assert "awaiting-team-merge" in capsys.readouterr().err
+    assert project.run["status"] == "awaiting-team-merge"
+    assert not marker.exists()
+    assert ownership.read(project.state_root, project.run_key) is None
 
 
 # --- finish ---------------------------------------------------------------------------------

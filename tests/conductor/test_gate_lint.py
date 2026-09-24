@@ -8,6 +8,8 @@ env prefixes, and unparseable commands are rejected fail-closed with a line cont
 `unpinned` and the offending command verbatim.
 """
 
+import os
+
 from conductor import gate_lint
 
 TEST_REL = "assertions/sample/test_sample.py"
@@ -391,3 +393,113 @@ def test_negation_of_real_behavior_is_not_flagged_trivial(tmp_path):
     )
     proj = _mk_project(tmp_path, PINNED, body=body)
     assert "trivial" not in "\n".join(_lint(proj)).lower()
+
+
+# ------------------------------------------------------------- orphan test file rule
+#
+# The runner (`assertions/run.py`) is manifest-entry-driven: it never scans the gate
+# directory. A test file committed under the gate but named by no command is therefore
+# NEVER EXECUTED while `conductor assert run` reports all-green — a false green, which
+# is why this is a hard finding rather than a warning.
+
+
+def test_orphan_test_file_in_gate_dir_is_flagged(tmp_path):
+    proj = _mk_project(tmp_path, PINNED)
+    (proj / "assertions" / "sample" / "test_orphan.py").write_text(GOOD_TEST_BODY)
+    joined = "\n".join(_lint(proj))
+    assert "orphan" in joined.lower(), joined
+    assert "test_orphan.py" in joined, joined
+
+
+def test_referenced_test_file_is_not_flagged_orphan(tmp_path):
+    proj = _mk_project(tmp_path, PINNED)
+    findings = _lint(proj)
+    assert findings == [], findings
+
+
+def test_nodeid_referenced_test_file_is_not_flagged_orphan(tmp_path):
+    # the FILE is named in the command even though only one nodeid runs; partial
+    # coverage is a judgment call, not a mechanical one
+    cmd = (
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest "
+        f"-p no:cacheprovider {TEST_REL}::test_sample_behavior"
+    )
+    proj = _mk_project(tmp_path, cmd)
+    findings = _lint(proj)
+    assert findings == [], findings
+
+
+def test_conftest_in_gate_dir_is_not_flagged_orphan(tmp_path):
+    # a conftest is support code — no command ever names it
+    proj = _mk_project(tmp_path, PINNED)
+    (proj / "assertions" / "sample" / "conftest.py").write_text("import pytest\n")
+    findings = _lint(proj)
+    assert findings == [], findings
+
+
+def test_orphan_under_a_directory_target_is_not_flagged(tmp_path):
+    # a directory token names every test file pytest would collect beneath it
+    cmd = (
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q --noconftest "
+        "-p no:cacheprovider assertions/sample"
+    )
+    proj = _mk_project(tmp_path, cmd)
+    (proj / "assertions" / "sample" / "test_second.py").write_text(GOOD_TEST_BODY)
+    findings = _lint(proj)
+    assert findings == [], findings
+
+
+def test_unpinned_command_does_not_make_its_own_test_file_an_orphan(tmp_path):
+    # a rejected command yields no resolvable paths, so its test file would LOOK
+    # unreferenced — but it is named, and "named by no manifest command" would be a
+    # false accusation. The orphan verdict is only decidable once every command is
+    # pinned; the gate is already red on the unpinned finding, so no green is hidden.
+    proj = _mk_project(tmp_path, f"pytest {TEST_REL}")
+    joined = "\n".join(_lint(proj))
+    assert "unpinned" in joined.lower(), joined
+    assert "orphan" not in joined.lower(), joined
+
+
+def test_orphan_finding_makes_main_exit_nonzero(tmp_path, monkeypatch, capsys):
+    proj = _mk_project(tmp_path, PINNED)
+    (proj / "assertions" / "sample" / "test_orphan.py").write_text(GOOD_TEST_BODY)
+    monkeypatch.setenv("CONDUCTOR_HOME", str(proj))
+    assert gate_lint.main() != 0
+    out = capsys.readouterr()
+    assert "orphan" in (out.out + out.err).lower()
+
+
+def test_a_nested_gates_tests_are_not_orphans_of_the_flat_gate(tmp_path):
+    # assertions/<slug>/ holding its own manifest.yaml is a SEPARATE gate whose tests its own
+    # manifest names; linting the flat assertions/manifest.yaml must stop at that boundary
+    proj = _mk_project(tmp_path, PINNED)
+    sub = proj / "assertions" / "other-spec-1a2b3c4d"
+    sub.mkdir(parents=True)
+    (sub / "manifest.yaml").write_text("assertions: []\n")
+    (sub / "test_other_spec.py").write_text(GOOD_TEST_BODY)
+    (sub / "deeper").mkdir()
+    (sub / "deeper" / "test_deeper.py").write_text(GOOD_TEST_BODY)
+    findings = _lint(proj)
+    assert findings == [], findings
+
+
+def test_a_subdirectory_without_a_manifest_is_still_walked(tmp_path):
+    # the boundary is a manifest, not any subdirectory: an orphan one level down still counts
+    proj = _mk_project(tmp_path, PINNED)
+    (proj / "assertions" / "loose").mkdir()
+    (proj / "assertions" / "loose" / "test_loose.py").write_text(GOOD_TEST_BODY)
+    joined = "\n".join(_lint(proj))
+    assert "assertions/loose/test_loose.py" in joined, joined
+
+
+def test_the_digest_walk_still_crosses_a_nested_manifest(tmp_path):
+    # the orphan boundary must not leak into freeze's digest walk: a directory token in a
+    # command freezes every test file pytest would collect beneath it, nested gate or not
+    from conductor import freeze
+
+    d = tmp_path / "assertions"
+    (d / "nested").mkdir(parents=True)
+    (d / "nested" / "manifest.yaml").write_text("assertions: []\n")
+    (d / "nested" / "test_n.py").write_text("def test_n():\n    assert True\n")
+    found = {os.path.relpath(p, d) for p in freeze._collect_test_files(str(d))}
+    assert os.path.join("nested", "test_n.py") in found

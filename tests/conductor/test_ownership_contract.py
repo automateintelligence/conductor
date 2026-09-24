@@ -34,6 +34,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -510,7 +511,10 @@ def test_the_worker_and_the_driver_use_one_record_on_both_hosts(harness, monkeyp
     fail-safe direction for an undocumented artifact on a 0.x CLI: if a future Codex moves the
     lock directory, every record must stop clearing rather than start clearing.
     """
-    unknown_thread = "codex:019feab3-05f0-7081-90fb-18b96bc27db3:not-this-boot"
+    codex_home = quote(str(harness.root / "no-such-codex-home"), safe="")
+    unknown_thread = (
+        f"codex:019feab3-05f0-7081-90fb-18b96bc27db3:not-this-boot:{codex_home}"
+    )
     ownership._write(
         harness.state_root,
         harness.run_key,
@@ -540,11 +544,12 @@ def test_the_worker_and_the_driver_use_one_record_on_both_hosts(harness, monkeyp
             run_key=harness.run_key,
             host="codex",
             tier="in-session",
-            wrapper_identity=f"codex:019feab3-05f0-7081-90fb-18b96bc27db3:{boot}",
+            wrapper_identity=(
+                f"codex:019feab3-05f0-7081-90fb-18b96bc27db3:{boot}:{codex_home}"
+            ),
             acquired_at="2026-08-10T12:00:00+00:00",
         ),
     )
-    monkeypatch.setenv("CODEX_HOME", str(harness.root / "no-such-codex-home"))
     # Lock directory absent -> cannot tell -> OCCUPIED.
     assert (
         run_cmd.main(
@@ -806,3 +811,343 @@ def test_releasing_never_drops_someone_elses_record(harness, monkeypatch):
     finally:
         owner.kill()
         owner.wait(timeout=30)
+
+
+# --- a killed wrapper does not free a run its driver is still firing -------------------------
+
+
+def _orphaned_fire(harness) -> subprocess.Popen:
+    """A process holding the project's fire lock EXACTLY as the generated driver does —
+    ``exec 9>"$LOCK"; flock -n 9`` — and then staying alive, like a driver whose heartbeat
+    wrapper was killed underneath it. Returns once the lock is provably held."""
+    lock = os.path.join(harness.state_root, "resume.lock")
+    ready = Path(harness.state_root) / "fire-lock-held"
+    holder = subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            'exec 9>"$1"; flock -n 9 || exit 7; : > "$2"; sleep 300',
+            "fire",
+            lock,
+            str(ready),
+        ]
+    )
+    deadline = time.monotonic() + 30
+    while not ready.exists() and time.monotonic() < deadline:
+        assert holder.poll() is None, (
+            "the fire-lock holder exited before holding the lock"
+        )
+        time.sleep(0.02)
+    if not ready.exists():
+        holder.kill()
+        raise AssertionError("the fire-lock holder never took the lock")
+    # Anti-fooling: the lock really is held, by a process that is not this test.
+    probe = subprocess.run(["flock", "-n", lock, "true"], capture_output=True)
+    assert probe.returncode != 0, "resume.lock is not held; nothing below is about it"
+    return holder
+
+
+def _dead_wrapper_record(harness) -> ownership.OwnerRecord:
+    wrapper = _sleeper()
+    identity = _identity(wrapper.pid)
+    wrapper.kill()
+    wrapper.wait(timeout=30)
+    record = ownership.OwnerRecord(
+        run_key=harness.run_key,
+        host="claude",
+        tier="wrapper",
+        wrapper_identity=identity,
+        acquired_at="2026-08-10T12:00:00+00:00",
+    )
+    ownership._write(harness.state_root, harness.run_key, record)
+    assert ownership.identity_is_live(record) is False, (
+        "the wrapper is not provably gone"
+    )
+    return record
+
+
+def test_a_driver_that_outlives_its_killed_wrapper_keeps_the_run_owned(
+    harness, monkeypatch, capsys
+):
+    """The recorded wrapper is provably dead, but the driver it launched is still firing and
+    still holds ``resume.lock``. Registering, ``owner-busy`` and a fresh claim must all see an
+    OCCUPIED run — and all see a free one the moment that fire is gone."""
+    dead = _dead_wrapper_record(harness)
+    fire = _orphaned_fire(harness)
+    try:
+        harness.claude_session_identity(monkeypatch)
+        capsys.readouterr()
+        assert (
+            run_cmd.main(
+                ["own", "--run", harness.run_key, "--project", str(harness.root)]
+            )
+            == run_cmd.EXIT_FAIL
+        )
+        err = capsys.readouterr().err
+        assert "resume.lock" in err and "no write occurred" in err, err
+        assert harness.owner_doc()["wrapper_identity"] == dead.wrapper_identity
+
+        assert (
+            run_cmd.main(
+                ["owner-busy", "--run", harness.run_key, "--project", str(harness.root)]
+            )
+            == run_cmd.EXIT_OK
+        )
+        assert "state=live" in capsys.readouterr().out
+
+        with pytest.raises(ownership.OwnerBusy):
+            ownership.claim(harness.state_root, harness.run_key, host="claude")
+        assert fire.poll() is None, "the fire exited; this proved nothing"
+    finally:
+        fire.kill()
+        fire.wait(timeout=30)
+
+    assert (
+        run_cmd.main(["own", "--run", harness.run_key, "--project", str(harness.root)])
+        == run_cmd.EXIT_OK
+    )
+
+
+def test_a_worker_launched_by_the_fire_holding_the_lock_can_still_register(harness):
+    """A cron-launched driver holds ``resume.lock`` and its worker then runs ``conductor run
+    own`` — over a record a crashed earlier fire left behind. That worker IS the fire; refusing
+    it would stop the run forever. Its lock descriptor is closed (``9>&-``) so the decision rests
+    on the holder being its ancestor, not on an inherited descriptor."""
+    _dead_wrapper_record(harness)
+    lock = os.path.join(harness.state_root, "resume.lock")
+    script = (
+        'exec 9>"$1"; flock -n 9 || exit 7; '
+        'CLAUDE_PID=$$ "$2" run own --run "$3" --project "$4" 9>&-'
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "fire",
+            lock,
+            str(ROOT / "bin" / "conductor"),
+            harness.run_key,
+            str(harness.root),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            **os.environ,
+            "CONDUCTOR_HOST": "claude",
+        },
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "owned by claude" in result.stdout, result.stdout
+
+
+# --- only a DEFINITIVE "no repository" answers free ------------------------------------------
+
+
+def test_owner_busy_outside_any_repository_is_free(tmp_path, capsys):
+    """git answered, and its answer is that there is no repository: nothing can own a run here."""
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    assert (
+        run_cmd.main(["owner-busy", "--project", str(plain)]) == run_cmd.EXIT_OWNER_FREE
+    )
+    assert "state=free reason=no-repository" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.TimeoutExpired(["git", "rev-parse"], 30),
+        subprocess.CalledProcessError(
+            128,
+            ["git", "rev-parse"],
+            stderr="fatal: detected dubious ownership in repository at '/x'\n",
+        ),
+    ],
+    ids=["timeout", "other-git-failure"],
+)
+def test_owner_busy_fails_closed_when_git_cannot_answer(
+    tmp_path, monkeypatch, capsys, failure
+):
+    """A git that timed out or failed for any other reason has NOT said there is no repository.
+    Reading that as free would fire a driver past a record nobody could consult."""
+    from conductor.core import resolve
+
+    def cannot_answer(start=None):
+        raise failure
+
+    monkeypatch.setattr(resolve, "repo_root", cannot_answer)
+    rc = run_cmd.main(["owner-busy", "--project", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == run_cmd.EXIT_OK, out
+    assert "state=unreadable" in out and "state=free" not in out, out
+    assert "no write occurred" in out and str(tmp_path) in out, out
+    assert "git -C" in out, out
+
+
+def test_an_ancestor_merely_having_the_lock_file_open_does_not_make_a_foreign_fire_its_own(
+    harness,
+):
+    """``flock`` belongs to an open file DESCRIPTION, not to whoever has the file open. A process
+    in the caller's ancestry that opened ``resume.lock`` without locking it (a reader, a stale
+    descriptor, a failed ``flock -n``) must not turn a foreign holder's fire into the caller's."""
+    fire = _orphaned_fire(harness)
+    lock = os.path.join(harness.state_root, "resume.lock")
+    unlocked = os.open(lock, os.O_RDONLY)
+    try:
+        refusal = ownership.running_fire(harness.state_root)
+        assert refusal is not None and "resume.lock" in refusal, refusal
+        assert fire.poll() is None, "the fire exited; this proved nothing"
+    finally:
+        os.close(unlocked)
+        fire.kill()
+        fire.wait(timeout=30)
+
+
+# --- no path clears a record while a foreign fire still holds resume.lock ---------------------
+
+
+@pytest.mark.parametrize("force", [False, True], ids=["exit-proof", "force"])
+def test_disown_leaves_the_record_while_a_foreign_fire_holds_the_lock(harness, force):
+    """The recorded wrapper is provably gone, but its fire is not. Clearing the record would
+    hand the run to the next claimant under a running fire, so neither the exit proof nor
+    ``--force`` clears it; stopping the fire is the documented way out."""
+    dead = _dead_wrapper_record(harness)
+    fire = _orphaned_fire(harness)
+    try:
+        outcome, detail = ownership.disown(
+            harness.state_root, harness.run_key, force=force
+        )
+        assert outcome == "refused", detail
+        assert "resume.lock" in detail and "nothing was removed" in detail, detail
+        assert harness.owner_doc()["wrapper_identity"] == dead.wrapper_identity
+        assert fire.poll() is None, "the fire exited; this proved nothing"
+    finally:
+        fire.kill()
+        fire.wait(timeout=30)
+    outcome, detail = ownership.disown(harness.state_root, harness.run_key, force=force)
+    assert outcome == "cleared", detail
+
+
+def test_release_leaves_the_record_while_a_foreign_fire_holds_the_lock(harness):
+    """Even the record's own identity does not drop it under a fire it cannot account for."""
+    owner = _sleeper()
+    try:
+        record = harness.record(_identity(owner.pid), tier="wrapper")
+        fire = _orphaned_fire(harness)
+        try:
+            refusal = ownership.release(
+                harness.state_root,
+                harness.run_key,
+                wrapper_identity=record.wrapper_identity,
+            )
+            assert refusal is not None and "resume.lock" in refusal, refusal
+            assert harness.owner_doc()["wrapper_identity"] == record.wrapper_identity
+        finally:
+            fire.kill()
+            fire.wait(timeout=30)
+        assert (
+            ownership.release(
+                harness.state_root,
+                harness.run_key,
+                wrapper_identity=record.wrapper_identity,
+            )
+            is None
+        )
+        assert ownership.read(harness.state_root, harness.run_key) is None
+    finally:
+        owner.kill()
+        owner.wait(timeout=30)
+
+
+def test_run_disown_of_ones_own_record_refuses_under_a_foreign_fire(
+    harness, monkeypatch, capsys
+):
+    identity = harness.claude_session_identity(monkeypatch)
+    harness.record(identity)
+    fire = _orphaned_fire(harness)
+    try:
+        capsys.readouterr()
+        rc = run_cmd.main(
+            ["disown", "--run", harness.run_key, "--project", str(harness.root)]
+        )
+        err = capsys.readouterr().err
+        assert rc == run_cmd.EXIT_FAIL, err
+        assert "resume.lock" in err, err
+        assert harness.owner_doc()["wrapper_identity"] == identity
+    finally:
+        fire.kill()
+        fire.wait(timeout=30)
+
+
+def test_a_codex_identity_without_its_recorded_home_is_refused_with_a_recovery(
+    harness, capsys
+):
+    """Malformed, so OCCUPIED — and the refusal names the command that clears it."""
+    boot = proc.boot_id()
+    assert boot is not None
+    ownership._write(
+        harness.state_root,
+        harness.run_key,
+        ownership.OwnerRecord(
+            run_key=harness.run_key,
+            host="codex",
+            tier="in-session",
+            wrapper_identity=f"codex:019feab3-05f0-7081-90fb-18b96bc27db3:{boot}",
+            acquired_at="2026-08-10T12:00:00+00:00",
+        ),
+    )
+    capsys.readouterr()
+    assert (
+        run_cmd.main(
+            ["owner-busy", "--run", harness.run_key, "--project", str(harness.root)]
+        )
+        == run_cmd.EXIT_OK
+    )
+    out = capsys.readouterr().out
+    assert "state=unreadable" in out, out
+    assert f"conductor run disown --run {harness.run_key} --force" in out, out
+    with pytest.raises(ownership.OwnerBusy) as refused:
+        ownership.claim(harness.state_root, harness.run_key, host="claude")
+    assert f"conductor run disown --run {harness.run_key} --force" in str(refused.value)
+
+
+def test_owner_busy_fails_closed_on_a_broken_worktree_pointer(tmp_path, capsys):
+    """git prints "not a git repository" for a linked worktree whose gitdir is gone too — but
+    that names a repository that EXISTED here, with a run state that may still be live. Only the
+    clean "no repository anywhere up the tree" answer is free."""
+    broken = tmp_path / "orphaned-worktree"
+    broken.mkdir()
+    (broken / ".git").write_text(
+        f"gitdir: {tmp_path / 'gone' / '.git' / 'worktrees' / 'x'}\n", encoding="utf-8"
+    )
+    rc = run_cmd.main(["owner-busy", "--project", str(broken)])
+    out = capsys.readouterr().out
+    assert rc == run_cmd.EXIT_OK, out
+    assert "state=unreadable" in out and "state=free" not in out, out
+
+
+@pytest.mark.parametrize(
+    ("stderr", "free"),
+    [
+        (
+            "fatal: not a git repository (or any of the parent directories): .git\n",
+            True,
+        ),
+        (
+            "fatal: not a git repository (or any parent up to mount point /mnt)\n"
+            "Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n",
+            True,
+        ),
+        ("fatal: not a git repository: /r/.git/worktrees/x\n", False),
+        (
+            "fatal: kein Git-Repository (oder irgendeines der Elternverzeichnisse): .git\n",
+            False,
+        ),
+    ],
+    ids=["clean", "mount-boundary", "broken-pointer", "localized"],
+)
+def test_only_gits_discovery_failure_reads_as_no_repository(stderr, free):
+    exc = subprocess.CalledProcessError(128, ["git"], stderr=stderr)
+    assert run_cmd._definitely_no_repository(exc) is free

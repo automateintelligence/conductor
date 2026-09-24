@@ -52,9 +52,28 @@ _EMPHASIS = " \t\r*`_"
 _ADR_DIRS = ("docs/adr", "docs/ADR", "docs/adrs", "docs/decisions")
 
 
+def _unfenced_lines(section: str) -> Iterator[str]:
+    """The section's lines with fenced code blocks removed, newlines stripped.
+
+    Scope is one phase section — every caller iterates per section — so a fence someone
+    forgot to close can silently swallow at most the rest of its own phase, never the file.
+    """
+    for _pos, line, inside, _open in sync._fence_scan(section):
+        if not inside:
+            yield line
+
+
 def _phase_sections(text: str) -> Iterator[tuple[tuple[str, str, list[str]], str]]:
-    """Yield ((title, status, assertion-ids), section-body) per phase heading."""
-    headings = list(sync._H2_ANY.finditer(text))
+    """Yield ((title, status, assertion-ids), section-body) per phase heading.
+
+    An H2 inside a CLOSED fenced block is EXAMPLE TEXT, not a heading, and is skipped. This
+    happens during the split, not after it: filtering the lines of an already-split section
+    (what `_unfenced_lines` does for the marker check) is too late — a fenced
+    `## Phase example (A99)` had already become a section of its own, and every per-phase
+    requirement it could not satisfy became a hard failure against a heading nobody wrote as
+    a phase. A skipped heading does not end the enclosing phase's section either; the fence
+    it sits in is part of that phase's body, where the marker check already ignores it."""
+    headings = sync._h2_headings(text)
     for i, m in enumerate(headings):
         parsed = sync._phase_heading(m.group(1))
         if parsed is None:
@@ -108,6 +127,28 @@ def _adr_refs(value: str) -> tuple[list[str], list[str]]:
 # phases forever). issue-sync's parser stays unchecked-only by design (done work must not
 # respawn sub-issues); only the lint uses this broader form.
 _TASK_ANY = re.compile(r"^- \[[ xX]\] .+$", re.MULTILINE)
+# A task-shaped line whose marker is neither ` ` nor `x`/`X` is counted as NOTHING: it is
+# not a task (issue-sync's `_TASK` is `^- \[ \] (.+)$`, so no sub-issue is ever created for
+# it), not done, and not tickable (phase-done's `_UNTICKED` rewrites `- [ ]` only, so the
+# marker survives every phase-done forever). The work vanishes silently. `_TASK_ANY` only
+# catches the case where a phase's tasks are ALL non-standard; one `[~]` beside one `[ ]`
+# left nothing to fire at all, which is why this is a hard finding and not a warning.
+# The fix is at lint time, deliberately: teaching `_TASK` to accept `[~]` would spawn
+# sub-issues for half-done work, which is a different — and unrequested — behaviour.
+# Anchored at column 0 exactly like `_TASK`/`_TASK_ANY`, so an INDENTED checkbox is out of
+# scope here for the same reason it is out of scope there: it was never going to become a
+# task, whatever its marker.
+# Matched per UNFENCED line (`_unfenced_lines`), unlike `_TASK`/`_TASK_ANY`, which scan the
+# raw section. That asymmetry is deliberate. Symmetry was the original argument — a column-0
+# `- [ ] x` inside a fence really does become a sub-issue today, so a `[~]` there is a real
+# inconsistency — but this check HARD-FAILS, and those do not. A plan documenting the
+# rejected shape the obvious way (showing it in a fenced example) failed its own lint, which
+# costs more than the misparse it mirrored: matching an existing SILENT bug does not justify
+# a new BLOCKING one. Teaching `_TASK` about fences is a real fix with a different blast
+# radius (it would stop creating sub-issues that today exist), so it is not made here.
+_TASK_ODD_MARKER = re.compile(r"^- \[[^ xX\]\n]\] .+$")
+
+
 # The two markers that mean the same thing on either host: the merge gate, and the
 # PR<->phase-issue link. Substring, case-insensitive.
 _HOST_NEUTRAL_NEEDLES = ("merge-gate", "closes #")
@@ -206,6 +247,10 @@ def lint(
         title = parsed[0]
         if not _TASK_ANY.search(section):
             reasons.append(f"phase-no-tasks:{title}")
+        # The whole line, so the reason is greppable straight back to the source line.
+        for line in _unfenced_lines(section):
+            if _TASK_ODD_MARKER.match(line):
+                reasons.append(f"phase-task-marker-unknown:{title}:{line.rstrip()}")
         if not _SPEC_POINTER.search(section):
             reasons.append(f"phase-no-spec-pointer:{title}")
         # The decisions leg of the same binding. `**ADRs:** none` passes; a MISSING line

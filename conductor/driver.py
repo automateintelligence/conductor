@@ -53,6 +53,15 @@ _FAILURE_MARKERS = (
     # is the pre-fix behaviour, deliberately degraded to rather than a false kill — and it is a
     # stall waiting to happen, so status has to see it.
     "fire-unsupervised",
+    # The driver could not take `.conductor/resume.lock` for a reason OTHER than contention: no
+    # `flock`, a lock file it cannot open, a flock usage or OS error. Every fire exits loud and
+    # none will ever work until someone fixes the machine. `lock-held` is deliberately absent
+    # — that is contention, which is the lock doing its job.
+    "lock-unavailable",
+    # Part of a fire survived SIGKILL (D-state I/O). The driver exited anyway because it must stay
+    # bounded, so the lock is free while something of that fire may still be writing to the run
+    # worktree. Only a human can find and clear that process.
+    "fire-unkillable",
     # --- the ownership check, and why only HALF of it is a failure -------------------------
     #
     # The driver writes `fire-skipped reason=owner-busy` in two situations that look alike in
@@ -345,7 +354,16 @@ def install(project: str, worktree: str, host: str | None = None) -> int:
     except locks.LockTimeout as e:
         # Loud, and having changed nothing: the lock is taken before the first write, so a
         # refusal here cannot have replaced a live driver on its way out.
-        print(f"driver install: {e}", file=sys.stderr)
+        log = os.path.join(root, ".conductor", "resume-autodev.log")
+        print(
+            f"driver install: {e}\n"
+            f"  Another writer of this driver holds {lock} — usually a heartbeat fire, which "
+            "holds it for the whole fire so the running script is not rewritten under it. No "
+            "write occurred. A fire is running when the driver log's last entry is a "
+            f"fire-start with no fire-end after it:\n    tail -n 3 {log}\n"
+            "  Re-run this install once that fire has ended.",
+            file=sys.stderr,
+        )
         return 1
 
 

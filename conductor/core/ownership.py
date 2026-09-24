@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import fcntl
 import os
 from collections.abc import Iterator, Mapping
 from typing import NamedTuple
@@ -128,6 +129,78 @@ class OwnerRecord(NamedTuple):
 #: be the recorded owner and still be live, so at worst a descendant declines to block on a
 #: record that is already about to be released.
 INHERITED_IDENTITY_ENV = "CONDUCTOR_OWNER_IDENTITY"
+
+
+#: The generated driver's fire lock, ``$PROJECT/.conductor/resume.lock``, held for the WHOLE of
+#: one fire (``exec 9>"$LOCK"; flock -n 9``) and by every descendant that inherits that
+#: descriptor. See ``running_fire`` for why ownership consults it.
+FIRE_LOCK_NAME = "resume.lock"
+
+
+def fire_lock_path(state_root: str) -> str:
+    return os.path.join(state_root, FIRE_LOCK_NAME)
+
+
+def running_fire(state_root: str) -> str | None:
+    """A refusal sentence while a driver fire OTHER THAN THE CALLER'S OWN holds the project's
+    fire lock, else ``None``.
+
+    WHY OWNERSHIP ASKS. The record names the heartbeat WRAPPER, and the wrapper is not the last
+    thing running: the driver it launched, and the host session under that, outlive a killed
+    wrapper. Judged by the record alone the run then reads as free — the wrapper is provably
+    gone — while a fire is still editing the checkout. ``resume.lock`` is the fact that outlives
+    the wrapper: the driver takes it before firing and the kernel releases it only once every
+    process sharing that descriptor has exited. So an owner's exit is an exit proof for the RUN
+    only while this lock is free. (This is the ``same fact from the Python side`` the driver's
+    own comment promises.) Recording the driver's identity instead was the alternative; it would
+    widen the record's schema and still miss a host session that outlives a killed driver.
+
+    A NON-BLOCKING PROBE, NOT ``/proc/locks``. The driver takes the lock through the ``flock``
+    helper, which exits at once; the kernel files the lock under that helper's pid, and
+    ``/proc/locks`` omits locks whose pid no longer exists — so a held driver lock is invisible
+    there. Taking the lock with ``LOCK_NB`` and dropping it is the one test that sees it. The cost
+    is that a driver starting in the same instant skips that one tick, logged as
+    ``fire-skipped reason=lock-held``.
+
+    THE CALLER'S OWN FIRE IS NOT A RIVAL. A cron-launched driver holds the lock while its worker
+    registers with ``conductor run own``; refusing that worker would stop the run. The holder is
+    identified by parentage plus a kernel fact — an open file description of this process or an
+    ancestor HOLDS the lock, per ``proc.holds_flock`` — never by a process name, and never by merely
+    having the file open. A caller outside that tree is refused."""
+    path = fire_lock_path(state_root)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return (
+            f"the driver fire lock {path} could not be opened ({exc}), so whether a fire is "
+            "still running is unknown"
+        )
+    try:
+        st = os.fstat(fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        except OSError as exc:
+            return (
+                f"the driver fire lock {path} could not be tested ({exc}), so whether a fire "
+                "is still running is unknown"
+            )
+        else:
+            return (
+                None  # free: closing the descriptor below releases the probe's own lock
+            )
+    finally:
+        os.close(fd)
+    if any(proc.holds_flock(pid, st) for pid in proc.ancestor_pids(os.getpid())):
+        return None
+    return (
+        f"a driver fire still holds {path} — its heartbeat wrapper may have exited, but the "
+        "fire it launched has not. Let that fire finish (conductor driver status shows its "
+        "log), or stop it, then retry"
+    )
 
 
 def record_path(state_root: str, run_key: str) -> str:
@@ -321,6 +394,19 @@ def claim(
                     f"{existing.wrapper_identity} "
                     + ("(live)" if live else "(liveness unknown)")
                     + f", recorded at {record_path(state_root, run_key)}; no write occurred."
+                    + (
+                        ""
+                        if live
+                        else " This build cannot tell whether that identity is still "
+                        "running. If you have confirmed no process is working on this run, "
+                        f"clear it with: conductor run disown --run {run_key} --force"
+                    )
+                )
+        if existing is None or existing.wrapper_identity != identity:
+            fire = running_fire(state_root)
+            if fire:
+                raise OwnerBusy(
+                    f"run {run_key!r} is not free: {fire}; no write occurred."
                 )
         record = OwnerRecord(
             run_key=run_key,
@@ -348,10 +434,24 @@ def disown(state_root: str, run_key: str, *, force: bool = False) -> tuple[str, 
     uninterpretable cases (a foreign host, an unloadable adapter, a schema this build refuses,
     ``hidepid`` hiding the target) where no proof is obtainable and only a human can supply the
     missing fact.
+
+    NEITHER CLEARS A RECORD UNDER A RUNNING FIRE. A record is the run's admission, and while
+    ``running_fire`` reports a driver fire holding ``resume.lock`` outside the caller's own
+    process tree, clearing it hands the run to the next claimant underneath that fire — the
+    same reason ``claim`` refuses. ``force`` supplies a missing exit proof for the RECORD; it is
+    not evidence about the fire, so it does not override this. There is no override: the way
+    out is to let the fire finish or stop it, which releases the lock.
     """
     lock = runstate.owner_lock_path(state_root, run_key)
     os.makedirs(runstate.run_dir(state_root, run_key), exist_ok=True)
     with locks.hold(lock, kind="owner", run_key=run_key):
+        fire = running_fire(state_root)
+        if fire:
+            return (
+                "refused",
+                f"run {run_key!r}: {fire}; nothing was removed. --force does not override "
+                "a running fire.",
+            )
         try:
             record = read(state_root, run_key)
         except OwnerAmbiguous as exc:
@@ -380,13 +480,26 @@ def disown(state_root: str, run_key: str, *, force: bool = False) -> tuple[str, 
         )
 
 
-def release(state_root: str, run_key: str, *, wrapper_identity: str) -> None:
-    """Drop ownership if ``wrapper_identity`` still holds it. A no-op otherwise."""
+def release(state_root: str, run_key: str, *, wrapper_identity: str) -> str | None:
+    """Drop ownership if ``wrapper_identity`` still holds it. A no-op otherwise.
+
+    Returns a refusal sentence, leaving the record in place, while a fire outside the caller's
+    own process tree still holds ``resume.lock`` (see ``disown``): a wrapper whose driver left
+    descendants running is not done with the run just because its own work returned. The record
+    then names an identity that will exit, and ``claim`` frees it only once the fire is gone."""
     lock = runstate.owner_lock_path(state_root, run_key)
     with locks.hold(lock, kind="owner", run_key=run_key):
         try:
             current = read(state_root, run_key)
         except OwnerAmbiguous:
-            return
-        if current is not None and current.wrapper_identity == str(wrapper_identity):
-            _write(state_root, run_key, None)
+            return None
+        if current is None or current.wrapper_identity != str(wrapper_identity):
+            return None
+        fire = running_fire(state_root)
+        if fire:
+            return (
+                f"run {run_key!r}: {fire}; the ownership record of {wrapper_identity} was "
+                "left in place."
+            )
+        _write(state_root, run_key, None)
+        return None
