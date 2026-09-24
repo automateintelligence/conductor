@@ -141,6 +141,12 @@ _SPEC_PATH_HEAD = f"(?<![^{_PATH_DELIMS}])"
 # has no whitespace between the two, so one match would swallow `](` and yield
 # `docs/specs/a.md](docs/specs/a.md` as the spec. Link/bracket punctuation ends a path token.
 _SPEC_PATH_TAIL = rf"/[^{_PATH_DELIMS}]+\.md"
+# `./` segments that may open the token before the root: the same path spelled relative to
+# the checkout, which resolved before the left boundary existed and must keep resolving. They
+# sit AFTER `_SPEC_PATH_HEAD`, so `vendor/./docs/specs/x.md` is still a mid-path match and
+# refused, and OUTSIDE the `path` group, so the spec comes back as the plain path — one
+# spelling per spec, which keeps `./x.md` and `x.md` in one goal from reading as two specs.
+_DOT_SLASH = r"(?:\./)*"
 # the done-definition sibling spec-craft writes next to a spec — never a spec itself
 _ASSERTIONS_SUFFIX = ".assertions.md"
 # an explicit declaration line, e.g. `spec: docs/specs/foo.md`
@@ -240,7 +246,9 @@ def _spec_path_re() -> re.Pattern[str]:
     """The prose-scan pattern for the CURRENT ``spec_roots()``. Built per call for the same
     reason ``spec_roots`` is read per call."""
     alternation = "|".join(re.escape(root) for root in spec_roots())
-    return re.compile(f"{_SPEC_PATH_HEAD}(?:{alternation}){_SPEC_PATH_TAIL}")
+    return re.compile(
+        f"{_SPEC_PATH_HEAD}{_DOT_SLASH}(?P<path>(?:{alternation}){_SPEC_PATH_TAIL})"
+    )
 
 
 class AmbiguousSpecReference(ValueError):
@@ -280,7 +288,7 @@ def spec_from_goal_text(text: str) -> str | None:
         return fields[0]
     found: list[str] = []
     for hit in _spec_path_re().finditer(text):
-        path = hit.group(0)
+        path = hit.group("path")
         if path.endswith(_ASSERTIONS_SUFFIX):
             # A spec's `.assertions.md` sibling is its DONE-DEFINITION, not a second spec, and
             # `freeze._source_candidates` derives it from whichever spec this resolver picks.

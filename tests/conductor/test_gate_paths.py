@@ -1783,5 +1783,38 @@ def test_legacy_mode_is_unchanged_when_no_run_key_is_given(tmp_path, monkeypatch
     assert res.directory == str(tmp_path / "assertions" / "alpha")
 
 
+# --- a `./`-prefixed goal path still resolves ------------------------------------------
+#
+# The left path-token boundary (`_SPEC_PATH_HEAD`) stops a root matching mid-path, but `./`
+# is not a different directory — it is the same path, spelled relative to the checkout. Before
+# the shared resolver, `Implement ./docs/specs/foo.md` resolved to `docs/specs/foo.md`; the
+# boundary made it name no spec at all, so a goal that used to work failed closed.
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Implement ./docs/specs/foo.md until done",
+        "Implement ././docs/specs/foo.md until done",
+        "Implement `./docs/specs/foo.md`",
+        "./docs/specs/foo.md",
+    ],
+)
+def test_a_dot_slash_prefixed_spec_resolves_to_the_plain_path(goal):
+    assert paths.spec_from_goal_text(goal) == "docs/specs/foo.md"
+
+
+def test_dot_slash_and_plain_spellings_of_one_spec_are_not_ambiguous():
+    goal = "Implement ./docs/specs/foo.md (see docs/specs/foo.md)"
+    assert paths.spec_from_goal_text(goal) == "docs/specs/foo.md"
+
+
+@pytest.mark.parametrize(
+    "goal", ["see vendor/./docs/specs/x.md", "see vendor/docs/specs/x.md"]
+)
+def test_dot_slash_does_not_reopen_mid_path_matching(goal):
+    assert paths.spec_from_goal_text(goal) is None
+
+
 if __name__ == "__main__":
     raise SystemExit(subprocess.call([sys.executable, "-m", "pytest", "-q", __file__]))
