@@ -67,7 +67,10 @@ _REGIONS: dict[str, list[tuple[str, str]]] = {
             "description: start (or resume) an autonomous conductor run",
         ),
         ("@preamble", "# /conductor:start — preflight + set up + launch"),
-        ("0-preflight", "0. **preflight (`conductor preflight`).**"),
+        (
+            "0-preflight",
+            "0. **preflight as your host (`conductor preflight --host <this-host>`).**",
+        ),
         (
             "0b-register-ownership",
             "0b. **register ownership — only when this run already exists.**",
@@ -229,6 +232,11 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
         ],
         "0-preflight": [
             "preflight",
+            # The host is recorded BY preflight, before it checks: an unrecorded project
+            # resolves the legacy `claude` default, so a Codex start preflighted Claude's set.
+            "conductor preflight --host <this-host>",
+            "you are the host",
+            "refuses",
             # A1: the required set is the CHECKER's to state, not prose's. Pin the refusal to
             # re-list it and the reason the list is host-dependent.
             "do not re-list the required commands",
@@ -332,6 +340,8 @@ _CONTRACT: dict[str, dict[str, list[str]]] = {
             "owner-supervised",
             "the directory this `skill.md` lives in",
         ],
+        # prepare's step 2 runs plan-lint, which resolves the host for the recipe check.
+        "0-inventory": ["conductor preflight --host <this-host>"],
         "1-gate-integrity": ["gate verify"],
         "2-plan-evaluation": [
             "plan-lint",
@@ -546,6 +556,43 @@ def test_start_skill_contract():
         "conductor gate freeze",
     ]:
         assert needle in _regions("skills/start/SKILL.md")["3-gate-dir"], needle
+
+
+def test_start_declares_its_host_before_it_preflights():
+    """Every `conductor preflight` step 0 tells the worker to run carries `--host`: a bare one
+    would resolve the host before anything recorded it, which is the bug itself."""
+    step = _regions("skills/start/SKILL.md")["0-preflight"]
+    runs = re.findall(r"`conductor preflight[^`]*`", step)
+    assert runs, step
+    assert all("--host <this-host>" in r for r in runs), runs
+
+
+# (host, session mode) -> the posture `resolve_posture` gives it, as step 6 documents it.
+_DOCUMENTED_SESSION_MODES = {
+    ("claude", "bypassPermissions"): "full-bypass",
+    ("claude", "acceptEdits"): "scoped",
+    ("codex", "danger-full-access"): "full-bypass",
+    ("codex", "workspace-write"): "scoped",
+}
+
+
+def test_starts_unattended_permission_recipe_is_host_specific():
+    """Each host's driver expands only ITS OWN flags variable, in its own vocabulary. A recipe
+    that only knows Claude's writes a variable a Codex fire never reads. The names and values
+    are read from the adapters, so the prose cannot drift from what the driver consumes."""
+    from conductor import authority
+    from conductor.hosts import base
+
+    step = _regions("skills/start/SKILL.md")["6-record-goal"]
+    for host_id in base.HOST_IDS:
+        adapter = base.load(host_id)
+        assert adapter.FLAGS_VAR.lower() in step, (host_id, adapter.FLAGS_VAR)
+        for posture in ("scoped", "full-bypass"):
+            example = adapter.POSTURE_EXAMPLES[posture].lower()
+            assert example in step, (host_id, posture, example)
+    for (host_id, mode), posture in _DOCUMENTED_SESSION_MODES.items():
+        assert authority.resolve_posture(mode, host=host_id) == posture
+        assert mode.lower() in step, mode
 
 
 def test_assertions_to_tests_skill_contract():

@@ -168,3 +168,113 @@ def test_the_documented_invocation_carries_the_host(tmp_path):
     argv = documented_install_argv("/tmp/wt", "codex")
     assert "--host" in argv, argv
     assert argv[argv.index("--host") + 1] == "codex"
+
+
+# ---- step 0: preflight records the host, from the skill's own invocation -----------------
+#
+# Preflight and plan-lint run long before step 6's `driver install --host`. With nothing
+# recorded yet they answered the legacy `claude` default, so a fresh Codex start checked
+# Claude's skill roots and demanded the `codex` reviewer. The step-0 invocation is read out of
+# the skill for the same reason the driver-install one is: a restated argv keeps passing after
+# the skill drops `--host`.
+
+_PREFLIGHT_RE = re.compile(r"conductor preflight[^`\n]*")
+
+
+def documented_preflight_argv(host: str) -> list[str]:
+    """The FIRST `conductor preflight ...` in `skills/start/SKILL.md` (step 0), as argv after
+    the verb — what `bin/conductor` hands `preflight.main`."""
+    with open(START_SKILL, encoding="utf-8") as f:
+        body = f.read()
+    found = _PREFLIGHT_RE.findall(body)
+    assert found, f"{START_SKILL} documents no `conductor preflight` invocation"
+    argv = shlex.split(found[0])
+    assert argv[:2] == ["conductor", "preflight"], argv
+    out = []
+    for word in argv[2:]:
+        if word.startswith("<"):
+            assert word == "<this-host>", (
+                f"unknown placeholder {word!r} in {found[0]!r}"
+            )
+            out.append(host)
+        else:
+            out.append(word)
+    return out
+
+
+def _fresh_repo(tmp_path):
+    proj = tmp_path / "project"
+    proj.mkdir()
+    subprocess.run(["git", "init", "-q", str(proj)], check=True, timeout=30)
+    return proj
+
+
+def test_the_documented_preflight_declares_the_host(tmp_path):
+    argv = documented_preflight_argv("codex")
+    assert argv == ["--host", "codex"], argv
+
+
+def test_a_fresh_codex_start_preflights_the_codex_host(tmp_path, monkeypatch):
+    """Nothing planted: a Codex machine missing only the `claude` reviewer, a fresh repo, no
+    `$CONDUCTOR_HOST`. Step 0's documented invocation must check CODEX's skill set — so it
+    asks for `$claude` — and never Claude's."""
+    from conductor import preflight
+    from tests.conductor.test_preflight import _codex_install
+
+    _codex_install(tmp_path, monkeypatch, review_wrapper="codex", pin_host=False)
+    proj = _fresh_repo(tmp_path)
+    monkeypatch.chdir(proj)
+
+    seen = {}
+    real_check = preflight.check
+
+    def _spy(**kw):
+        seen["out"] = real_check(**kw)
+        return seen["out"]
+
+    monkeypatch.setattr(preflight, "check", _spy)
+    assert preflight.main(documented_preflight_argv("codex")) == 1
+    assert seen["out"]["missing"] == ["$claude"], seen["out"]
+    assert runhost.recorded(str(proj)) == "codex"
+
+
+def test_a_fresh_codex_start_passes_preflight_on_a_complete_codex_machine(
+    tmp_path, monkeypatch, capsys
+):
+    from conductor import preflight
+    from tests.conductor.test_preflight import _codex_install
+
+    _codex_install(tmp_path, monkeypatch, pin_host=False)
+    proj = _fresh_repo(tmp_path)
+    monkeypatch.chdir(proj)
+    assert preflight.main(documented_preflight_argv("codex")) == 0
+    assert "on host codex" in capsys.readouterr().out
+
+
+def test_step_six_install_agrees_with_the_step_zero_recording(
+    tmp_path, monkeypatch, clean_host_env
+):
+    """Step 0 records, step 6 passes the same id: the second leaves the recording as it is,
+    and the driver it writes spawns the recorded host."""
+    proj, root, wt = _project(tmp_path)
+    written = _stub_crontab(tmp_path, monkeypatch)
+    runhost.declare(str(proj), "codex")
+    argv = documented_install_argv(str(wt), "codex")
+    assert driver.main([*argv, "--project", str(proj)]) == 0
+    assert runhost.recorded(root) == "codex"
+    assert '"$CODEX_BIN" exec' in _fired_script(written.read_text(), root)
+
+
+def test_resuming_a_run_from_the_other_host_is_refused_at_step_zero(
+    tmp_path, monkeypatch, clean_host_env
+):
+    """A live run's host is never rewritten by a start. The refusal happens at step 0, before
+    any check — so step 6's `driver install --host` is never reached with the wrong id."""
+    from conductor import preflight
+
+    proj, root, _ = _project(tmp_path)
+    runhost.record(root, "claude")
+    monkeypatch.chdir(proj)
+    rc = preflight.main(documented_preflight_argv("codex"))
+    assert rc == preflight.HOST_REFUSED
+    assert runhost.recorded(root) == "claude"

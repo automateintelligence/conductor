@@ -24,7 +24,14 @@ before `--apply`. Contrast issue-sync/autodev, which never prompt.
 > works on every host and never goes stale, because you already know the path you read this from.
 > Run from the project root.
 
-0. **INVENTORY.** Locate: the spec (with `## Expectations`), `<spec>.assertions.md`, the run's
+0. **INVENTORY.** First run `conductor preflight --host <this-host>` (`claude` or `codex`,
+   your OWN id). It records the host that step 2's plan-lint checks the recipe against — on a
+   project with no recorded host plan-lint assumes `claude` — and reports the conducted
+   stack. Exit 3 = it refused the host because the run is already bound to the other one:
+   STOP and show the owner its message. Exit 1 (a skill missing or unverified) does not block
+   alignment; include what it named in the step-6 report, since `/conductor:start` will stop
+   on it.
+   Then locate: the spec (with `## Expectations`), `<spec>.assertions.md`, the run's
    done-gate — the per-spec `assertions/<slug>/manifest.yaml` + `.frozen` (`<slug>` =
    `conductor gate-dir <spec>`), falling back to a flat legacy `assertions/manifest.yaml` +
    `assertions/.frozen` — the plan(s) under `docs/plans/`, the ADR dir (`docs/adr/`, if any —

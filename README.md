@@ -4,15 +4,15 @@
 back to either finished work that passes a machine-checked definition of done, or a
 clear, recoverable note about why it stopped.
 
-**Hosts.** Conductor runs on **Claude Code** today. **OpenAI Codex** host support is in
-development — the design and implementation plan are written
-([design](docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md),
-[Plan 04](docs/superpowers/plans/2026-08-10-plan-04-host-adapters.md)), but the host
-adapter layer is not built yet. Installing conductor under Codex today will not work.
+**Hosts.** Conductor runs on **Claude Code** and **OpenAI Codex** (minimums: Claude Code
+`2.1.224`, Codex CLI `0.155.0`). A run records the host that started it, and its unattended
+driver launches that host — `claude` for a Claude run, `codex` for a Codex run — with the
+other host as the independent reviewer. Design:
+[dual-host design](docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md).
 
 **Survive sessions and restarts!!!**
 State grounded in GitHub. Not reliant on Claude Cloud.
-Conductor is a Claude Code plugin. You point it at a spec whose definition of done is
+Conductor is a Claude Code and Codex plugin. You point it at a spec whose definition of done is
 explicit and machine-checkable (built with [spec-craft](https://github.com/automateintelligence/spec-craft)),
 and it drives the work to completion: it plans, tracks every phase as a GitHub issue,
 executes one phase at a time in a fresh subagent, merges each phase only through a
@@ -71,7 +71,8 @@ SETUP  (you run this once)
     ├─ /spec-craft:executable-assertions .. 4-part specs → <spec>.assertions.md (claim · setup · observation · kind)
     │
     └─ /conductor:start <spec>   ── the supervisor; idempotent, reconcile-first ───┐
-         0. conductor preflight ........... does every conducted skill resolve? (fail-closed)
+         0. conductor preflight --host <h>  records the host running start (claude|codex), then:
+                                             does every conducted skill resolve on it? (fail-closed)
          1. /conductor:assertions-to-tests  reads <spec>.assertions.md → assertions/<slug>/manifest.yaml + RED tests = DONE-GATE
             conductor gate lint ............ fail-closed lint of the gate's own quality (unpinned/weak tests)
             conductor gate freeze .......... snapshot + commit the gate (FROZEN; worker can't weaken it)
@@ -94,8 +95,9 @@ THE LOOP  (the cron drives it; you walk away)                                   
     5. CLAIM ............. ledger.claim          (GitHub assignee + lease marker)
     6. EXECUTE ........... in a FRESH SUBAGENT, via the recipe, one PR per phase:
           subagent-driven-development → /code-review each task → commit each task
-            → open PR, base = the RUN branch (Closes #phase) → /codex review ×2
-              (Codex hit its 5h/weekly limit? → /code-review fallback + tell the owner, never stall)
+            → open PR, base = the RUN branch (Closes #phase) → opposite-host review ×2
+              (Claude run: `/codex` · Codex run: `$claude` — `conductor preflight` names it)
+              (reviewer hit its 5h/weekly limit? → same-host code-review fallback + tell the owner, never stall)
             → receiving-code-review
             → conductor merge-gate <pr>  ──ok?──►  gh pr merge --merge   (never force;
               lands on conductor/run-<slug>, never the default branch)
@@ -141,7 +143,7 @@ stops that mechanically:
   assertions via `/conductor:assertions-to-tests`; frozen ones can't be edited or deleted.
   Product code that a test merely imports is not frozen, so the worker still writes it.
 - **The baseline is git-tracked.** Editing `.frozen` itself to launder a weakened check shows
-  up in the PR diff, where `/codex` review and `conductor merge-gate`'s unresolved-thread
+  up in the PR diff, where the opposite-host review and `conductor merge-gate`'s unresolved-thread
   block can catch it. That last hop is review, not a mechanical proof — it is the one place
   the gate's integrity still leans on a reviewer, and it is named here on purpose.
 
@@ -155,16 +157,23 @@ merge; the done-gate defines whole-spec completion. They are different checks.
 
 ## Install
 
-Conductor is a Claude Code plugin that declares `dependencies: ["spec-craft"]`, so a
-marketplace install pulls in spec-craft automatically.
+Conductor declares `dependencies: ["spec-craft"]`. Claude Code installs that dependency
+automatically; Codex does not resolve plugin dependencies, so on Codex install spec-craft
+explicitly (below).
 
 ### Prerequisites
 
-- **Claude Code** with the conducted skill stack available —
-  [superpowers](https://github.com/obra/superpowers),
-  [spec-kit](https://github.com/github/spec-kit), `/codex`, `/code-review`,
-  `/document-release`. `conductor preflight` checks for every one and fail-closes if any
-  is missing.
+- **Claude Code** (`2.1.224`+) with the conducted skill stack available —
+  [superpowers](https://github.com/obra/superpowers), `/codex` (the opposite-host
+  reviewer), `/code-review`, `/document-release`.
+- **or Codex CLI** (`0.155.0`+) with the same stack in Codex form — `$superpowers:*`
+  ([superpowers](https://github.com/obra/superpowers) supports Codex), a `claude` skill (the
+  opposite-host reviewer; [gstack](https://github.com/garrytan/gstack) ships one for Codex),
+  `document-release` (gstack), and a `code-review` skill.
+- `conductor preflight` checks every required skill **on the host the run uses** and
+  fail-closes, naming what to install, if any is missing.
+- Optional: [spec-kit](https://github.com/github/spec-kit). `start` can use it instead of
+  `superpowers:writing-plans` to write the plan; preflight does not require it.
 - **`gh` CLI**, authenticated (`gh auth status`). GitHub issues are the ledger.
 - **Python 3.12** on PATH (the runner, ledger, and gate modules are Python).
 
@@ -189,6 +198,22 @@ claude plugin install conductor@automateintelligence
 > and lists both plugins, so `claude plugin install spec-craft@automateintelligence` installs
 > spec-craft on its own.
 
+### Install on OpenAI Codex
+
+The same marketplace works from Codex. Add it once, then install conductor **and**
+spec-craft — Codex does not pull in plugin dependencies:
+
+```bash
+codex plugin marketplace add automateintelligence/marketplace
+codex plugin add conductor@automateintelligence
+codex plugin add spec-craft@automateintelligence
+```
+
+Codex exposes plugin skills under their plugin-qualified names: `$conductor:start`,
+`$conductor:autodev`, `$spec-craft:expectations`, `$spec-craft:executable-assertions`.
+Start a run from a Codex session with `$conductor:start <spec>`; the driver it installs
+launches `codex` on every fire.
+
 ### Install locally (dev / `--plugin-dir`)
 
 Clone both repos side by side and load them as plugin directories:
@@ -209,13 +234,18 @@ export CONDUCTOR_PLUGIN_DIRS="$PWD/spec-craft"
 ### Verify
 
 ```bash
-conductor preflight          # prints MISSING: <cmd> and exits 1 if any conducted skill is absent
-claude plugin list           # conductor + spec-craft should appear
+conductor preflight          # checks the project's recorded host (claude if none is recorded yet);
+                             # prints MISSING: <cmd> and exits 1 if any conducted skill is absent
+CONDUCTOR_HOST=codex conductor preflight   # check the Codex stack without recording anything
+claude plugin list           # Claude Code: conductor + spec-craft should appear
+codex plugin list            # Codex: conductor + spec-craft should show "installed, enabled"
 ```
 
-After install the skills are available as `/conductor:start`, `/conductor:autodev`,
-`/conductor:assertions-to-tests`, `/conductor:issue-sync`, and (from the dependency)
-`/spec-craft:expectations`, `/spec-craft:executable-assertions`.
+After install the skills are `conductor:start`, `conductor:autodev`,
+`conductor:assertions-to-tests`, `conductor:issue-sync`, and (from spec-craft)
+`spec-craft:expectations`, `spec-craft:executable-assertions`. Invoke them with your host's
+sigil: `/conductor:start` on Claude Code, `$conductor:start` on Codex. The rest of this README
+writes the Claude form; on Codex swap `/` for `$`.
 
 ---
 
@@ -252,8 +282,9 @@ in `assertions/manifest.yaml` is that handoff boundary working as designed, not 
 
 This is the supervisor, and it is idempotent — every step probes durable state first and
 skips what is already done, so you can re-run it any time to resume. In order it runs
-preflight, turns the assertions into the runnable done-gate
-(`/conductor:assertions-to-tests`), writes the first plan if there is none, syncs the
+preflight as the host running it (`conductor preflight --host <claude|codex>` records that
+host first, and refuses to move a run already bound to the other one), turns the assertions
+into the runnable done-gate (`/conductor:assertions-to-tests`), writes the first plan if there is none, syncs the
 GitHub issue hierarchy (`/conductor:issue-sync`), records the goal, and registers the cron
 driver. Pass `--auto-assert` to let it run the spec-craft skills for you when assertions
 are absent.
@@ -275,8 +306,11 @@ days** (re-run `/conductor:start` to continue), and an in-session cron **dies wh
 closes**. For a run that survives reboots and closed terminals, `start` installs the **Tier-B OS
 watchdog** as the fail-closed default for an unattended run — `conductor driver install`, never
 a judgment call about whether the in-session cron persisted: a flock-guarded resume script
-firing `claude -p "/conductor:autodev"` (session-detect no-op while a terminal is live; exits
-once the gate is green) plus `@reboot` + heartbeat crontab lines tagged
+that fires the run's recorded host — `claude -p "/conductor:autodev"` on Claude,
+`codex exec --cd <run-worktree> …` on Codex — and exits once the gate is green. An open
+terminal does not by itself stop a fire: a fire skips (`fire-skipped reason=owner-busy`)
+while the run's ownership record names a live worker (`conductor run owner-busy`), e.g. while
+`start` or an in-session `autodev` tick holds it. Plus `@reboot` + heartbeat crontab lines tagged
 `# conductor-autodev <main-root>` (the main-checkout root, identical from the run worktree and
 the owner checkout; the marker is computed by the CLI, and install/removal share one
 implementation, so they cannot drift). `conductor driver status` reports, on demand, whether a
@@ -286,17 +320,35 @@ durable driver exists and whether recent fires failed — spec in
 #### Unattended authority
 
 There is no conductor-specific permission command: an unattended run **inherits the
-permission mode of the session you launch `/conductor:start` in**. The permission decision
-is made once, at launch, on the same path you already use for every Claude session.
+permission posture of the session you launch `/conductor:start` in**, in that host's own
+vocabulary. The permission decision is made once, at launch, on the same path you already use
+for every session on that host.
 
-- **Launch in bypass mode** (`claude --dangerously-skip-permissions`) and `start` warns you
+- **Launch in full-bypass** — Claude: `claude --dangerously-skip-permissions` (permission
+  mode `bypassPermissions`); Codex: sandbox `danger-full-access` — and `start` warns you
   about the standing blast radius — full access on every heartbeat, for the life of the run —
   and requires you to acknowledge before it continues.
-- **Launch in a less-privileged mode** and `start` shows a dry-run (`conductor authority
-  preview`) naming the concrete privileged operations each phase performs (branch, push,
-  `gh pr`, merge, docker via `CONDUCTOR_MERGE_VERIFY`, subagents, file writes) and which of
-  them would need you. It then offers three ways forward: relaunch elevated, widen the
-  session allowlist, or proceed as-is knowing exactly which steps will wait for you.
+- **Launch in a less-privileged posture** (Claude: default, `plan`, `acceptEdits` or a scoped
+  allowlist; Codex: `read-only` or `workspace-write`) and `start` shows a dry-run
+  (`conductor authority preview`) naming the concrete privileged operations each phase
+  performs (branch, push, `gh pr`, merge, docker via `CONDUCTOR_MERGE_VERIFY`, subagents, file
+  writes) and which of them would need you. It then offers three ways forward: relaunch
+  elevated, widen the session's scoped posture, or proceed as-is knowing exactly which steps
+  will wait for you.
+
+Any other or unreadable mode, and the other host's mode names, count as supervised. The chosen
+posture reaches the Tier-B driver through `.conductor/resume-env.sh`, in **one variable per
+host**. The driver expands only the run's host's variable; the other is never read. Both are
+empty by default (supervised: fires stall on the first prompt):
+
+| Host | Variable | Scoped example | Full-bypass value |
+|---|---|---|---|
+| Claude | `CONDUCTOR_RESUME_CLAUDE_FLAGS` (appended to `claude -p "/conductor:autodev"`) | `--settings <path-to-scoped-settings.json>` | `--dangerously-skip-permissions` |
+| Codex | `CONDUCTOR_RESUME_CODEX_FLAGS` (placed before the prompt in `codex exec --cd <run-worktree>`) | `--sandbox workspace-write` | `--dangerously-bypass-approvals-and-sandbox` |
+
+Each fire logs `fire-start posture=<supervised|scoped|full-bypass>`, derived from exact tokens
+of that variable (on Codex, `-s`/`--sandbox danger-full-access` also reads as full-bypass and
+`--approve-for-me` as scoped).
 
 Safety floor either way: any `resume-env.sh` conductor writes (the Tier-B watchdog's env
 file) is mode `0600`, and the generated driver refuses to source one that is group- or
@@ -308,8 +360,17 @@ world-writable.
   GitHub issues / milestone (the durable ledger).
 - **Resume after a crash or restart:** re-run `/conductor:start path/to/spec.md`. It
   reconciles and continues from the first incomplete step.
-- **Stop it early:** `CronList` then `CronDelete` the driver cron (the worker does this
-  itself on completion).
+- **Stop it early:** remove both drivers (the worker does both itself on completion):
+  1. the in-session cron: `CronList`, then `CronDelete` its id (Claude Code);
+  2. the Tier-B crontab lines (`@reboot` and `*/20`), which `CronDelete` does not touch:
+
+     ```bash
+     conductor resume-script uninstall-cron --project "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+     ```
+
+     It removes exactly the lines tagged `# conductor-autodev <main-root>` and nothing else;
+     with none present it changes nothing. Until it runs, cron keeps firing the resume script.
+     `conductor driver status` then prints `driver: NOT durable` and exits `1`, which confirms it.
 
 When the worker halts on `needs human judgment`, the handoff *is* the recoverable note —
 what it did, why it stopped, and the exact command to resume:
@@ -346,11 +407,11 @@ The `conductor` command (`bin/conductor`) fronts the Python modules.
 | `conductor ledger convert <plan.md>` | Parse a Markdown plan (`# Title` / `## Phase [status]` / `- [ ] task`), then generate. |
 | `conductor ledger reconcile <issue#> [--tests-red] [--pr-merged] [--commits N] [-R N] [--now-ts N] [-L N]` | Apply the §7 reconcile rules (precedence git/tests > PR > label); the durable per-phase retry count is maintained by reconcile itself and escalates to `status:blocked` at the cap `R`; returns `{action, new_status}`. |
 | `conductor goal set <text...>` / `conductor goal get` | Record / read the durable goal (`.conductor/goal.md`). |
-| `conductor preflight` | Static availability gate: every conducted skill resolves, else exit 1. |
+| `conductor preflight [--host claude\|codex]` | Static availability gate on the run's host: every conducted skill resolves, else exit `1`. `--host` (your own id; `start` step 0 passes it) first records the host in `.conductor/host` of the main checkout: idempotent for the same id, and refuses with exit `3`, nothing changed and nothing checked, when the run is already bound to the other host or `$CONDUCTOR_HOST` names another host. Any other argument exits `64`. |
 | `conductor authority preview <plan.md>` | Dry-run of unattended authority: prints, per phase of the plan, every privileged operation an unattended fire performs (branch, push, gh pr, merge, docker via `CONDUCTOR_MERGE_VERIFY`, subagents, file writes), each marked owner-required unless the session pre-authorizes it. |
 | `conductor merge-gate <pr>` | Autonomous merge safety gate (see below); exit 0 ok, 1 blocked. |
 | `conductor run-branch name <spec.md>` | Emit the canonical run branch for a spec — one line, `conductor/run-<slug>`, deterministic (same spec → byte-identical name; different spec stems → different names (same stem shares by design)). The single source `start` and `autodev` call instead of deriving the slug in prose. |
-| `conductor default-branch` | Emit the repo's default branch — one non-empty line, resolved via `gh repo view` then the `origin/HEAD` symbolic ref; any failure falls open to `main` (exit 0, never empty). |
+| `conductor default-branch` | Emit the repo's default branch — one line, resolved via `gh repo view` then the `refs/remotes/<remote>/HEAD` symbolic ref. Fail-closed: if neither answers it never guesses a name (no `main` fallback); it exits `1` with stdout empty and names both probes on stderr. |
 | `conductor driver install --worktree <path>` | Fail-closed Tier-B default for an unattended run: writes the resume script (through `resume-script write`, so its inline-owner-env no-clobber guard is respected) plus the marker-tagged `@reboot` + `*/20` crontab lines — never a durability judgment call. |
 | `conductor driver status` | The operator's health signal: exits non-zero unless a durable driver exists for the project (crontab marker or a matching scheduled task) AND the recent `resume-autodev.log` tail is clean; recent `driver-unresolved` / `fire-end rc=<non-zero>` lines are printed verbatim, never just counted. |
 | `conductor resume-script {install-cron\|uninstall-cron} --project <root>` | Add / remove exactly the `# conductor-autodev <main-root>`-tagged crontab lines. One shared marker implementation (`dirname` of `--git-common-dir`), idempotent install, `grep -F -v --` fixed-string removal semantics — install and removal cannot drift. |

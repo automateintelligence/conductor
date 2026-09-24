@@ -122,3 +122,128 @@ def record(project_root: str, host_id: str) -> str:
 def adapter(project_root: str) -> HostAdapter:
     """The adapter for this project's recorded host."""
     return load(resolve(project_root))
+
+
+class HostConflict(Exception):
+    """The declared host disagrees with what this run is already bound to. Nothing written."""
+
+
+def _bound(project_root: str) -> str | None:
+    """The host this run is already bound to, or ``None`` for a genuinely fresh project.
+
+    A project with no host file but an installed Tier-B driver predates the file and fires
+    ``claude`` — the same absence rule ``resolve`` applies — so it is bound to the default.
+    """
+    found = recorded(project_root)
+    if found is not None:
+        return found
+    # Lazy: resume_script imports this module. `host_file` is `<main>/.conductor/host`, and
+    # the driver lives in that same checkout.
+    from conductor import resume_script
+
+    main_checkout = os.path.dirname(os.path.dirname(host_file(project_root)))
+    driver = resume_script.driver_script_path(main_checkout)
+    return DEFAULT_HOST if os.path.exists(driver) else None
+
+
+def _conflict(bound: str, declared: str, path: str) -> HostConflict:
+    return HostConflict(
+        f"host: this run is bound to `{bound}` ({path}), but you declared `{declared}`. "
+        "Nothing was changed.\n"
+        "  A run's host is what every fire, preflight, plan-lint and merge-gate reads, so a "
+        "start never rewrites it. Either:\n"
+        f"  - continue the run on `{bound}`: invoke "
+        f"{load(bound).native_invocation('conductor:start')} from {bound}; or\n"
+        f"  - move the run to `{declared}` on purpose: confirm no worker owns it "
+        "(`conductor run owner-busy` exits 11), then run "
+        f"`conductor driver install --worktree <run-worktree> --host {declared}`, which "
+        "rewrites the driver and the recording together, and start again. If no driver is "
+        f"installed yet (`conductor driver status` finds none), delete {path} instead."
+    )
+
+
+def install_lock(project_root: str) -> str:
+    """The lock every writer of this project's host AND driver takes: the driver's install lock.
+
+    One lock for both files because they are one durable fact — the recording names the host
+    and the driver fires it — so a host write serialized on anything else could still land
+    between a `driver install`'s script write and its record, and leave them disagreeing.
+    ``kind="project"`` in the global order (`conductor.core.locks`); nothing below it is taken
+    while it is held here.
+    """
+    from conductor import resume_script  # lazy: resume_script imports this module
+
+    main_checkout = os.path.dirname(os.path.dirname(host_file(project_root)))
+    return resume_script.install_lock_path(main_checkout)
+
+
+def _needs_write(project_root: str, chosen: str, *, repoint: bool) -> bool:
+    """The compare: does binding ``chosen`` require a write? Raises ``HostConflict`` when the
+    run is bound to another host and ``repoint`` is not sanctioned. Reads only."""
+    bound = _bound(project_root)
+    if bound is not None and bound != chosen and not repoint:
+        raise _conflict(bound, chosen, host_file(project_root))
+    # A legacy driver-installed run declaring its own (default) host still writes, so the
+    # answer no longer rests on the absence rule.
+    return recorded(project_root) != chosen
+
+
+def _bind(project_root: str, chosen: str, *, repoint: bool) -> bool:
+    """Compare-and-write, UNDER the install lock the caller already holds. Returns ``wrote``.
+
+    The only path that writes a host recording for a run: `declare` (preflight) and
+    `driver install` both come through here, so a writer that has not taken the lock cannot
+    exist rather than merely being discouraged. ``repoint`` is `driver install --host`'s
+    sanctioned move of a run onto another host; a declaration never repoints.
+    """
+    from conductor.core import locks
+
+    lock = install_lock(project_root)
+    if not locks.is_held(lock):
+        raise RuntimeError(
+            f"host write attempted without holding the install lock {lock}"
+        )
+    if not _needs_write(project_root, chosen, repoint=repoint):
+        return False
+    record(project_root, chosen)
+    return True
+
+
+def declare(project_root: str, host_id: str) -> tuple[str, str, bool]:
+    """The running agent names itself: record ``host_id`` unless the run is already bound.
+
+    How ``conductor preflight --host`` establishes the host BEFORE preflight, plan-lint or
+    anything else resolves it — ``resolve`` answers the legacy default for an unrecorded
+    project, so a Codex start that recorded late had already been checked as Claude.
+
+    Returns ``(host_id, host_file, wrote)`` — the host the caller must go on to use. Same id
+    already recorded: no write. Raises ``HostConflict`` (nothing written) when the run is bound
+    to another host, or when ``$CONDUCTOR_HOST`` names another host — it outranks the
+    recording, so every later check in that shell would answer for it. Raises ``UnknownHost``
+    for an unsupported id or an unreadable/garbage recording, and ``LockTimeout`` when a fire
+    or an install held the lock for the whole wait.
+
+    The check is repeated under the install lock before the write. The unlocked pass only
+    decides whether the lock is needed at all: an outcome that writes nothing (same host, or a
+    refusal) cannot corrupt anything, and a live fire holds this lock for its whole duration,
+    so re-invoking start on a running project must not queue behind it.
+    """
+    from conductor import resume_script
+    from conductor.core import locks
+
+    chosen = _validated(host_id, source="declare()")
+    path = host_file(project_root)
+    override = (os.environ.get(HOST_ENV) or "").strip()
+    if override and override != chosen:
+        raise HostConflict(
+            f"host: ${HOST_ENV}={override} is set in this environment and outranks any "
+            f"recording, so every check after this would run as `{override}`, not "
+            f"`{chosen}`. Nothing was changed. Unset ${HOST_ENV} (or set it to `{chosen}`) "
+            "and run this again."
+        )
+    if not _needs_write(project_root, chosen, repoint=False):
+        return chosen, path, False
+    lock = install_lock(project_root)
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    with locks.hold(lock, kind="project", timeout=resume_script.INSTALL_LOCK_TIMEOUT_S):
+        return chosen, path, _bind(project_root, chosen, repoint=False)

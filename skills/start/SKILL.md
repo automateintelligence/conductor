@@ -26,7 +26,19 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 > exports `CONDUCTOR_GATE_SLUG` so `conductor gate freeze|lint` and `assert run` resolve that dir
 > during setup, before the goal/run-branch that carry the slug at run time are written.
 
-0. **PREFLIGHT (`conductor preflight`).** Confirm every conducted command resolves (Codex #1).
+0. **PREFLIGHT AS YOUR HOST (`conductor preflight --host <this-host>`).** Run it before any
+   other `conductor` command. `<this-host>` is `claude` or `codex`, YOUR OWN id: you are the
+   host executing this skill, and nothing below you can work it out (see step 6's `--host`).
+   `--host` first writes `<main-root>/.conductor/host`, which plan-lint (step 4b), the merge
+   gate and every fire also read, and then checks THAT host. Without it a fresh project
+   resolves the legacy `claude` default, so a Codex start would check Claude's skills and
+   demand the wrong reviewer. Recording is idempotent (the same id again changes nothing), and
+   it **refuses — exit 3, changing nothing and checking nothing — when this run is already
+   bound to the OTHER host**, or when `$CONDUCTOR_HOST` in your environment names the other
+   host. On exit 3 **STOP** and pass its message to the owner verbatim: it names the two ways
+   forward (resume the run from its recorded host, or move it to this host deliberately, by
+   the command it prints). Never delete or edit `.conductor/host` to get past it.
+   Then confirm every conducted command resolves (Codex #1).
    **Do not re-list the required commands here or in your report — run the command and read what
    it prints.** It resolves the set for THIS run's host and names every one of them in your
    host's own invocation form, including the **opposite-host review wrapper**, which is the one
@@ -220,25 +232,30 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
    non-zero unless a durable driver exists (crontab marker or a matching scheduled task) with a
    clean recent log tail.
    - **`--host` is `claude` or `codex`, and it is YOUR OWN id — you are the host** executing
-     this skill. State it; do not omit it and do not make the CLI guess. Nothing below this
-     point can work it out: `driver install` runs as a subprocess, Claude Code exports
-     `CLAUDECODE`/`CLAUDE_PLUGIN_ROOT` but the Codex ground truth records no exported
-     equivalent, so "neither variable" is indistinguishable from a plain shell. An omitted
-     `--host` therefore leaves the run on the legacy `claude` default — which on a Codex machine
-     installs a driver that fires an agent that is not there, and logs nothing about it. The
-     recorded answer lands in `<main-root>/.conductor/host` and every later fire, preflight,
-     plan-lint and merge-gate reads it from there.
+     this skill, the same id step 0 recorded, so this install leaves the recording as it is.
+     State it anyway. After step 0 an omitted `--host` would render the recorded host, so the
+     argument is not what supplies the host any more; it is what makes the install say which
+     host it renders instead of inferring it from state, so the driver can only fire the host
+     step 0 checked. Nothing below you can supply it either: `driver install` runs as a
+     subprocess, Claude Code exports `CLAUDECODE`/`CLAUDE_PLUGIN_ROOT` but the Codex ground
+     truth records no exported equivalent, so "neither variable" is indistinguishable from a
+     plain shell. **Never pass a different id than step 0's:** `driver install --host` is the
+     sanctioned way to MOVE a run onto another host, and it will. The driver and
+     `<main-root>/.conductor/host` are written under one lock, and every later fire, preflight,
+     plan-lint and merge-gate reads the host from there.
    - **The resume driver is GENERATED mechanically — never hand-write it.** (`conductor
      resume-script write --project <main-root> --worktree <run-worktree> --out
      <main-root>/.conductor/resume-autodev.sh` is exactly what `driver install` runs;
      `<main-root>` = the crontab-marker path below; `<run-worktree>` = step 5b's worktree). The
-     generated driver resolves the `claude` and `conductor` bins at RUN time (repairs cron's
-     minimal PATH, then `command -v` with a stable-launcher fallback for claude and a
-     newest-installed glob for conductor) and FAILS LOUD (`exit 3`, logs `driver-unresolved`) if
+     generated driver resolves the host bin (`claude` or `codex`) and `conductor` at RUN time
+     (repairs cron's minimal PATH, then `command -v` with a stable-launcher fallback for claude,
+     and for conductor a newest-installed glob on Claude or `codex plugin list --json` on Codex) and FAILS LOUD (`exit 3`, logs `driver-unresolved`) if
      either can't resolve — so a claude/node/plugin upgrade cannot silently rot it the way a
      hand-written generation-time-pinned path did (live-run silent stall 2026-07-05, see
-     `docs/reviews/2026-07-05-conductor-tier-b-driver-robustness.md`). It fires `claude -p
-     "/conductor:autodev"` from the RUN WORKTREE (never the owner's checkout; autodev, not start —
+     `docs/reviews/2026-07-05-conductor-tier-b-driver-robustness.md`). It fires the recorded
+     host's autodev — `claude -p "/conductor:autodev"` on Claude, `codex exec --cd
+     <run-worktree> "Read <plugin>/skills/autodev/SKILL.md and execute it."` on Codex — from the
+     RUN WORKTREE (never the owner's checkout; autodev, not start —
      a headless one-shot must do a phase, not register a cron that dies with it), guarding: (a) one
      driver at a time — `flock -n <project>/.conductor/resume.lock`, held by the driver (never
      inherited by the worker or its descendants) for the whole fire, which is the ONLY thing that
@@ -254,44 +271,62 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      `DOCKER_HOST`). Do NOT set `CONDUCTOR_RUN_BRANCH` — the CLI reads `.conductor/run_branch`, the
      single source of truth; a stale literal would override it.
    - **UNATTENDED PERMISSIONS — the owner's explicit call, never defaulted.** An autonomous phase
-     runs `gh` PR create/merge, `git push`, docker, broad edits, and subagents. A headless `claude
-     -p` session can't answer permission prompts, so if the run worktree doesn't pre-authorize
-     those, an unattended Tier-B fire **stalls on the first prompt** — a permission-flavored variant
-     of the same silent-stall class. The driver fires with `${CONDUCTOR_RESUME_CLAUDE_FLAGS:-}`
-     (default EMPTY = supervised only) — it never bakes a bypass. Conductor **inherits Claude
-     Code's permission model** — it invents NO permission flags or tokens of its own; the
-     unattended run never gets MORE authority than the session `/conductor:start` was launched in.
+     runs `gh` PR create/merge, `git push`, docker, broad edits, and subagents. A headless fire
+     can't answer permission prompts, so if the run's posture doesn't pre-authorize those, an
+     unattended Tier-B fire **stalls on the first prompt** — a permission-flavored variant of
+     the same silent-stall class. Conductor **inherits the host's own permission model** — it
+     invents NO permission flags or tokens of its own; the unattended run never gets MORE
+     authority than the session `/conductor:start` was launched in. **Each host has its own
+     flags variable, in its own vocabulary, and the driver expands ONLY the run's host's** (the
+     other one never reaches the argv). Both default EMPTY = supervised only; the driver never
+     bakes a bypass:
+
+     | host | variable the driver expands | fire | scoped example | full-bypass value |
+     |---|---|---|---|---|
+     | `claude` | `CONDUCTOR_RESUME_CLAUDE_FLAGS` | `claude -p "/conductor:autodev" <flags>` | `--settings <path-to-scoped-settings.json>` | `--dangerously-skip-permissions` |
+     | `codex` | `CONDUCTOR_RESUME_CODEX_FLAGS` | `codex exec --cd <run-worktree> <flags> "<autodev prompt>"` | `--sandbox workspace-write` | `--dangerously-bypass-approvals-and-sandbox` |
+
+     Set **only your own host's** variable. Every fire logs `fire-start posture=<label>`,
+     derived from exact tokens of that variable (Codex also recognizes `-s`/`--sandbox
+     danger-full-access` as full-bypass and `--approve-for-me` as scoped).
      - **Detect the launching session's posture.** If the harness exposes the session's permission
-       mode, read it; if it cannot be read, ask the owner ONCE ("what posture should the
-       unattended run use?"). Either way resolve the answer with the
-       `conductor.authority.resolve_posture` semantics: only the exact mode `bypassPermissions` is
-       bypass; an unknown, unreadable, or ambiguous mode/answer is treated as **supervised**
-       (fail-closed — never assume bypass).
-     - **(A) Launched in bypass / skip-permissions mode:** print a BIG explicit warning — a
+       state, read it; if it cannot be read, ask the owner ONCE ("what posture should the
+       unattended run use?"). Either way resolve the answer with
+       `conductor.authority.resolve_posture(mode, host=<this-host>)`, which reads each host's
+       OWN vocabulary: on **Claude** (permission mode) only the exact `bypassPermissions` is
+       full-bypass and `acceptEdits` is scoped; on **Codex** (sandbox mode) only
+       `danger-full-access` is full-bypass and `workspace-write` is scoped. Everything else —
+       `default`, `plan`, `read-only`, an unknown, unreadable or ambiguous answer, or the other
+       host's mode name — is **supervised** (fail-closed — never assume bypass).
+     - **(A) Launched in full-bypass:** print a BIG explicit warning — a
        standing full-access agent will fire every heartbeat with the owner's credentials (gh
        merge, push, docker, broad edits, subagents), surviving reboots, until the gate is green —
        and require the owner to **acknowledge to continue**. The acknowledgment IS the gate; there
        is no extra conductor flag. Never start unattended full-auto silently.
-     - **(B) Launched in a less-privileged mode (default ask-per-tool, plan, or a scoped
-       allowlist):** run `conductor authority preview <plan.md>` (the dry-run) and show the owner
+     - **(B) Launched in a less-privileged posture (Claude: default ask-per-tool, plan, or a
+       scoped allowlist; Codex: `read-only` or `workspace-write`):** run `conductor authority
+       preview <plan.md>` (the dry-run) and show the owner
        the concrete per-phase privileged-operation list, annotated with **which ops the current
        mode would prompt for**: if the session's allowlist can be introspected, mark each op
        prompt/no-prompt; if promptability CANNOT be introspected, mark EVERY listed op as
        owner-required/manual (fail-closed toward "will stall") — never show the list unannotated.
        Then offer the real three-way choice: (i) **elevate to bypass** — the OWNER
-       relaunches/reconfigures the session itself in bypass mode (with the (A) warning); conductor
-       NEVER writes bypass flags into `resume-env.sh` from a less-privileged session; (ii) **widen
-       the session's own scoped allowlist** to cover the listed operations — least-privilege:
-       point claude at a scoped `settings.json` allowlist (git/gh/pytest/ruff/pyright/conductor/docker);
-       or (iii) **proceed** knowing exactly which steps will require them. Default (none chosen) =
-       the run only progresses while a supervised session is open.
+       relaunches/reconfigures the session itself in its host's full-bypass posture (with the
+       (A) warning); conductor NEVER writes bypass flags into `resume-env.sh` from a
+       less-privileged session; (ii) **widen the session's own scoped posture** to cover the
+       listed operations — least-privilege: on Claude point `claude` at a scoped
+       `settings.json` allowlist (git/gh/pytest/ruff/pyright/conductor/docker); on Codex the
+       scoped posture is the `workspace-write` sandbox (writes confined to the workspace,
+       approvals still apply); or (iii) **proceed** knowing exactly which steps will require
+       them. Default (none chosen) = the run only progresses while a supervised session is open.
      - **Any `resume-env.sh` written on this path goes through
        `conductor.authority.write_resume_env`** (0600 always, shell-safe quoting — the driver
        refuses a group- or world-writable env file) — never a hand `printf > file`. For full
-       autonomy the owner-ACKNOWLEDGED value is
-       `CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"`, and say
-       plainly that this is a **standing** posture (a full-access agent firing every heartbeat, not a
-       one-shot).
+       autonomy the owner-ACKNOWLEDGED value is your host's row above:
+       `CONDUCTOR_RESUME_CLAUDE_FLAGS="--dangerously-skip-permissions"` on Claude, or
+       `CONDUCTOR_RESUME_CODEX_FLAGS="--dangerously-bypass-approvals-and-sandbox"` on Codex —
+       and say plainly that this is a **standing** posture (a full-access agent firing every
+       heartbeat, not a one-shot).
    - **RECONCILE is verify-first: SKIP the driver only if it still verifies.** `conductor
      resume-script verify --project <main-root> --worktree <run-worktree> --script <path>` exits 0
      when current; non-zero means the template changed or the installed driver is an older
