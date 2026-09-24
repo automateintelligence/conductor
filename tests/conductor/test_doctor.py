@@ -277,6 +277,8 @@ def test_a_scheduled_task_naming_a_sibling_path_that_extends_the_checkouts_does_
             {"prompt": f"cd {checkout}-backup && /conductor:autodev", "cwd": "/x"},
             {"prompt": f"cd {checkout}.old && /conductor:autodev", "cwd": "/x"},
             {"prompt": f"run /mirror{checkout} now", "cwd": "/x"},
+            {"prompt": f"cd {checkout}+backup && go", "cwd": "/x"},
+            {"prompt": f"cd {checkout}@old && go", "cwd": "/x"},
         ]
     )
     assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == set()
@@ -291,6 +293,8 @@ def test_a_scheduled_task_naming_the_checkout_or_beneath_it_in_free_text_blocks(
         f"--project={checkout}/sub",
         f"{checkout}",
         f'"{checkout}"',
+        f"cd {checkout}&&go",
+        f"work in {checkout}.",
     ):
         scheduled_tasks([{"prompt": text, "cwd": "/x"}])
         assert _names(doctor.scan(str(checkout)), doctor.QUIESCE) == {

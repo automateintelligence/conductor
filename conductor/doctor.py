@@ -55,7 +55,6 @@ import argparse
 import glob
 import json
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -279,16 +278,35 @@ def _task_names_checkout(entry: dict, roots: tuple[str, ...]) -> str | None:
     return None
 
 
-def _text_names_path(text: str, root: str) -> bool:
-    """Does free text name ``root`` or a path beneath it — on PATH BOUNDARIES?
+def _text_path_tokens(text: str) -> list[str]:
+    """The absolute paths free text names, as whole shell words.
 
-    A bare substring test reads ``/projects/app`` inside ``/projects/app-backup``, and inside
-    ``/mirror/projects/app``, so one checkout's scan was blocked by every sibling that happened
-    to extend its name. The occurrence must start where a path can start (not after a path
-    character) and end at the path's end or at a separator."""
-    stem = root.rstrip(os.sep) or root
-    pattern = r"(?<![\w.~/-])" + re.escape(stem) + r"(?![\w.~-])"
-    return re.search(pattern, text) is not None
+    Split the way a shell would (quotes honoured, ``&&``/``;``/``|``/parentheses as their own
+    words), then each word's ``=``-separated parts, with sentence punctuation trimmed from the
+    end. Text shlex cannot parse (an unbalanced quote) falls back to whitespace words."""
+    try:
+        lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        words = list(lexer)
+    except ValueError:
+        words = text.split()
+    paths = []
+    for word in words:
+        for part in word.split("="):
+            part = part.strip("\"'").rstrip(".,;:!?")
+            if part.startswith(("/", "~")):
+                paths.append(os.path.abspath(os.path.expanduser(part)))
+    return paths
+
+
+def _text_names_path(text: str, root: str) -> bool:
+    """Does free text name ``root`` or a path beneath it?
+
+    A WHOLE PATH WORD, compared with ``_under``: equal to the checkout, or continuing past it
+    only with the path separator. A substring or character-class test read ``/projects/app``
+    inside ``/projects/app-backup``, ``/projects/app+backup`` and ``/mirror/projects/app``, so
+    one checkout's scan was blocked by every sibling that happened to extend its name."""
+    return any(_under(path, (root,)) for path in _text_path_tokens(text))
 
 
 def _scheduled_task_findings(checkout: str, roots: tuple[str, ...]) -> list[Finding]:
