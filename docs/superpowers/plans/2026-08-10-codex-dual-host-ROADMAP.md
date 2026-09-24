@@ -76,9 +76,9 @@ Copy this block verbatim into each plan's `## Global Constraints` section.
 
 | # | Plan | Repo | Depends on | Plan doc | Code |
 | --- | --- | --- | --- | --- | --- |
-| A1 | Host adapter for launcher, scheduler discovery, preflight | conductor | — | built directly | **PR #87** — 3 codex rounds, 1188 tests |
-| A2 | Host-neutral scheduling (retire `scheduled_tasks.json`) | conductor | — | built directly | merged into A1's branch |
-| A3 | Codex packaging (`.codex-plugin` + Codex catalog entry) | conductor, marketplace | **A1** | built directly | **PR #88** — 1 codex round |
+| A1 | Host adapter for launcher, scheduler discovery, preflight | conductor | — | built directly | **shipped 0.10.0** — PR #87, on main via #89 |
+| A2 | Host-neutral scheduling (retire `scheduled_tasks.json`) | conductor | — | built directly | **shipped 0.10.0** — via A1 |
+| A3 | Codex packaging (`.codex-plugin` + Codex catalog entry) | conductor, marketplace | **A1** | built directly | **shipped 0.10.0** — PR #88; Codex 0.155 reads the existing Claude catalog, so no separate Codex catalog file |
 
 **Track B — improvement. After Codex-capable ships.** Every row below is **deferred**: retained in
 full, not a prerequisite for Track A unless Track A names it.
@@ -98,6 +98,14 @@ full, not a prerequisite for Track A unless Track A names it.
 | 10 | Public messaging and installation smokes — *deferred* | all three | 09 | not written | — |
 
 ### What the done-gate measures, per plan
+
+> **Status 2026-09-24 — Track A shipped as 0.10.0; the gate is 7/7 green on `main`.** PR #89
+> landed the done-gate plus the Track B slices it needed to close A-DH-4..7 (bounded fire,
+> relocation scan, default-branch refusal, lifecycle verbs), together with #90–#94: the
+> ownership record that replaces the `pgrep` double-drive guard, driver lock integrity, the
+> port of #85's production fixes, Codex skill discovery through `codex app-server`
+> `skills/list`, and the codex-review fixes. The table below is the 2026-08-21 measurement,
+> kept for the record. Open follow-ups: #96, #99.
 
 The spec's seven assertions are executable on `feature/dual-host-done-gate` and report **3/7 green**.
 Each red names the plan that owns it — measured by running the gate, not estimated.
