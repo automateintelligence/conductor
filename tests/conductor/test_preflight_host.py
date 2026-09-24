@@ -40,8 +40,8 @@ def proj(tmp_path):
 
 
 def test_a_fresh_project_records_the_declared_host(proj):
-    path, wrote = runhost.declare(proj, "codex")
-    assert wrote and path == runhost.host_file(proj)
+    host, path, wrote = runhost.declare(proj, "codex")
+    assert host == "codex" and wrote and path == runhost.host_file(proj)
     assert runhost.recorded(proj) == "codex"
 
 
@@ -58,7 +58,7 @@ def test_declaring_the_same_host_again_is_idempotent(proj):
     runhost.declare(proj, "codex")
     path = runhost.host_file(proj)
     before = os.stat(path).st_mtime_ns
-    assert runhost.declare(proj, "codex") == (path, False)
+    assert runhost.declare(proj, "codex") == ("codex", path, False)
     assert os.stat(path).st_mtime_ns == before  # no rewrite
     assert runhost.recorded(proj) == "codex"
 
@@ -95,7 +95,7 @@ def test_a_legacy_run_with_a_driver_and_no_host_file_is_a_claude_run(proj):
         runhost.declare(proj, "codex")
     assert runhost.recorded(proj) is None
     assert "`claude`" in str(exc.value)
-    assert runhost.declare(proj, "claude")[1] is True
+    assert runhost.declare(proj, "claude")[2] is True
     assert runhost.recorded(proj) == "claude"
 
 
@@ -218,3 +218,149 @@ def test_the_cli_passes_host_through(proj, tmp_path):
     refused = _run("codex")
     assert refused.returncode == preflight.HOST_REFUSED, refused.stderr
     assert runhost.recorded(proj) == "claude"
+
+
+# ---- round 2: the declaration is serialized with every other writer of the host ------------
+#
+# The check and the write used to be separate steps with no lock between them, so two fresh
+# declarations could both pass the check and write different hosts, and a `driver install` of
+# the other host landing in the gap left a codex driver behind a claude recording. Both races
+# are driven deterministically: the gap is widened on purpose, at the point between the
+# unlocked pre-check and the write, and the competing writer runs inside it.
+
+
+def _in_the_gap(monkeypatch, competitor):
+    """Run ``competitor()`` once, right after the first declaration's unlocked pre-check."""
+    original = runhost._needs_write
+    fired = []
+
+    def _widened(*args, **kwargs):
+        answer = original(*args, **kwargs)
+        if not fired:
+            fired.append(True)
+            competitor()
+        return answer
+
+    monkeypatch.setattr(runhost, "_needs_write", _widened)
+
+
+def test_a_declaration_that_loses_the_race_is_refused_not_written(proj, monkeypatch):
+    """Both declarations see a fresh project; the one that reaches the write second must
+    re-check under the lock and refuse, never overwrite."""
+    won = []
+    _in_the_gap(monkeypatch, lambda: won.append(runhost.declare(proj, "codex")))
+    with pytest.raises(runhost.HostConflict):
+        runhost.declare(proj, "claude")
+    assert won and won[0][2] is True
+    assert runhost.recorded(proj) == "codex"
+
+
+def test_two_concurrent_preflight_declarations_exactly_one_wins(
+    proj, monkeypatch, capsys
+):
+    """Real threads, both held at a barrier after their pre-check so neither can write before
+    the other has checked. Whichever takes the lock first wins; the other exits 3."""
+    import threading
+
+    barrier = threading.Barrier(2, timeout=30)
+    original = runhost._needs_write
+    local = threading.local()
+
+    def _held_at_barrier(*args, **kwargs):
+        answer = original(*args, **kwargs)
+        if not getattr(local, "waited", False):
+            local.waited = True
+            barrier.wait()
+        return answer
+
+    monkeypatch.setattr(runhost, "_needs_write", _held_at_barrier)
+    monkeypatch.setattr(
+        preflight,
+        "check",
+        lambda **_: {"ok": True, "missing": [], "unverified": [], "advice": []},
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", proj)
+    results: dict[str, int] = {}
+
+    def _run(host):
+        results[host] = preflight.main(["--host", host])
+
+    threads = [threading.Thread(target=_run, args=(h,)) for h in ("claude", "codex")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert sorted(results.values()) == [0, preflight.HOST_REFUSED], results
+    winner = next(h for h, rc in results.items() if rc == 0)
+    assert runhost.recorded(proj) == winner
+
+
+def test_a_declaration_racing_a_driver_install_never_splits_driver_and_recording(
+    proj, tmp_path, monkeypatch
+):
+    """`driver install --host codex` completes inside a pending claude declaration's gap. The
+    declaration must then refuse; before, it wrote claude over the codex install's record."""
+    from conductor import driver
+
+    monkeypatch.setattr(resume_script, "install_cron", lambda _root: 0)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _in_the_gap(
+        monkeypatch, lambda: driver.install(proj, str(wt), host="codex") == 0 or None
+    )
+    with pytest.raises(runhost.HostConflict):
+        runhost.declare(proj, "claude")
+    script = open(resume_script.driver_script_path(proj), encoding="utf-8").read()
+    assert "# HOST: codex" in script
+    assert runhost.recorded(proj) == "codex"
+
+
+def test_driver_install_records_under_the_same_lock(proj, tmp_path, monkeypatch):
+    """`driver install`'s own record goes through the shared compare-and-write, which refuses
+    to write unless the install lock is held by the caller."""
+    from conductor import driver
+    from conductor.core import locks
+
+    monkeypatch.setattr(resume_script, "install_cron", lambda _root: 0)
+    seen = []
+    original = runhost._bind
+
+    def _spy(root, chosen, **kw):
+        seen.append(locks.is_held(runhost.install_lock(root)))
+        return original(root, chosen, **kw)
+
+    monkeypatch.setattr(runhost, "_bind", _spy)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    assert driver.install(proj, str(wt), host="codex") == 0
+    assert seen == [True]
+    with pytest.raises(RuntimeError):
+        original(proj, "claude", repoint=True)  # not under the lock: refused
+
+
+def test_preflight_declares_into_conductor_home_not_the_cwd(
+    proj, tmp_path, monkeypatch
+):
+    """start permits `CONDUCTOR_HOME=<project>`; preflight must record and resolve there, as
+    `driver install` and the other downstream commands do."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    subprocess.run(["git", "init", "-q", str(elsewhere)], check=True, timeout=30)
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("CONDUCTOR_HOME", proj)
+    seen = {}
+
+    def _check(host_id=None, **_):
+        seen["host"] = host_id
+        return {"ok": True, "missing": [], "unverified": [], "advice": []}
+
+    monkeypatch.setattr(preflight, "check", _check)
+    assert preflight.main(["--host", "codex"]) == 0
+    assert runhost.recorded(proj) == "codex"
+    assert runhost.recorded(str(elsewhere)) is None
+    assert seen["host"] == "codex"
+    monkeypatch.setattr(
+        runhost, "resolve", lambda _root: "claude"
+    )  # re-resolve must not
+    assert preflight.main(["--host", "codex"]) == 0  # decide what preflight checks
+    assert seen["host"] == "codex"

@@ -30,6 +30,8 @@ import os
 import sys
 from typing import TypedDict
 
+from conductor import paths
+from conductor.core.locks import LockTimeout
 from conductor.hosts import discovery, runhost
 from conductor.hosts.base import HOST_IDS, HostProbeTimeout, UnknownHost, opposite
 
@@ -326,18 +328,22 @@ def main(argv: list[str] | None = None) -> int:
     if error:
         print(f"conductor preflight: {error}\n{_ARG_HELP}", file=sys.stderr)
         return 64
+    # The project the downstream commands use (`$CONDUCTOR_HOME`, else the cwd's repo), never
+    # the bare cwd: start permits `CONDUCTOR_HOME=<project>` and `driver install` honors it.
+    root = paths.project_root()
     if declared is not None:
         try:
-            path, wrote = runhost.declare(os.getcwd(), declared)
+            host, path, wrote = runhost.declare(root, declared)
         except runhost.HostConflict as e:
             print(str(e), file=sys.stderr)
             return HOST_REFUSED
-        except (UnknownHost, OSError) as e:
+        except (UnknownHost, OSError, LockTimeout) as e:
             print(f"conductor preflight: cannot record host: {e}", file=sys.stderr)
             return HOST_REFUSED
         state = "recorded in" if wrote else "already recorded in"
-        print(f"preflight: host {declared} ({state} {path})")
-    host = runhost.resolve(os.getcwd())
+        print(f"preflight: host {host} ({state} {path})")
+    else:
+        host = runhost.resolve(root)
     required = required_commands(host)
     result = check(host_id=host)
     ok: bool = result["ok"]

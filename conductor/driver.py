@@ -395,7 +395,11 @@ def _install_locked(root: str, worktree: str, host: str | None) -> int:
     )
     if rc != 0:
         return rc
-    runhost.record(root, chosen)
+    # Through the shared compare-and-write, under the install lock this function runs in, so
+    # a concurrent `preflight --host` declaration re-checks against this write rather than
+    # racing it. `repoint=True`: `--host` here is the sanctioned way to move a run (and with no
+    # `--host`, `chosen` already IS the recorded host whenever one exists).
+    runhost._bind(root, chosen, repoint=True)
     return resume_script.install_cron(root)
 
 
