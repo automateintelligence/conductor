@@ -4,15 +4,15 @@
 back to either finished work that passes a machine-checked definition of done, or a
 clear, recoverable note about why it stopped.
 
-**Hosts.** Conductor runs on **Claude Code** today. **OpenAI Codex** host support is in
-development — the design and implementation plan are written
-([design](docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md),
-[Plan 04](docs/superpowers/plans/2026-08-10-plan-04-host-adapters.md)), but the host
-adapter layer is not built yet. Installing conductor under Codex today will not work.
+**Hosts.** Conductor runs on **Claude Code** and **OpenAI Codex** (minimums: Claude Code
+`2.1.224`, Codex CLI `0.155.0`). A run records the host that started it, and its unattended
+driver launches that host — `claude` for a Claude run, `codex` for a Codex run — with the
+other host as the independent reviewer. Design:
+[dual-host design](docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md).
 
 **Survive sessions and restarts!!!**
 State grounded in GitHub. Not reliant on Claude Cloud.
-Conductor is a Claude Code plugin. You point it at a spec whose definition of done is
+Conductor is a Claude Code and Codex plugin. You point it at a spec whose definition of done is
 explicit and machine-checkable (built with [spec-craft](https://github.com/automateintelligence/spec-craft)),
 and it drives the work to completion: it plans, tracks every phase as a GitHub issue,
 executes one phase at a time in a fresh subagent, merges each phase only through a
@@ -155,16 +155,22 @@ merge; the done-gate defines whole-spec completion. They are different checks.
 
 ## Install
 
-Conductor is a Claude Code plugin that declares `dependencies: ["spec-craft"]`, so a
-marketplace install pulls in spec-craft automatically.
+Conductor declares `dependencies: ["spec-craft"]`. Claude Code installs that dependency
+automatically; Codex does not resolve plugin dependencies, so on Codex install spec-craft
+explicitly (below).
 
 ### Prerequisites
 
-- **Claude Code** with the conducted skill stack available —
+- **Claude Code** (`2.1.224`+) with the conducted skill stack available —
   [superpowers](https://github.com/obra/superpowers),
   [spec-kit](https://github.com/github/spec-kit), `/codex`, `/code-review`,
-  `/document-release`. `conductor preflight` checks for every one and fail-closes if any
-  is missing.
+  `/document-release`.
+- **or Codex CLI** (`0.155.0`+) with the same stack in Codex form — `$superpowers:*`
+  ([superpowers](https://github.com/obra/superpowers) supports Codex), a `claude` skill (the
+  opposite-host reviewer; [gstack](https://github.com/garrytan/gstack) ships one for Codex),
+  `document-release` (gstack), and a `code-review` skill.
+- `conductor preflight` checks every required skill **on the host the run uses** and
+  fail-closes, naming what to install, if any is missing.
 - **`gh` CLI**, authenticated (`gh auth status`). GitHub issues are the ledger.
 - **Python 3.12** on PATH (the runner, ledger, and gate modules are Python).
 
@@ -189,6 +195,22 @@ claude plugin install conductor@automateintelligence
 > and lists both plugins, so `claude plugin install spec-craft@automateintelligence` installs
 > spec-craft on its own.
 
+### Install on OpenAI Codex
+
+The same marketplace works from Codex. Add it once, then install conductor **and**
+spec-craft — Codex does not pull in plugin dependencies:
+
+```bash
+codex plugin marketplace add automateintelligence/marketplace
+codex plugin add conductor@automateintelligence
+codex plugin add spec-craft@automateintelligence
+```
+
+Codex exposes plugin skills under their plugin-qualified names: `$conductor:start`,
+`$conductor:autodev`, `$spec-craft:expectations`, `$spec-craft:executable-assertions`.
+Start a run from a Codex session with `$conductor:start <spec>`; the driver it installs
+launches `codex` on every fire.
+
 ### Install locally (dev / `--plugin-dir`)
 
 Clone both repos side by side and load them as plugin directories:
@@ -210,7 +232,8 @@ export CONDUCTOR_PLUGIN_DIRS="$PWD/spec-craft"
 
 ```bash
 conductor preflight          # prints MISSING: <cmd> and exits 1 if any conducted skill is absent
-claude plugin list           # conductor + spec-craft should appear
+claude plugin list           # Claude Code: conductor + spec-craft should appear
+codex plugin list            # Codex: conductor + spec-craft should show "installed, enabled"
 ```
 
 After install the skills are available as `/conductor:start`, `/conductor:autodev`,
