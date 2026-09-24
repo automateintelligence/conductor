@@ -392,6 +392,42 @@ def test_a_held_driver_fire_lock_blocks_with_no_owner_record_and_no_crontab(
         )
 
 
+def test_a_fire_lock_taken_through_the_flock_helper_blocks(checkout, stub_crontab):
+    """Exactly as the generated driver takes it: ``exec 9>"$LOCK"; flock -n 9``. The ``flock``
+    helper that took the lock exits at once, and ``/proc/locks`` omits a lock whose recorded pid
+    is gone — so a scan that read only that table reported CLEAR under a running driver (#95)."""
+    stub_crontab([])
+    lock = checkout / ".conductor" / "resume.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    ready = checkout / "fire-lock-held"
+    holder = subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            'exec 9>"$1"; flock -n 9 || exit 7; : > "$2"; exec sleep 300',
+            "fire",
+            str(lock),
+            str(ready),
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists() and time.monotonic() < deadline:
+            assert holder.poll() is None, "the driver-shaped holder exited early"
+            time.sleep(0.02)
+        assert ready.exists(), "the driver-shaped holder never took the lock"
+        predicates = doctor.scan(str(checkout))
+        assert _names(predicates, doctor.QUIESCE) == {"driver-fire-lock"}
+        finding = next(p for p in predicates if p.name == "driver-fire-lock").findings[
+            0
+        ]
+        assert str(holder.pid) in finding.detail, finding.detail
+        assert holder.poll() is None, "the holder died, so nothing was observed"
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
+
+
 def test_the_scan_refuses_rather_than_clearing_while_a_fire_lock_is_held(
     checkout, stub_crontab, capsys
 ):

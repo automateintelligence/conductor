@@ -64,6 +64,7 @@ from typing import NamedTuple
 from conductor import resume_script
 from conductor.core import ownership, resolve
 from conductor.hosts import base as hostbase
+from conductor.hosts import proc
 
 _GIT_TIMEOUT = 120.0
 
@@ -533,6 +534,13 @@ def flock_holders(path: str) -> list[tuple[str, int]] | None:
             continue
         if found == want and (tokens[0], pid) not in holders:
             holders.append((tokens[0], pid))
+    # `/proc/locks` omits a lock whose recorded pid has exited — which is every lock the driver
+    # takes, since `flock -n 9` is a helper process that exits at once while the shell keeps the
+    # descriptor (#95). The descriptors themselves still say so: add every process whose fdinfo
+    # shows a FLOCK held on this inode.
+    for pid in proc.flock_holder_pids(info):
+        if not any(held_pid == pid for _, held_pid in holders):
+            holders.append(("FLOCK", pid))
     return sorted(holders)
 
 
