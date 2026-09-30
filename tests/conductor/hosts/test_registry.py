@@ -103,6 +103,7 @@ def test_the_protocol_declares_every_member_the_adapters_must_implement():
         "install_hooks",
         "hook_installed",
         "dispatch_implementation",
+        "usage_from_output",
     }
     declared = {n for n in base.HostAdapter.__annotations__} | {
         n for n in vars(base.HostAdapter) if not n.startswith("_")

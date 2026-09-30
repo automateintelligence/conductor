@@ -10,10 +10,11 @@ merely working, it is the text many live fires have proven, including the ones t
 from __future__ import annotations
 
 import glob
+import json
 import os
 from collections.abc import Mapping
 
-from conductor.hosts import discovery, proc
+from conductor.hosts import base, discovery, proc
 
 #: Claude Code publishes the root of the plugin whose skill is executing. Codex has no
 #: verified counterpart, which is why ``discovery.dev_plugin_roots`` takes the variable name
@@ -288,3 +289,50 @@ class ClaudeAdapter:
         for root in discovery.dev_plugin_roots(PLUGIN_ROOT_ENV):
             cmds |= discovery.scan_plugin_dir(root, (f".{self.id}-plugin",))
         return discovery.HostSkills(cmds, frozenset())
+
+    def usage_from_output(self, text: str) -> base.Usage:
+        """`claude -p --output-format json` -> Usage. Totals come from `modelUsage`, which covers
+        every model call in the invocation including subagents; top-level `usage` is only the
+        last main-thread call (ground truth 2026-09-30 fact 2)."""
+        result = None
+        for line in reversed(text.splitlines()):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                doc = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(doc, dict) and doc.get("type") == "result":
+                result = doc
+                break
+        if result is None:
+            return base.Usage.unknown()
+
+        def _sum(models: object, field: str) -> int | None:
+            if not isinstance(models, dict) or not models:
+                return None
+            vals = [m.get(field) for m in models.values() if isinstance(m, dict)]
+            ints = [v for v in vals if isinstance(v, int) and not isinstance(v, bool)]
+            return sum(ints) if ints and len(ints) == len(vals) else None
+
+        models = result.get("modelUsage")
+        fresh = _sum(models, "inputTokens")
+        read = _sum(models, "cacheReadInputTokens")
+        write = _sum(models, "cacheCreationInputTokens")
+        total_in = (
+            fresh + read + write
+            if fresh is not None and read is not None and write is not None
+            else None
+        )
+        session = result.get("session_id")
+        text_out = result.get("result")
+        return base.Usage(
+            input_tokens=total_in,
+            cached_input_tokens=read,
+            cache_write_tokens=write,
+            output_tokens=_sum(models, "outputTokens"),
+            session_id=session if isinstance(session, str) else None,
+            result_text=text_out if isinstance(text_out, str) else None,
+            is_error=bool(result.get("is_error")) or result.get("subtype") != "success",
+        )

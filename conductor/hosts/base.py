@@ -152,6 +152,28 @@ class DispatchResult:
     duration_s: float
 
 
+@dataclass(frozen=True)
+class Usage:
+    """Token usage and outcome of one host invocation, parsed from its machine-readable output.
+
+    ``None`` means the host did not report the figure; it is never coerced to 0, so a missing
+    number cannot be mistaken for a free call.
+    """
+
+    input_tokens: int | None  # every prompt token, cached ones included
+    cached_input_tokens: int | None  # the part served from cache
+    # tokens written to cache (billed above base on Claude)
+    cache_write_tokens: int | None
+    output_tokens: int | None
+    session_id: str | None
+    result_text: str | None
+    is_error: bool  # True when no result was found or the host said so
+
+    @classmethod
+    def unknown(cls) -> Usage:
+        return cls(None, None, None, None, None, None, True)
+
+
 class HostAdapter(Protocol):
     """Everything that genuinely differs between Claude Code and Codex.
 
@@ -242,6 +264,7 @@ class HostAdapter(Protocol):
         result_path: str | None = None,
         posture: str = "scoped",
     ) -> DispatchResult: ...
+    def usage_from_output(self, text: str) -> Usage: ...
 
     # --- the generated cron driver (A1) ----------------------------------------------------
     #

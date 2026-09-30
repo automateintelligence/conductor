@@ -1395,3 +1395,52 @@ class CodexAdapter:
         return discovery.HostSkills(
             cmds | listed, unverifiable, colliding | listed_twice
         )
+
+    def usage_from_output(self, text: str) -> base.Usage:
+        """`codex exec --json` JSONL -> Usage. `turn.completed.usage.input_tokens` already
+        includes cached tokens. `item.completed` items of type `error` are config warnings and
+        are ignored; a `turn.failed` or top-level `error` event, or no `turn.completed`, is an
+        error. On a resumed thread these numbers are the thread's running total (ground truth
+        fact 4); Phase A never resumes."""
+        thread = message = None
+        usage: dict | None = None
+        failed = False
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            kind = ev.get("type")
+            if kind == "thread.started" and isinstance(ev.get("thread_id"), str):
+                thread = ev["thread_id"]
+            elif kind == "item.completed":
+                item = ev.get("item")
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "agent_message"
+                    and isinstance(item.get("text"), str)
+                ):
+                    message = item["text"]
+            elif kind == "turn.completed" and isinstance(ev.get("usage"), dict):
+                usage = ev["usage"]
+            elif kind in ("turn.failed", "error"):
+                failed = True
+
+        def _n(key: str) -> int | None:
+            v = (usage or {}).get(key)
+            return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+        return base.Usage(
+            input_tokens=_n("input_tokens"),
+            cached_input_tokens=_n("cached_input_tokens"),
+            cache_write_tokens=_n("cache_write_input_tokens"),
+            output_tokens=_n("output_tokens"),
+            session_id=thread,
+            result_text=message,
+            is_error=failed or usage is None,
+        )
