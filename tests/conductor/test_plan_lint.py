@@ -220,13 +220,13 @@ def test_standard_markers_and_checklist_refs_produce_no_marker_finding():
     assert plan_lint.lint(text) == []
 
 
-def test_conductors_own_superpowers_plans_carry_no_marker_finding():
+def test_conductors_own_plans_carry_no_marker_finding():
     # Guards against a check so broad it fails plans already committed to this repo.
     for name in (
         "2026-08-10-plan-01-run-identity-registry.md",
         "2026-08-10-plan-04-host-adapters.md",
     ):
-        path = os.path.join(ROOT, "docs", "superpowers", "plans", name)
+        path = os.path.join(ROOT, "docs", "plans", name)
         text = open(path, encoding="utf-8").read()
         assert [r for r in plan_lint.lint(text) if r.startswith(_MARKER)] == [], name
 
