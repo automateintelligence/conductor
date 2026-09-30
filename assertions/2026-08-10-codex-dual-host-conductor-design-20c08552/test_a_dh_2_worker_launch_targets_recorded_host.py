@@ -1,6 +1,6 @@
 """A-DH-2 — the worker launch targets the run's recorded host and only that host (property).
 
-Source: docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
+Source: docs/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
 
 Claim: for a run whose recorded worker host is H, the fire spawns H's executable exactly once
 with a real argument vector, and spawns the opposite host's executable zero times.

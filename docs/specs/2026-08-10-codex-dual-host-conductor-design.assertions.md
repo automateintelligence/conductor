@@ -1,6 +1,6 @@
 # Executable assertions — Dual-host Conductor for Claude Code and Codex
 
-Source spec: `docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md`
+Source spec: `docs/specs/2026-08-10-codex-dual-host-conductor-design.md`
 Written by `/spec-craft:executable-assertions` (spec-craft 0.2.1) on 2026-08-17.
 
 These are 4-part assertion **specs**, not test code. A downstream `/conductor:assertions-to-tests`

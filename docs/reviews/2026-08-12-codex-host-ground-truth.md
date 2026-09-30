@@ -11,8 +11,8 @@ rather than against documentation, so the plan writer does not have to guess.
 
 Referenced documents:
 
-- Design: [`docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md`](../superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md)
-- Roadmap: [`docs/superpowers/plans/2026-08-10-codex-dual-host-ROADMAP.md`](../superpowers/plans/2026-08-10-codex-dual-host-ROADMAP.md) — Plan 04 at lines 294-326
+- Design: [`docs/specs/2026-08-10-codex-dual-host-conductor-design.md`](../specs/2026-08-10-codex-dual-host-conductor-design.md)
+- Roadmap: [`docs/plans/2026-08-10-codex-dual-host-ROADMAP.md`](../plans/2026-08-10-codex-dual-host-ROADMAP.md) — Plan 04 at lines 294-326
 
 Everything in the sections below marked as verified was established by running the binary
 on this machine on 2026-08-12. Everything not established is collected in

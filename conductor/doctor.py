@@ -8,7 +8,7 @@ code and a report.
 
 WHAT IT ASKS, AND WHY IN TWO CLASSES
 ------------------------------------
-``docs/superpowers/specs/2026-08-12-conductor-source-decommission-design.md`` splits the
+``docs/specs/2026-08-12-conductor-source-decommission-design.md`` splits the
 predicates, and this command keeps the split because the two halves gate different events on
 different schedules:
 

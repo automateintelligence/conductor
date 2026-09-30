@@ -1,6 +1,6 @@
 """A-DH-5 — relocation refuses while any run artifact lives under the old checkout (property).
 
-Source: docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
+Source: docs/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
 
 Claim: the relocation safety check refuses, before mutating anything, when a live process, a
 registered linked worktree, or an installed schedule resolves beneath the checkout being
@@ -83,7 +83,7 @@ OWNERSHIP_MODULE = "conductor.core.ownership"
 #: What owns each unbuilt prerequisite, so a red result names the plan rather than "missing".
 PLAN_00 = (
     "roadmap Plan 00 — Source relocation and quarantine "
-    "(docs/superpowers/plans/2026-08-10-codex-dual-host-ROADMAP.md), which is additionally "
+    "(docs/plans/2026-08-10-codex-dual-host-ROADMAP.md), which is additionally "
     "gated on an explicit owner go-ahead"
 )
 PLAN_02 = (

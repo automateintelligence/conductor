@@ -172,10 +172,9 @@ def spec_roots() -> tuple[str, ...]:
     ``freeze``'s no-goal glob searches for ``*.assertions.md``. ``DEFAULT_SPEC_ROOTS`` when
     ``$CONDUCTOR_SPEC_ROOTS`` is unset or empty.
 
-    A LIST, not a single root, because one repo legitimately holds two: conductor's own specs
-    are split across ``docs/specs/`` (self-enforcement, upgrade-survival) and
-    ``docs/superpowers/specs/`` (the dual-host design), both live at once, so "move them all
-    under one root" is not an available answer. Format follows ``$CONDUCTOR_PLUGIN_DIRS`` —
+    A LIST, not a single root, because a repo can legitimately keep specs in more than one
+    place and not every repo can move them all under one root (conductor's own repo held two
+    roots at once until 2026-09-30). Format follows ``$CONDUCTOR_PLUGIN_DIRS`` —
     ``os.pathsep``-separated, empty segments dropped.
 
     Setting the variable REPLACES the default rather than extending it. An unremovable

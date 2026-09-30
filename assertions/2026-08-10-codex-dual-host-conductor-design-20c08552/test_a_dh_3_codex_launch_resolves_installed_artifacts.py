@@ -1,6 +1,6 @@
 """A-DH-3 — the Codex worker launch resolves using only artifacts Conductor installs (contract).
 
-Source: docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
+Source: docs/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
 
 Claim: every artifact the Codex worker launch depends on in order to resolve Conductor's
 autodev skill was written by Conductor itself, so the launch does not depend on any

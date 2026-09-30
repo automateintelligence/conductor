@@ -3,9 +3,9 @@
 **Date:** 2026-09-29
 **Status:** Design agreed in conversation 2026-09-29; written spec awaiting owner review.
 **Track:** B (after the 0.10.0 dual-host release). Relates to Plans 05 and 07 in
-`docs/superpowers/plans/2026-08-10-codex-dual-host-ROADMAP.md`.
+`docs/plans/2026-08-10-codex-dual-host-ROADMAP.md`.
 **Amends:** the "Explicit non-goal: Codex session continuation" decision in
-`docs/superpowers/plans/2026-08-10-plan-04-host-adapters.md:58-68` (see §7).
+`docs/plans/2026-08-10-plan-04-host-adapters.md:58-68` (see §7).
 
 ## 1. Goal
 

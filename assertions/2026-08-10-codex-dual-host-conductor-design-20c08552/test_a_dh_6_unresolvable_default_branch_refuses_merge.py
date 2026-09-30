@@ -1,6 +1,6 @@
 """A-DH-6 — unresolvable default-branch metadata refuses every automated merge (property).
 
-Source: docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
+Source: docs/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
 
 Claim: when the repository's default branch cannot be resolved from authoritative remote
 metadata, every automated merge is refused, and no code path substitutes a literal fallback
@@ -71,7 +71,7 @@ FALLBACKS = ("main", "master")
 PHASE_PR = 101
 
 #: The spec used only to obtain a canonical run-branch name from the product's own resolver.
-SPEC = "docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md"
+SPEC = "docs/specs/2026-08-10-codex-dual-host-conductor-design.md"
 
 _GH_FAKE = r'''#!/usr/bin/env python3
 """Recording `gh` fake: answers exactly the queries the merge path makes, logs every call."""
