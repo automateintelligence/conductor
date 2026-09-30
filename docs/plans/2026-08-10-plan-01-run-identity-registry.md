@@ -8,9 +8,9 @@
 
 **Tech Stack:** Python 3.12 standard library only (`fcntl`, `hashlib`, `json`, `os`, `secrets`, `subprocess`, `tempfile`), pytest, ruff, pyright, git plumbing.
 
-**Source design:** `docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md` §"Project and run identity", the atomic-write/revision/transaction/lock-order paragraphs of §"Failure handling", and the first eight bullets plus the tracked-path bullet of §"Unit and contract tests".
+**Source design:** `docs/specs/2026-08-10-codex-dual-host-conductor-design.md` §"Project and run identity", the atomic-write/revision/transaction/lock-order paragraphs of §"Failure handling", and the first eight bullets plus the tracked-path bullet of §"Unit and contract tests".
 
-**Roadmap:** `docs/superpowers/plans/2026-08-10-codex-dual-host-ROADMAP.md` (this is Plan 01 of 11).
+**Roadmap:** `docs/plans/2026-08-10-codex-dual-host-ROADMAP.md` (this is Plan 01 of 11).
 
 ## Global Constraints
 
@@ -5306,7 +5306,7 @@ Run against the design before handing off.
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-08-10-plan-01-run-identity-registry.md`. Two execution options:
+Plan complete and saved to `docs/plans/2026-08-10-plan-01-run-identity-registry.md`. Two execution options:
 
 **1. Subagent-Driven (recommended)** — a fresh subagent per task, review between tasks, fast iteration.
 

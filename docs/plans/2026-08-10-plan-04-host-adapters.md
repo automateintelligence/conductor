@@ -8,11 +8,11 @@
 
 **Tech Stack:** Python 3.12 standard library only (`dataclasses`, `glob`, `json`, `os`, `re`, `shutil`, `subprocess`, `time`, `typing.Protocol`), pytest, ruff, pyright. Linux `/proc` for process inspection.
 
-**Source design:** `docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md` §"System architecture" (lines 61–103), the host-floor paragraph of §"Packaging and installation" (line 365), the fake-executable prescription in §"Integration tests" (line 518), and the adapter/permission/dispatch bullets of §"Unit and contract tests" (lines 495–499).
+**Source design:** `docs/specs/2026-08-10-codex-dual-host-conductor-design.md` §"System architecture" (lines 61–103), the host-floor paragraph of §"Packaging and installation" (line 365), the fake-executable prescription in §"Integration tests" (line 518), and the adapter/permission/dispatch bullets of §"Unit and contract tests" (lines 495–499).
 
 **Verified host facts:** `docs/reviews/2026-08-12-codex-host-ground-truth.md` — Codex CLI vocabulary established by running codex-cli `0.147.0` on 2026-08-12. This plan cites that document rather than restating it. Where this plan diverges from the design, the divergence is named in §"Where this plan corrects the roadmap and the design".
 
-**Roadmap:** `docs/superpowers/plans/2026-08-10-codex-dual-host-ROADMAP.md` — this is Plan 04 of 11, reserved at roadmap line 296.
+**Roadmap:** `docs/plans/2026-08-10-codex-dual-host-ROADMAP.md` — this is Plan 04 of 11, reserved at roadmap line 296.
 
 ---
 
@@ -4025,7 +4025,7 @@ Recorded here rather than papered over, because a later reader comparing the pla
 
 **6. "Bounded structured result collection" (design capability 11) cannot be symmetric.** Codex has `--output-schema`; Claude has no equivalent. Plan 04 delivers bounded *text* with a byte cap. Structured verdicts are Plan 07's, and Plan 07 may use `--output-schema` as a Codex-only affordance.
 
-**7. Roadmap Plan 00 is superseded.** The Global Constraints block still describes relocating `~/.claude/conductor` to `~/programming/conductor` with a quarantine rename. `docs/superpowers/specs/2026-08-12-conductor-source-decommission-design.md` replaces that with a fresh clone and a decommission checklist. **Plan 04 is unaffected either way** — it never reads, writes, moves, or names the checkout root; `source_root()` resolves from an environment override or `__file__`. Noted only so a reader does not treat the constraint block as current.
+**7. Roadmap Plan 00 is superseded.** The Global Constraints block still describes relocating `~/.claude/conductor` to `~/programming/conductor` with a quarantine rename. `docs/specs/2026-08-12-conductor-source-decommission-design.md` replaces that with a fresh clone and a decommission checklist. **Plan 04 is unaffected either way** — it never reads, writes, moves, or names the checkout root; `source_root()` resolves from an environment override or `__file__`. Noted only so a reader does not treat the constraint block as current.
 
 **8. Two line references in the roadmap's own framing are off by a few lines.** Corrected in §"The real surface": the `REQUIRED_COMMANDS` literal is `conductor/preflight.py:15-26`, not `:14-23`, and the `scheduled_tasks.json` path is built at `conductor/driver.py:55-59`. Every other cited line was verified exactly as claimed at commit `9971573`.
 
@@ -4080,7 +4080,7 @@ Run against the design and the ground truth before handing off.
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-08-10-plan-04-host-adapters.md`. Two execution options:
+Plan complete and saved to `docs/plans/2026-08-10-plan-04-host-adapters.md`. Two execution options:
 
 **1. Subagent-Driven (recommended)** — a fresh subagent per task, review between tasks, fast iteration. Carry each task's falsifier into the reviewer's dispatch and have the reviewer build its own revert-proof rather than trusting the implementer's report; Plan 01's residuals record three implementer reports on one branch that claimed coverage which did not exist, all three caught this way.
 

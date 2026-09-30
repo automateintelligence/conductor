@@ -2,9 +2,9 @@
 
 **Date:** 2026-08-21
 **Branch:** `feature/dual-host-done-gate` (`5271084`)
-**Run it:** `CONDUCTOR_GATE_SLUG=2026-08-10-codex-dual-host-conductor-design-5f6520fc ./bin/conductor assert run`
+**Run it:** `CONDUCTOR_GATE_SLUG=2026-08-10-codex-dual-host-conductor-design-20c08552 ./bin/conductor assert run`
 
-The spec `docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md` now has an
+The spec `docs/specs/2026-08-10-codex-dual-host-conductor-design.md` now has an
 executable done-gate. Before this it had seven assertions in prose and nothing that ran them.
 
     [PASS] a-dh-1-host-vocabulary-confined-to-adapters

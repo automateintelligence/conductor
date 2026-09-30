@@ -1,7 +1,7 @@
 # Plan 01 residuals — run identity and project registry
 
 **Branch:** `worktree-plan-01-run-identity` (47 commits, `57ebe13..db51b0c`)
-**Plan:** `docs/superpowers/plans/2026-08-10-plan-01-run-identity-registry.md`
+**Plan:** `docs/plans/2026-08-10-plan-01-run-identity-registry.md`
 **Suite at merge:** 835 passed, 1 skipped (baseline 565/1). `./bin/conductor gate verify` intact.
 
 Every task had a scoped review; a whole-branch review then ran 105 mutations (86 killed) and a

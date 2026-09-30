@@ -1,6 +1,6 @@
 """A-DH-1 — host vocabulary is confined to the adapter layer (property).
 
-Source: docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
+Source: docs/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
 
 Claim: no Python module outside the host-adapter layer contains a Claude slash-command
 invocation, a Codex dollar-prefixed skill invocation, ``CLAUDE_PLUGIN_ROOT``, or a

@@ -713,7 +713,7 @@ def test_explicit_spec_field_picks_the_source_among_several(tmp_path):
 # lived here until it was single-sourced into `paths.spec_from_goal_text`) and the NO-GOAL
 # glob below. A repo keeping specs anywhere else got `unidentifiable-assertions-source` from
 # the first and a silent `{}, "none"` from the second — conductor's own dual-host spec, which
-# lives under `docs/superpowers/specs/`, hit exactly that.
+# lived under `docs/superpowers/specs/` until 2026-09-30, hit exactly that.
 
 _DUAL_HOST_ROOT = "docs/superpowers/specs"
 _DUAL_HOST_STEM = "2026-08-10-codex-dual-host-conductor-design"
@@ -722,7 +722,7 @@ _DUAL_HOST_SOURCE = f"{_DUAL_HOST_ROOT}/{_DUAL_HOST_STEM}.assertions.md"
 
 
 def _dual_host_spec(tmp_path, goal=True):
-    """Conductor's REAL spec pair as it exists on main (commit a38e90f): the design doc and
+    """Conductor's REAL spec pair as it existed on main (commit a38e90f): the design doc and
     its spec-craft-named `.assertions.md` sibling, under `docs/superpowers/specs/`."""
     d = tmp_path / _DUAL_HOST_ROOT
     d.mkdir(parents=True, exist_ok=True)

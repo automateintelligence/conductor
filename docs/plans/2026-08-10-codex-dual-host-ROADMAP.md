@@ -5,11 +5,11 @@
 > document. Execute those with `superpowers:subagent-driven-development` or
 > `superpowers:executing-plans`.
 
-**Source design:** `docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md`
+**Source design:** `docs/specs/2026-08-10-codex-dual-host-conductor-design.md`
 (approved 2026-08-10, commit `67dcf93`, branch `docs/codex-dual-host-design`)
 
 **Superseding design for Plan 00:**
-`docs/superpowers/specs/2026-08-12-conductor-source-decommission-design.md` (owner-approved
+`docs/specs/2026-08-12-conductor-source-decommission-design.md` (owner-approved
 2026-08-16, execution deferred). It replaces the relocation approach with a fresh clone plus
 staged quarantine — see Plan 00 below.
 
@@ -392,7 +392,7 @@ conductor-side packaging — leave their parent plans standing with the remainde
 
 **File:** `2026-08-10-plan-00-source-decommission.md`
 **Repo:** conductor, plus workstation configuration (cron, hooks, shell, plugin caches)
-**Governing design:** `docs/superpowers/specs/2026-08-12-conductor-source-decommission-design.md`
+**Governing design:** `docs/specs/2026-08-12-conductor-source-decommission-design.md`
 — owner-approved 2026-08-16 with both scope decisions confirmed, amended 2026-08-17, **execution
 deferred**. It supersedes the relocation approach; Plan 00 becomes a decommission checklist, not
 a relocation runbook.

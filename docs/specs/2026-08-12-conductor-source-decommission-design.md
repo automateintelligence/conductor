@@ -15,7 +15,7 @@ design. Nothing is deleted, moved, or quarantined until the execution preconditi
 **Repositories:** automateintelligence/conductor, automateintelligence/marketplace
 
 This supersedes the relocation approach in Plan 00 of
-`docs/superpowers/plans/2026-08-10-codex-dual-host-ROADMAP.md` (lines 80–110). Plan 00 becomes a
+`docs/plans/2026-08-10-codex-dual-host-ROADMAP.md` (lines 80–110). Plan 00 becomes a
 decommission checklist rather than a relocation runbook.
 
 ## Scope decisions

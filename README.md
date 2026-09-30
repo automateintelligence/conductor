@@ -8,7 +8,7 @@ clear, recoverable note about why it stopped.
 `2.1.224`, Codex CLI `0.155.0`). A run records the host that started it, and its unattended
 driver launches that host — `claude` for a Claude run, `codex` for a Codex run — with the
 other host as the independent reviewer. Design:
-[dual-host design](docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md).
+[dual-host design](docs/specs/2026-08-10-codex-dual-host-conductor-design.md).
 
 **Survive sessions and restarts!!!**
 State grounded in GitHub. Not reliant on Claude Cloud.

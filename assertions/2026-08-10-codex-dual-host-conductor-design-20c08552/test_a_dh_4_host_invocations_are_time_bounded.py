@@ -1,6 +1,6 @@
 """A-DH-4 — every host invocation is time-bounded and reports on expiry (property).
 
-Source: docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
+Source: docs/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
 
 Claim: every Conductor-initiated host subprocess — version probe, preflight, capability check,
 worker launch, reviewer launch — terminates within its configured timeout and, when the child

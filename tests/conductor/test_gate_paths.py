@@ -313,13 +313,13 @@ def test_explicit_spec_field_keeps_an_otherwise_ambiguous_goal_running(
 # --- configurable spec roots (`$CONDUCTOR_SPEC_ROOTS`) ----------------------------------
 #
 # The prose fallback's root was a literal `docs/specs/`, so a repo that keeps specs anywhere
-# else had NO prose resolution at all — conductor's own specs live under
-# `docs/superpowers/specs/`, and a goal naming one resolved to nothing, which
+# else had NO prose resolution at all — conductor's own specs lived under
+# `docs/superpowers/specs/` (until 2026-09-30), and a goal naming one resolved to nothing, which
 # `freeze._assertions_source` then reported as `unidentifiable-assertions-source`.
 #
-# A LIST, not a single root: conductor's own repo holds `docs/specs/2026-07-05-*.md` AND
-# `docs/superpowers/specs/2026-08-10-*.md` at the same time, so "move them all" is not an
-# available answer. Setting the variable REPLACES the default rather than extending it, so a
+# A LIST, not a single root: conductor's own repo held `docs/specs/2026-07-05-*.md` AND
+# `docs/superpowers/specs/2026-08-10-*.md` at the same time (until 2026-09-30), and not
+# every repo can "move them all". Setting the variable REPLACES the default rather than extending it, so a
 # repo can also scope a stale tree OUT — an unremovable `docs/specs` would manufacture
 # `AmbiguousSpecReference` against specs the run does not care about, with no way to fix it.
 

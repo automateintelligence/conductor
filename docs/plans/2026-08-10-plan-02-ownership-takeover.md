@@ -8,11 +8,11 @@
 
 **Tech Stack:** Python 3.12 standard library only (`contextlib`, `dataclasses`, `datetime`, `json`, `os`, `signal`, `time`), pytest, ruff, pyright. Linux `/proc` via Plan 04's `conductor.hosts` package.
 
-**Source design:** `docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.md` §"Ownership, locking, and takeover" (lines 182–202), the lease/marker paragraphs of §"Failure handling" (lines 450–452), and the §"Unit and contract tests" bullets on lock/lease/PID reuse (line 492), orphan refusal and prune ordering (line 493), rebind (line 494), and permission profiles and bypass non-transfer (line 499).
+**Source design:** `docs/specs/2026-08-10-codex-dual-host-conductor-design.md` §"Ownership, locking, and takeover" (lines 182–202), the lease/marker paragraphs of §"Failure handling" (lines 450–452), and the §"Unit and contract tests" bullets on lock/lease/PID reuse (line 492), orphan refusal and prune ordering (line 493), rebind (line 494), and permission profiles and bypass non-transfer (line 499).
 
 **Inherited constraints:** `docs/reviews/2026-08-10-plan-01-residuals.md` §"Constraints Plan 02 must honour". Read that file before Task 1. It is not optional context; three of this plan's tasks exist only because of it.
 
-**Roadmap:** `docs/superpowers/plans/2026-08-10-codex-dual-host-ROADMAP.md` — this is Plan 02 of 11, reserved at roadmap line 531. **Plan 02 is Track B** (improvement work following the Codex-capable release); it is not a prerequisite for any Track A item, and no Track A item names it.
+**Roadmap:** `docs/plans/2026-08-10-codex-dual-host-ROADMAP.md` — this is Plan 02 of 11, reserved at roadmap line 531. **Plan 02 is Track B** (improvement work following the Codex-capable release); it is not a prerequisite for any Track A item, and no Track A item names it.
 
 ---
 
@@ -3093,7 +3093,7 @@ Recorded rather than papered over, so a later reader comparing the plan to its s
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-08-10-plan-02-ownership-takeover.md`. Two execution options:
+Plan complete and saved to `docs/plans/2026-08-10-plan-02-ownership-takeover.md`. Two execution options:
 
 **1. Subagent-Driven (recommended)** — a fresh subagent per task, review between tasks, fast iteration. Carry each task's falsifier into the reviewer's dispatch and have the reviewer build its own revert-proof rather than trusting the implementer's report; Plan 01's residuals record three implementer reports on one branch that claimed coverage which did not exist, all three caught this way. Carry findings from one task into the next task's dispatch and ask whether they have analogues — that practice found the defects the suite did not.
 

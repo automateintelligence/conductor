@@ -1,6 +1,6 @@
 """A-DH-7 — Conductor never completes the final default-branch pull request (property).
 
-Source: docs/superpowers/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
+Source: docs/specs/2026-08-10-codex-dual-host-conductor-design.assertions.md §3.
 
 Claim: no Conductor code path performs, requests, or enables any action that could cause the
 final integration-to-default pull request to complete.
