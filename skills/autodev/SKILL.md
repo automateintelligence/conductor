@@ -204,7 +204,11 @@ step 3b's terminal crontab removal.
       commits it as reclaimed work, push the phase branch, then run `conductor review <pr> --brief <file>`
       from the phase worktree. It launches the reviewer host for you (the host you are NOT;
       `conductor preflight` names it — `codex` on a Claude-hosted run, `claude` on a Codex-hosted
-      one) read-only and time-bounded against the PR head, and prints the review on stdout. Post
+      one) read-only and time-bounded (540 s by default) against the PR head, and prints the
+      review on stdout. Give the shell call that runs it a timeout of at least 600 seconds (on
+      Claude: the Bash tool's `timeout: 600000`) and wait for it in the foreground — never
+      background it and move on: a killed `conductor review` kills its reviewer and the review
+      is lost. Post
       that stdout as a PR comment starting with the gate's review marker
       (**`CONDUCTOR_REVIEW_MARKER`, default `<Opposite-host> review`** — `Codex review` on a
       Claude-hosted run, `Claude review` on a Codex-hosted one). Exit codes:
@@ -216,8 +220,9 @@ step 3b's terminal crontab removal.
           `code-review` fallback below, with reason `reviewer unavailable`.
         - **exit 3** — the host ran and failed; its last output is on stderr. Read it and apply
           the usage-limit / transient-retry rules below unchanged.
-        - **exit 4** — `review-timeout`; treat as transient: retry once, then take the
-          same-host `code-review` fallback below with reason `timeout`.
+        - **exit 4** — `review-timeout`, or `review-interrupted` (the call was killed); treat
+          as transient: retry once, then take the same-host `code-review` fallback below with
+          reason `timeout`.
       **Usage-limit fallback — continue uninterrupted, never stall.** If the opposite host
       reports its 5-hour OR weekly usage limit is exhausted (its stderr/stdout names a
       usage/rate/quota limit, or its status shows the window spent — distinct from a transient

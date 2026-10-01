@@ -76,6 +76,24 @@ def test_cli_reference_documents_the_review_and_usage_verbs():
     assert "`conductor usage ingest" in ref
 
 
+def test_cli_reference_states_the_review_default_timeout():
+    from conductor import review_cmd
+
+    ref = _section(_readme(), "## CLI reference")
+    assert f"default {review_cmd._DEFAULT_REVIEW_TIMEOUT_S:g} s" in ref
+
+
+def test_install_tells_an_upgrader_to_regenerate_the_driver():
+    from conductor import resume_script
+
+    install = _section(_readme(), "## Install")
+    assert "**Upgrading to 0.11.0:**" in install
+    assert "re-run `/conductor:start`" in install
+    assert "`conductor driver install --worktree <path>`" in install
+    assert f"(template {resume_script.TEMPLATE_VERSION})" in install
+    assert "records worker usage" in install
+
+
 def test_plugin_manifests_carry_the_same_version():
     versions = set()
     for rel in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):

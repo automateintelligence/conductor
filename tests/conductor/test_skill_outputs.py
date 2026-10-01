@@ -686,6 +686,20 @@ def test_each_conductor_review_exit_code_is_tied_to_its_action():
     assert "reviewer unavailable" in step5.split("Usage-limit fallback", 1)[1]
 
 
+def test_autodev_runs_conductor_review_in_the_foreground_under_a_long_enough_bound():
+    """`conductor review` defaults to 540 s; Claude's Bash tool defaults to 2 min. A shell call
+    killed early kills the reviewer with it, so the worker must give the call room."""
+    raw = open(os.path.join(ROOT, "skills/autodev/SKILL.md"), encoding="utf-8").read()
+    step5 = _recipe_step(
+        raw, "5. **Opposite-host review.**", "6. `receiving-code-review`"
+    )
+    assert "540 s by default" in step5
+    assert "a timeout of at least 600 seconds" in step5
+    assert "`timeout: 600000`" in step5
+    assert "never background it" in step5
+    assert "review-interrupted" in _exit_clause(step5, 4)
+
+
 def test_autodev_final_state_re_review_reruns_conductor_review():
     raw = open(os.path.join(ROOT, "skills/autodev/SKILL.md"), encoding="utf-8").read()
     step6 = _recipe_step(

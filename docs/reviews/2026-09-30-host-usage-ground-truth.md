@@ -75,6 +75,22 @@ Test repo with two commits; prompt: run `git diff HEAD~1..HEAD`, then try to cre
 sandbox also blocks network, so a Codex reviewer cannot call `gh`; the caller must put PR facts
 in the prompt.
 
+**Superseded for Claude: the `--allowedTools` posture is not reliably read-only.** The list only
+adds to the allow rules merged from user, project and local settings, so a PR's own
+`.claude/settings.json` (and its hooks) apply to the reviewer and can widen it; and
+`Bash(git diff:*)` / `Bash(git log:*)` admit `--output=<file>`, which writes a file. The
+reviewer now gets no shell at all: `conductor review` writes the diff to a temp directory and
+hands the reviewer that directory.
+
+Re-probed 2026-09-30, claude 2.1.286, with a hostile project `.claude/settings.json` allowing
+`Write` and `Bash(*)`; prompt: read an out-of-tree diff file, then try to write a file and run a
+shell command.
+
+| Host | Flags | read diff outside the checkout | write / shell |
+| --- | --- | --- | --- |
+| Claude | `-p <prompt> --output-format json --permission-mode dontAsk --restricted --strict-mcp-config --tools=Read,Grep,Glob --add-dir <context_dir>` | read | Write and shell unavailable; no file created |
+| Codex | `exec --json --sandbox read-only --cd <checkout>` (unchanged) | read (a read-only sandbox reads outside `--cd`) | — |
+
 ## 6. Unknown session id
 
 - `claude -p --resume 00000000-0000-0000-0000-000000000000 …` → exit 1, stdout
@@ -83,3 +99,11 @@ in the prompt.
   `Error: thread/resume: thread/resume failed: no rollout found for thread id 00000000-… (code -32600)`.
 
 Both are clean, fast failures, which is what spec §4 rule 3 (cold-start fallback) needs.
+
+## Open
+
+- **Codex child-agent tokens in `turn.completed` were not probed.** Section 2 shows Claude's
+  top-level `usage` omits subagent calls; whether Codex's `turn.completed.usage` includes tokens
+  spent by child agents the turn spawned is unknown. Confirm on one live Codex worker fire
+  (compare `turn.completed` against the rollout files of the parent and its children) before
+  trusting Codex worker totals.
