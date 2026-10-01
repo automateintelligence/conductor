@@ -186,6 +186,30 @@ def test_ingest_takes_phase_and_head_from_a_fresh_handoff_only(proj):
     assert d["phase_id"] is None and d["head_sha"] is None
 
 
+def test_ingest_from_a_linked_worktree_reads_its_handoff_and_finds_the_run(proj, git):
+    """The driver passes the run WORKTREE: the worker's handoff lives there, and the run is
+    still found through the git common dir the worktree shares with the main checkout."""
+    wt = proj.root.parent / "wt"
+    git(proj.root, "worktree", "add", "-q", "-b", "run", str(wt))
+    (wt / ".conductor").mkdir()
+    (wt / ".conductor" / "handoff.md").write_text(
+        "**Active:** plan=p; milestone=#1; phase issue #42 (in-progress)\n"
+        "**Last unit:** aaa111..bbb222 — did things\n"
+    )
+    log = proj.root / ".conductor" / "resume-autodev.log"
+    log.write_text(CLAUDE_FIXTURE_TEXT + "\n")
+    rc = usage_cmd.main(
+        ["ingest", "--project", str(wt), "--host", "claude", "--log", str(log)]
+        + ["--offset", "0", "--wall-s", "60", "--rc", "0"]
+    )
+    assert rc == 0
+    d = proj.run["dispatches"][-1]
+    assert d["phase_id"] == "42" and d["head_sha"] == "bbb222"
+    assert not (
+        wt / ".conductor" / "runs"
+    ).exists()  # recorded on the main checkout's run
+
+
 def test_ingest_without_a_run_reports_unrecorded_and_exits_1(
     tmp_path, git_env, monkeypatch, capsys
 ):

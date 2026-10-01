@@ -129,6 +129,9 @@ def test_driver_ingests_usage_after_fire_end_bounded_and_never_fatal(host_id):
     exit_line = text.rindex('exit "$rc"')
     assert end < ingest < exit_line
     assert f"--host {host_id}" in text[ingest:exit_line]
+    # The worker's handoff is written under CONDUCTOR_HOME="$WORKTREE", not the main checkout.
+    assert '--project "$WORKTREE"' in text[ingest:exit_line]
+    assert '--project "$PROJECT"' not in text[ingest:exit_line]
     assert "9>&- ||" in text[ingest:exit_line]
     # The same bound resolution the watchdog's run lookup uses: GNU `timeout`, else the
     # coreutils `gtimeout` a macOS machine has.
@@ -152,7 +155,7 @@ def _run_usage_tail(tmp_path, host_id, timeout_stub):
     prelude = (
         f"PATH={bindir}\n"
         "ts() { printf T; }\n"
-        f"LOG={log}\nPROJECT=/p/proj\nCONDUCTOR=/nonexistent\n"
+        f"LOG={log}\nPROJECT=/p/proj\nWORKTREE=/p/wt\nCONDUCTOR=/nonexistent\n"
         "FIRE_LOG0=0\nFIRE_T0=$SECONDS\nrc=3\n"
     )
     proc = subprocess.run(

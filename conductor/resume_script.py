@@ -802,11 +802,13 @@ printf '%s fire-end rc=%s\\n' "$(ts)" "$rc" >> "$LOG"
 # the log. Best-effort and bounded: it can never change the fire's exit status. `9>&-` for the
 # same reason as every other child above: nothing it leaves behind may hold the lock. The bound
 # is resolved the way the watchdog's run lookup resolves it, and an ingest that could not run or
-# did not finish says so in the log; a missing record is never silent.
+# did not finish says so in the log; a missing record is never silent. `--project` is the
+# WORKTREE: the worker wrote its handoff under CONDUCTOR_HOME="$WORKTREE", and the run itself
+# resolves through the shared git common dir from either checkout.
 usage_bound="$(command -v timeout || command -v gtimeout || true)"
 if [ -n "$usage_bound" ]; then
     usage_rc=0
-    "$usage_bound" -k {RUN_LOOKUP_KILL_GRACE_S} 60 "$CONDUCTOR" usage ingest --project "$PROJECT" --host {h.id} \\
+    "$usage_bound" -k {RUN_LOOKUP_KILL_GRACE_S} 60 "$CONDUCTOR" usage ingest --project "$WORKTREE" --host {h.id} \\
         --log "$LOG" --offset "$FIRE_LOG0" --wall-s "$(( SECONDS - FIRE_T0 ))" --rc "$rc" \\
         >> "$LOG" 2>&1 9>&- || usage_rc=$?
     case "$usage_rc" in
