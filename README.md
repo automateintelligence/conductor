@@ -320,8 +320,8 @@ days** (re-run `/conductor:start` to continue), and an in-session cron **dies wh
 closes**. For a run that survives reboots and closed terminals, `start` installs the **Tier-B OS
 watchdog** as the fail-closed default for an unattended run — `conductor driver install`, never
 a judgment call about whether the in-session cron persisted: a flock-guarded resume script
-that fires the run's recorded host — `claude -p "/conductor:autodev"` on Claude,
-`codex exec --cd <run-worktree> …` on Codex — and exits once the gate is green. An open
+that fires the run's recorded host — `claude -p "/conductor:autodev" --output-format json` on Claude,
+`codex exec --json --cd <run-worktree> …` on Codex — and exits once the gate is green. An open
 terminal does not by itself stop a fire: a fire skips (`fire-skipped reason=owner-busy`)
 while the run's ownership record names a live worker (`conductor run owner-busy`), e.g. while
 `start` or an in-session `autodev` tick holds it. Plus `@reboot` + heartbeat crontab lines tagged
@@ -357,8 +357,8 @@ empty by default (supervised: fires stall on the first prompt):
 
 | Host | Variable | Scoped example | Full-bypass value |
 |---|---|---|---|
-| Claude | `CONDUCTOR_RESUME_CLAUDE_FLAGS` (appended to `claude -p "/conductor:autodev"`) | `--settings <path-to-scoped-settings.json>` | `--dangerously-skip-permissions` |
-| Codex | `CONDUCTOR_RESUME_CODEX_FLAGS` (placed before the prompt in `codex exec --cd <run-worktree>`) | `--sandbox workspace-write` | `--dangerously-bypass-approvals-and-sandbox` |
+| Claude | `CONDUCTOR_RESUME_CLAUDE_FLAGS` (appended to `claude -p "/conductor:autodev" --output-format json`) | `--settings <path-to-scoped-settings.json>` | `--dangerously-skip-permissions` |
+| Codex | `CONDUCTOR_RESUME_CODEX_FLAGS` (placed before the prompt in `codex exec --json --cd <run-worktree>`) | `--sandbox workspace-write` | `--dangerously-bypass-approvals-and-sandbox` |
 
 Each fire logs `fire-start posture=<supervised|scoped|full-bypass>`, derived from exact tokens
 of that variable (on Codex, `-s`/`--sandbox danger-full-access` also reads as full-bypass and

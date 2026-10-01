@@ -648,9 +648,42 @@ def test_autodev_opposite_host_review_goes_through_conductor_review():
     assert "conductor review <pr> --brief" in step5
     assert "Usage-limit fallback" in step5  # the fallback rules survive unchanged
     assert "CONDUCTOR_REVIEW_AUTHOR" in step5
-    # every exit code the verb can return is mapped, so a worker never improvises one
-    for code in ("exit 2", "exit 3", "exit 4"):
-        assert code in step5, code
+    # the brief lives outside the worktree so step 0 never commits it as reclaimed work
+    assert "OUTSIDE the worktree" in step5
+
+
+def _exit_clause(step5: str, code: int) -> str:
+    """The text of one exit-code bullet: from its marker to the next bullet or the fallback."""
+    start = step5.index(f"**exit {code}**")
+    ends = [
+        step5.index(marker, start + 1)
+        for marker in ("- **exit ", "**Usage-limit fallback")
+        if marker in step5[start + 1 :]
+    ]
+    return step5[start : min(ends)]
+
+
+def test_each_conductor_review_exit_code_is_tied_to_its_action():
+    raw = open(os.path.join(ROOT, "skills/autodev/SKILL.md"), encoding="utf-8").read()
+    step5 = _recipe_step(
+        raw, "5. **Opposite-host review.**", "6. `receiving-code-review`"
+    )
+    two, three, four = (_exit_clause(step5, n) for n in (2, 3, 4))
+    # exit 2: fixable preconditions are fixed and re-run; an unresolved host falls back
+    assert "checkout-stale" in two and "push, or check out the PR head" in two
+    assert "brief-too-large" in two and "shorten the brief" in two
+    assert "not on PATH or unresolved" in two
+    assert "same-host `code-review` fallback" in two
+    assert "reviewer unavailable" in two
+    # exit 3: the existing usage-limit / transient rules apply unchanged
+    assert "usage-limit / transient-retry rules" in three
+    # exit 4: one retry, then the fallback with its own reason
+    assert "retry once" in four
+    assert "same-host `code-review` fallback" in four and "`timeout`" in four
+    # the fallback's label and debt body name the actual reason, not only a usage limit
+    assert "UNAVAILABLE (<reason>)" in step5
+    assert "UNAVAILABLE (usage limit)" not in step5
+    assert "reviewer unavailable" in step5.split("Usage-limit fallback", 1)[1]
 
 
 def test_autodev_final_state_re_review_reruns_conductor_review():
