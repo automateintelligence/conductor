@@ -1048,7 +1048,11 @@ class CodexAdapter:
         )
 
     def resume_fire_command(self) -> str:
-        """One headless phase: ``codex exec --cd <worktree> <owner flags> <prompt>``.
+        """One headless phase: ``codex exec --json --cd <worktree> <owner flags> <prompt>``.
+
+        ``--json`` makes the fire's output in the driver log a JSONL event stream, whose
+        ``turn.completed`` events carry the token usage ``conductor usage ingest`` records after
+        the fire (sustained-context spec §3).
 
         ``--cd`` names the workspace explicitly because Codex otherwise infers it from cwd. The
         prompt is a trailing positional, so the owner's flags go BEFORE it — the opposite order
@@ -1061,7 +1065,7 @@ class CodexAdapter:
         expands to exactly the instruction below, so nothing is lost by writing it out.
         """
         return (
-            '"$CODEX_BIN" exec --cd "$WORKTREE" "$@" '
+            '"$CODEX_BIN" exec --json --cd "$WORKTREE" "$@" '
             '"Read $CONDUCTOR_SOURCE/skills/autodev/SKILL.md and execute it."'
         )
 

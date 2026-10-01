@@ -41,7 +41,7 @@ from conductor.hosts import base, runhost
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and the
 # `conductor:start` skill's reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 12
+TEMPLATE_VERSION = 13
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # The lock's two outcomes other than "taken". Both sit above 100 on purpose: the driver
@@ -355,6 +355,9 @@ def fire_supervision_prologue() -> str:
         "# rather than to a watchdog that would kill every working phase on that machine.\n"
         'FIRE_PS="$(command -v ps || true)"\n'
         'FIRE_LOG0="$(wc -c < "$LOG" 2>/dev/null || printf 0)"\n'
+        "# The fire's start, on EVERY path: `fire_started` below is set only when the watchdog\n"
+        "# runs, and usage accounting needs the fire's wall time with or without `ps`.\n"
+        "FIRE_T0=$SECONDS\n"
         "fire_progress() {\n"
         "    # $1 = the fire's process-group id. One token; any change in it is progress.\n"
         '    fire_cpu="$("$FIRE_PS" -eo pgid=,time= 2>/dev/null | awk -v g="$1" \''
@@ -795,6 +798,13 @@ FIRE_PID=$!
 set +m
 {fire_watchdog(h)}
 printf '%s fire-end rc=%s\\n' "$(ts)" "$rc" >> "$LOG"
+# USAGE ACCOUNTING (sustained-context spec §3): record this fire's tokens from its own slice of
+# the log. Best-effort and bounded: it can never change the fire's exit status. `9>&-` for the
+# same reason as every other child above: nothing it leaves behind may hold the lock.
+if command -v timeout >/dev/null 2>&1; then
+    timeout 60 "$CONDUCTOR" usage ingest --project "$PROJECT" --host {h.id} --log "$LOG" \\
+        --offset "$FIRE_LOG0" --wall-s "$(( SECONDS - FIRE_T0 ))" --rc "$rc" >> "$LOG" 2>&1 9>&- || true
+fi
 exit "$rc"
 """
 

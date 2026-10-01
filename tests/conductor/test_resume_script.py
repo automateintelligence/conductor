@@ -595,12 +595,110 @@ def test_driver_preserves_quoted_flag_values_with_spaces(tmp_path):
     assert argv == [
         "-p",
         "/conductor:autodev",
+        "--output-format",
+        "json",
         "--settings",
         "/tmp/space path/settings.json",
     ]
     # negative: the word-split fragments must not appear as argv entries
     assert "'/tmp/space" not in argv
     assert "path/settings.json'" not in argv
+
+
+# ---- usage accounting: the driver records every worker fire (sustained-context §3) ----
+
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_CLAUDE_FIXTURE = os.path.join(
+    _REPO, "tests", "conductor", "fixtures", "claude-print-json-2.1.286.json"
+)
+
+
+def _mk_usage_harness(tmp, git_env, git, monkeypatch, capsys, fire_rc):
+    """A real git project with ONE registered run, and a driver whose stub `claude` prints the
+    recorded `claude -p --output-format json` result and exits `fire_rc`.
+
+    The `conductor` on the driver's PATH answers the two pre-fire guards the way
+    `_STUB_CONDUCTOR` does (free, gate not green) and hands every other verb to THIS repo's
+    `bin/conductor`, so `usage ingest` is the real verb resolving the real run."""
+    from conductor import run_cmd
+
+    project = tmp / "proj"
+    (project / "docs").mkdir(parents=True)
+    (project / "docs" / "alpha.md").write_text("# alpha\n")
+    subprocess.run(
+        ["git", "init", "-q", "-b", "trunk", str(project)],
+        check=True,
+        capture_output=True,
+        env=git_env,
+        timeout=30,
+    )
+    git(project, "add", "-A")
+    git(project, "commit", "-qm", "init")
+    config_home = tmp / "conductor-config"
+    monkeypatch.setenv("CONDUCTOR_HOME", str(project))
+    monkeypatch.setenv("CONDUCTOR_CONFIG_HOME", str(config_home))
+    for name in ("CONDUCTOR_GATE_DIR", "CONDUCTOR_GATE_SLUG", "CONDUCTOR_HOST"):
+        monkeypatch.delenv(name, raising=False)
+    assert run_cmd.main(["new", "docs/alpha.md", "--project", str(project)]) == 0
+    run_key = capsys.readouterr().out.strip()
+
+    worktree = tmp / "wt"
+    home = tmp / "home"
+    bindir = home / ".local" / "bin"
+    for d in (worktree, bindir):
+        d.mkdir(parents=True)
+    claude = bindir / "claude"
+    claude.write_text(
+        f"#!/bin/sh\ncat {shlex.quote(_CLAUDE_FIXTURE)}\nexit {fire_rc}\n"
+    )
+    os.chmod(claude, 0o755)
+    conductor = bindir / "conductor"
+    conductor.write_text(
+        '#!/bin/sh\ncase "$1 $2" in\n'
+        '  "run owner-busy") exit 11 ;;\n'
+        '  "assert run") exit 1 ;;\n'
+        "esac\n"
+        f'exec {shlex.quote(os.path.join(_REPO, "bin", "conductor"))} "$@"\n'
+    )
+    os.chmod(conductor, 0o755)
+    driver = project / ".conductor" / "resume-autodev.sh"
+    driver.write_text(rs.render(str(project), str(worktree), "claude"))
+    os.chmod(driver, 0o755)
+    return project, driver, home, run_key, config_home
+
+
+@pytest.mark.parametrize(("fire_rc", "outcome"), [(0, "ok"), (3, "error")])
+def test_driver_records_the_fire_as_a_worker_dispatch_and_keeps_its_rc(
+    tmp_path, git_env, git, monkeypatch, capsys, fire_rc, outcome
+):
+    from conductor.core import runstate
+
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, run_key, config_home = _mk_usage_harness(
+        tmp_path, git_env, git, monkeypatch, capsys, fire_rc
+    )
+    proc = _fire_driver(driver, home, {"CONDUCTOR_CONFIG_HOME": str(config_home)})
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == fire_rc, (proc.stdout, proc.stderr, log)
+    assert f"fire-end rc={fire_rc}" in log
+    assert "usage-recorded role=worker" in log, log
+    assert log.index(f"fire-end rc={fire_rc}") < log.index("usage-recorded")
+
+    doc = runstate.load(os.path.join(str(project), ".conductor"), run_key)
+    assert doc is not None
+    d = doc["dispatches"][-1]
+    with open(_CLAUDE_FIXTURE, encoding="utf-8") as f:
+        models = json.loads(f.read())["modelUsage"].values()
+    fresh = sum(m["inputTokens"] for m in models)
+    read = sum(m["cacheReadInputTokens"] for m in models)
+    write = sum(m["cacheCreationInputTokens"] for m in models)
+    assert d["role"] == "worker" and d["host"] == "claude"
+    assert d["outcome"] == outcome
+    assert d["input_tokens"] == fresh + read + write
+    assert d["cached_input_tokens"] == read
+    assert d["cache_write_tokens"] == write
+    assert d["output_tokens"] == sum(m["outputTokens"] for m in models)
 
 
 # ---- posture visibility: fire-start carries a DERIVED posture label (Phase 3, A5) ----
@@ -1008,7 +1106,7 @@ def test_render_for_a_claude_recorded_run_is_the_claude_driver(tmp_path):
     project, worktree = _project_recorded_as(tmp_path, "claude")
     s = rs.render(project, worktree)
     assert 'CLAUDE_BIN="$(command -v claude || true)"' in s
-    assert '"$CLAUDE_BIN" -p "/conductor:autodev" "$@"' in s
+    assert '"$CLAUDE_BIN" -p "/conductor:autodev" --output-format json "$@"' in s
 
 
 def test_render_for_an_unrecorded_run_is_byte_identical_to_the_recorded_claude_one(
@@ -1048,7 +1146,7 @@ def test_render_for_a_codex_recorded_run_resolves_and_launches_codex(tmp_path):
     assert [ln for ln in spawns if ln not in fire] == [
         '"$CODEX_BIN" plugin list --json </dev/null >"$CODEX_PLUGIN_OUT" 2>/dev/null &'
     ], spawns
-    assert fire[0].startswith('"$CODEX_BIN" exec --cd "$WORKTREE"')
+    assert fire[0].startswith('"$CODEX_BIN" exec --json --cd "$WORKTREE"')
     assert "skills/autodev/SKILL.md" in fire[0]
 
 
@@ -1386,7 +1484,7 @@ def test_a_codex_run_fires_the_codex_binary_with_an_exec_invocation(tmp_path):
     proc, log, argv = _fire_codex(tmp_path, "fire")
     assert "fire-start" in log, (proc.returncode, proc.stdout, proc.stderr, log)
     assert proc.returncode == 0
-    assert argv[:3] == ["exec", "--cd", str(tmp_path / "fire" / "wt")], argv
+    assert argv[:4] == ["exec", "--json", "--cd", str(tmp_path / "fire" / "wt")], argv
     assert argv[-1].startswith("Read ")
     assert argv[-1].endswith("/skills/autodev/SKILL.md and execute it.")
     # -p is --profile to codex: the prompt must never be its value

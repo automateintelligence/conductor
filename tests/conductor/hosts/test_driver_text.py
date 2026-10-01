@@ -19,6 +19,7 @@ import pathlib
 
 import pytest
 
+from conductor import resume_script
 from conductor.hosts import base
 
 # Literal, never `base.HOST_IDS`: parametrizing over the value under test would let a falsifier
@@ -80,7 +81,10 @@ CLAUDE_GUARD = (
     "fi"
 )
 
-CLAUDE_FIRE = '"$CLAUDE_BIN" -p "/conductor:autodev" "$@"'
+# `--output-format json` is the one deliberate departure from the shipped v4 line: the fire's
+# final JSON result lands in the driver log, where `conductor usage ingest` reads the fire's
+# token usage (docs/specs/2026-09-29-sustained-context-design.md §3).
+CLAUDE_FIRE = '"$CLAUDE_BIN" -p "/conductor:autodev" --output-format json "$@"'
 
 
 def test_claude_bin_resolution_is_the_shipped_text():
@@ -92,6 +96,9 @@ def test_claude_unresolved_guard_is_the_shipped_text():
 
 
 def test_claude_fire_command_is_the_proven_production_invocation():
+    """Pinned byte-for-byte. The proven v4 invocation plus `--output-format json`, added so
+    the fire's result JSON (with its token usage) lands in the log for usage accounting
+    (sustained-context spec §3). Any other change to this line is a regression."""
     assert base.load("claude").resume_fire_command() == CLAUDE_FIRE
 
 
@@ -104,6 +111,25 @@ def test_claude_posture_arms_are_the_shipped_detection_table():
         bypassPermissions) [ "$prev" = "--permission-mode" ] && POSTURE="full-bypass" ;;
         --settings|--settings=*) [ "$POSTURE" = "full-bypass" ] || POSTURE="scoped" ;;"""
     )
+
+
+@pytest.mark.parametrize(
+    ("host_id", "flag"), [("claude", "--output-format json"), ("codex", "exec --json")]
+)
+def test_fire_command_emits_machine_readable_usage(host_id, flag):
+    assert flag in base.load(host_id).resume_fire_command()
+
+
+@pytest.mark.parametrize("host_id", HOSTS)
+def test_driver_ingests_usage_after_fire_end_and_preserves_rc(host_id):
+    text = resume_script.render("/p/proj", "/p/wt", host_id)
+    end = text.rindex("fire-end rc=")
+    ingest = text.index("usage ingest")
+    exit_line = text.rindex('exit "$rc"')
+    assert end < ingest < exit_line
+    assert f"--host {host_id}" in text[ingest:exit_line]
+    assert "|| true" in text[ingest:exit_line]
+    assert "timeout 60" in text[ingest - 200 : ingest]
 
 
 # --- Codex's fragments spawn codex, and say so ----------------------------------------------

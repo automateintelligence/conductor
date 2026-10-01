@@ -125,13 +125,17 @@ class ClaudeAdapter:
         )
 
     def resume_fire_command(self) -> str:
-        """One headless phase: ``claude -p "/conductor:autodev"`` plus the owner's flags.
+        """One headless phase: ``claude -p "/conductor:autodev" --output-format json`` plus the
+        owner's flags.
 
-        Byte-identical to the invocation live fires have proven. The owner's re-parsed flags
-        follow the prompt because Claude takes the prompt as ``-p``'s value, not as a trailing
-        positional — the opposite of Codex, which is why this line is not shared.
+        The invocation live fires have proven, plus ``--output-format json``: the fire's output
+        in the driver log is now its single-line JSON result, which carries the token usage
+        ``conductor usage ingest`` records after the fire (sustained-context spec §3). The
+        owner's re-parsed flags follow the prompt because Claude takes the prompt as ``-p``'s
+        value, not as a trailing positional — the opposite of Codex, which is why this line is
+        not shared.
         """
-        return '"$CLAUDE_BIN" -p "/conductor:autodev" "$@"'
+        return '"$CLAUDE_BIN" -p "/conductor:autodev" --output-format json "$@"'
 
     def posture_of(self, args: list[str]) -> str:
         """The Python mirror of ``resume_posture_arms``.
