@@ -155,3 +155,97 @@ def test_run_bounded_returns_when_a_setsid_descendant_holds_stdout(tmp_path):
 def test_run_bounded_propagates_a_missing_executable(tmp_path):
     with pytest.raises(FileNotFoundError):
         bounded.run_bounded(["/nonexistent/binary-xyz"], cwd=str(tmp_path), timeout=5)
+
+
+def _leader_with_member(pidfile) -> str:
+    """A leader that starts a TERM-ignoring group member, records its pid, then waits."""
+    member = "import signal,time;signal.signal(signal.SIGTERM, signal.SIG_IGN);time.sleep(600)"
+    return (
+        "import subprocess,sys,time;"
+        f"p=subprocess.Popen([sys.executable,'-c',{member!r}],"
+        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);"
+        f"open({str(pidfile)!r},'w').write(str(p.pid));"
+        "print('partial', flush=True);time.sleep(600)"
+    )
+
+
+def _wait_for(path, limit=10.0):
+    deadline = time.monotonic() + limit
+    while not path.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert path.exists()
+
+
+class _Interrupted(BaseException):
+    pass
+
+
+def test_run_bounded_kills_the_group_when_the_caller_is_interrupted(
+    tmp_path, monkeypatch
+):
+    """A signal handler that raises mid-run (how `conductor review` turns a TERM into an
+    exception) must not leave the reviewer group running unbounded."""
+    pidfile = tmp_path / "member.pid"
+    leaders: list[int] = []
+    real_popen = bounded.subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        leaders.append(child.pid)
+        return child
+
+    def interrupt(_signum, _frame):
+        if pidfile.exists():
+            raise _Interrupted
+        signal.setitimer(signal.ITIMER_REAL, 0.1)
+
+    monkeypatch.setattr(bounded.subprocess, "Popen", recording_popen)
+    previous = signal.signal(signal.SIGALRM, interrupt)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0.3)
+        with pytest.raises(_Interrupted):
+            bounded.run_bounded(
+                [sys.executable, "-c", _leader_with_member(pidfile)],
+                cwd=str(tmp_path),
+                timeout=60,
+                grace=1,
+            )
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    time.sleep(0.2)
+    assert _gone_or_zombie(leaders[0])
+    assert _gone_or_zombie(int(pidfile.read_text()))
+
+
+def test_an_oserror_after_the_start_kills_the_group_and_is_not_never_launched(
+    tmp_path, monkeypatch
+):
+    """Popen succeeded, so the host DID run: the failure is reported as a result (the caller's
+    host-failed path), never raised as if nothing had been launched."""
+    pidfile = tmp_path / "member.pid"
+    real_communicate = bounded.subprocess.Popen.communicate
+    leaders: list[int] = []
+
+    def failing_communicate(self, input=None, timeout=None):
+        leaders.append(self.pid)
+        _wait_for(pidfile)
+        try:
+            real_communicate(self, timeout=0.5)
+        except bounded.subprocess.TimeoutExpired:
+            pass
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(bounded.subprocess.Popen, "communicate", failing_communicate)
+    r = bounded.run_bounded(
+        [sys.executable, "-c", _leader_with_member(pidfile)],
+        cwd=str(tmp_path),
+        timeout=60,
+        grace=1,
+    )
+    assert r.returncode is None and not r.timed_out
+    assert r.stderr == "run_bounded: OSError: [Errno 5] Input/output error"
+    assert "partial" in r.stdout
+    time.sleep(0.2)
+    assert _gone_or_zombie(leaders[0])
+    assert _gone_or_zombie(int(pidfile.read_text()))
