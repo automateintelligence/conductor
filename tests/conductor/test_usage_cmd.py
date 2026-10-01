@@ -250,6 +250,55 @@ def test_ingest_with_two_active_runs_reports_unrecorded_and_exits_1(proj, git, c
     assert "fire-end" not in out and "driver-unresolved" not in out
 
 
+def _run_worktree(proj: Proj, git) -> Path:
+    """A linked worktree with the run's integration branch checked out, as the driver fires in."""
+    wt = proj.root.parent / "wt-run"
+    branch = proj.run["integration_branch"]
+    git(proj.root, "worktree", "add", "-q", "-b", branch, str(wt))
+    return wt
+
+
+def _ingest_from(worktree: Path, log: Path) -> int:
+    return usage_cmd.main(
+        ["ingest", "--project", str(worktree), "--host", "claude", "--log", str(log)]
+        + ["--offset", "0", "--wall-s", "60", "--rc", "0"]
+    )
+
+
+def test_ingest_with_two_active_runs_records_on_the_run_its_worktree_belongs_to(
+    proj, git, capsys
+):
+    """Two active runs in one repository (per-spec gate namespacing): a bare ``resolve`` is
+    ambiguous, so the fire is attributed through the worktree the driver fired in."""
+    (proj.root / "docs" / "beta.md").write_text("# beta\n")
+    git(proj.root, "add", "-A")
+    git(proj.root, "commit", "-qm", "beta")
+    assert run_cmd.main(["new", "docs/beta.md", "--project", str(proj.root)]) == 0
+    beta_key = capsys.readouterr().out.strip()
+    wt = _run_worktree(proj, git)
+    log = proj.root / ".conductor" / "resume-autodev.log"
+    log.write_text(CLAUDE_FIXTURE_TEXT + "\n")
+    assert _ingest_from(wt, log) == 0
+    assert "usage-recorded" in capsys.readouterr().out
+    assert len(proj.run["dispatches"]) == 1
+    beta = runstate.load(proj.state_root, beta_key)
+    assert beta is not None and beta["dispatches"] == []
+
+
+def test_ingest_records_a_run_its_own_fire_moved_to_awaiting_team_merge(
+    proj, git, capsys
+):
+    """The fire that opened the final PR moved its run out of the active set before the driver
+    ingested it; the worktree still binds the fire to that run."""
+    wt = _run_worktree(proj, git)
+    runstate.set_status(proj.state_root, proj.run_key, "awaiting-team-merge")
+    log = proj.root / ".conductor" / "resume-autodev.log"
+    log.write_text(CLAUDE_FIXTURE_TEXT + "\n")
+    assert _ingest_from(wt, log) == 0
+    assert "usage-recorded" in capsys.readouterr().out
+    assert len(proj.run["dispatches"]) == 1
+
+
 def test_ingest_collapses_a_three_dot_range_to_its_head(proj):
     (proj.root / ".conductor" / "handoff.md").write_text(
         "**Active:** phase issue #7 (in-progress)\n"

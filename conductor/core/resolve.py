@@ -11,6 +11,10 @@ Two decisions live here, and nowhere else:
    variables are ignored rather than consulted as fallback. Without a key, resolution succeeds
    only when exactly one ACTIVE run exists; zero or several fail with the available keys and the
    exact commands, because guessing is how a fire lands work on the wrong run's branch.
+
+One narrower question lives here too: which run a given WORKTREE belongs to
+(``run_for_worktree``), answered by the binding rule ``worktree_unbound`` — the same rule the
+heartbeat applies to its driver — for callers that know where they ran but not which run.
 """
 
 from __future__ import annotations
@@ -23,6 +27,11 @@ from conductor import paths
 from conductor.core import locks, registry, runstate, schema, transaction
 
 _GIT_TIMEOUT = 30.0
+_BINDING_GIT_TIMEOUT = float(os.environ.get("CONDUCTOR_GIT_TIMEOUT", "30"))
+
+#: Statuses a run worktree can still be bound to: the active set, plus a run whose final fire
+#: moved it to awaiting-team-merge.
+BINDABLE_STATUSES = (*schema.ACTIVE_STATUSES, "awaiting-team-merge")
 
 
 class RunNotFound(RuntimeError):
@@ -197,3 +206,108 @@ def gate_for_run(res: RunResolution) -> paths.GateResolution:
     """The done-gate this run owns. The one place that pairs a loaded run record with
     ``paths.resolve_gate``'s run-key mode, so no caller has to remember to pass both."""
     return paths.resolve_gate(res.repo_root, run_key=res.run_key, run=res.run)
+
+
+class Unbound(NamedTuple):
+    """Why a worktree is not provably a run's. ``foreign``: it is not a work tree of this
+    repository (``detail`` says what it is instead). Otherwise it is one, but with a branch
+    checked out that is not the run's (``detail`` names it)."""
+
+    foreign: bool
+    detail: str
+
+
+def _binding_git(worktree: str, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", worktree, *args],
+        capture_output=True,
+        text=True,
+        timeout=_BINDING_GIT_TIMEOUT,
+        check=False,
+    )
+
+
+def worktree_unbound(repo_root: str, worktree: str, run: dict) -> Unbound | None:
+    """``None`` when ``worktree`` provably belongs to ``run``, else why not.
+
+    Bound means: its realpath is the ``integration_worktree`` or ``phase_worktree`` the run
+    records, or it is a work tree OF THIS REPOSITORY with the run's integration or phase branch
+    checked out. A branch name alone is no evidence: a clone elsewhere with the same branch
+    checked out is another repository's work tree, so the worktree must share ``repo_root``'s
+    git common dir before its branch counts."""
+    real = os.path.realpath(worktree)
+    recorded = {
+        os.path.realpath(path)
+        for path in (run.get("integration_worktree"), run.get("phase_worktree"))
+        if isinstance(path, str) and path
+    }
+    if real in recorded:
+        return None
+    branches_of_run = [
+        name
+        for name in (run.get("integration_branch"), run.get("phase_branch"))
+        if isinstance(name, str) and name
+    ]
+    common = _binding_git(
+        worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"
+    )
+    common_dir = (common.stdout or "").strip() if common.returncode == 0 else ""
+    if not common_dir or os.path.realpath(
+        os.path.dirname(common_dir)
+    ) != os.path.realpath(repo_root):
+        return Unbound(
+            True,
+            f"belongs to the repository at {os.path.dirname(common_dir)}"
+            if common_dir
+            else f"is not a git work tree git could resolve (exit {common.returncode}: "
+            f"{(common.stderr or '').strip() or 'no output'})",
+        )
+    head = _binding_git(worktree, "symbolic-ref", "--quiet", "--short", "HEAD")
+    checked_out = (head.stdout or "").strip() if head.returncode == 0 else None
+    if checked_out and checked_out in branches_of_run:
+        return None
+    return Unbound(
+        False,
+        f"branch {checked_out!r}"
+        if checked_out
+        else f"no branch git could name (exit {head.returncode}: "
+        f"{(head.stderr or '').strip() or 'no output'})",
+    )
+
+
+def run_for_worktree(worktree: str) -> RunResolution:
+    """The run ``worktree`` belongs to, for a caller that knows where it ran but carries no
+    run key (the driver's post-fire usage ingest, ``conductor review``).
+
+    The one active run when there is exactly one. Otherwise — several active runs, or none
+    because this fire moved its own run to awaiting-team-merge — the unique run in
+    ``BINDABLE_STATUSES`` that ``worktree_unbound`` binds ``worktree`` to. Zero such runs raise
+    ``RunNotFound``, several ``RunAmbiguous``. A pure read, like ``resolve``."""
+    try:
+        return resolve(start=worktree)
+    except (RunNotFound, RunAmbiguous) as exc:
+        unresolved = " ".join(str(exc).split())
+    root = repo_root(worktree)
+    sroot = os.path.join(root, ".conductor")
+    doc = registry.load(sroot)
+    bound: list[tuple[str, dict]] = []
+    for key in registry.run_keys(doc) if doc is not None else []:
+        run = runstate.load(sroot, key)
+        if run is None or run.get("status") not in BINDABLE_STATUSES:
+            continue
+        if worktree_unbound(root, worktree, run) is None:
+            bound.append((key, run))
+    where = os.path.realpath(worktree)
+    if len(bound) == 1:
+        key, run = bound[0]
+        return RunResolution(sroot, root, key, runstate.run_dir(sroot, key), run)
+    if not bound:
+        raise RunNotFound(
+            f"no {', '.join(BINDABLE_STATUSES)} run under {sroot} is bound to the worktree "
+            f"{where}; no write occurred. ({unresolved})"
+        )
+    keys = ", ".join(key for key, _ in bound)
+    raise RunAmbiguous(
+        f"{len(bound)} runs under {sroot} are bound to the worktree {where} ({keys}); "
+        "no write occurred."
+    )

@@ -532,8 +532,9 @@ def _driver_unbound(repo_root: str, script: str, run: dict) -> str | None:
     script it launches drives whichever worktree it was installed for — so a heartbeat fired for
     run A would launch run B's worker under A's ownership. Launching is allowed only when the
     script's binding is provably this run's: the worktree ``run.json`` records for it, or a
-    checkout of this run's integration or phase branch. Anything else, including a binding this
-    build cannot read, launches nothing."""
+    checkout of this run's integration or phase branch (``resolve.worktree_unbound``, the rule
+    ``conductor usage ingest`` and ``conductor review`` also attribute by). Anything else,
+    including a binding this build cannot read, launches nothing."""
     key = run["run_key"]
     reinstall = f"  {_driver_install_hint(run)}"
     worktree = resume_script.installed_worktree(script)
@@ -543,54 +544,26 @@ def _driver_unbound(repo_root: str, script: str, run: dict) -> str | None:
             "read, so which run it would drive is unknown; no fire was launched and no write "
             f"occurred. Reinstall it for this run:\n{reinstall}"
         )
-    real = os.path.realpath(worktree)
-    recorded = {
-        os.path.realpath(path)
-        for path in (run.get("integration_worktree"), run.get("phase_worktree"))
-        if isinstance(path, str) and path
-    }
-    if real in recorded:
+    unbound = resolve.worktree_unbound(repo_root, worktree, run)
+    if unbound is None:
         return None
+    if unbound.foreign:
+        return (
+            f"run {key!r}: the durable driver {script} fires in {worktree}, which "
+            f"{unbound.detail}, not this project ({repo_root}); no fire was launched and no "
+            f"write occurred. Reinstall the driver for this run:\n{reinstall}"
+        )
     branches_of_run = [
         name
         for name in (run.get("integration_branch"), run.get("phase_branch"))
         if isinstance(name, str) and name
     ]
-    # A branch NAME is evidence only inside THIS repository: a clone elsewhere with the same
-    # branch checked out is another repository's work tree. The worktree must share this
-    # project's git common dir before its branch counts.
-    common = _git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    common_dir = (common.stdout or "").strip() if common.returncode == 0 else ""
-    if not common_dir or os.path.realpath(
-        os.path.dirname(common_dir)
-    ) != os.path.realpath(repo_root):
-        where = (
-            f"belongs to the repository at {os.path.dirname(common_dir)}"
-            if common_dir
-            else f"is not a git work tree git could resolve (exit {common.returncode}: "
-            f"{(common.stderr or '').strip() or 'no output'})"
-        )
-        return (
-            f"run {key!r}: the durable driver {script} fires in {worktree}, which {where}, "
-            f"not this project ({repo_root}); no fire was launched and no write occurred. "
-            f"Reinstall the driver for this run:\n{reinstall}"
-        )
-    head = _git(worktree, "symbolic-ref", "--quiet", "--short", "HEAD")
-    checked_out = (head.stdout or "").strip() if head.returncode == 0 else None
-    if checked_out and checked_out in branches_of_run:
-        return None
-    found = (
-        f"branch {checked_out!r}"
-        if checked_out
-        else f"no branch git could name (exit {head.returncode}: "
-        f"{(head.stderr or '').strip() or 'no output'})"
-    )
     return (
-        f"run {key!r}: the durable driver {script} fires in {worktree}, which has {found} "
-        f"checked out — not this run's {' or '.join(map(repr, branches_of_run))} — and is not "
-        "a worktree run.json records for it. Launching it would drive another run under this "
-        "run's ownership; no fire was launched and no write occurred. Reinstall the driver for "
-        f"this run:\n{reinstall}"
+        f"run {key!r}: the durable driver {script} fires in {worktree}, which has "
+        f"{unbound.detail} checked out — not this run's {' or '.join(map(repr, branches_of_run))}"
+        " — and is not a worktree run.json records for it. Launching it would drive another "
+        "run under this run's ownership; no fire was launched and no write occurred. Reinstall "
+        f"the driver for this run:\n{reinstall}"
     )
 
 

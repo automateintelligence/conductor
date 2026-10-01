@@ -2,7 +2,10 @@
 
 The cron driver calls this once after each worker fire, passing the byte offset the log had
 before the fire started, so only that fire's slice is parsed. The result is one ``worker``
-dispatch record appended to the run (sustained-context spec §3). Derived data only: nothing
+dispatch record appended to the run the fire's worktree belongs to (``resolve.run_for_worktree``:
+the one active run, else the run bound to that worktree — two active runs in one repository, or
+a run the fire itself moved to awaiting-team-merge, still get the record; sustained-context
+spec §3). Derived data only: nothing
 that gates a merge reads it, so any failure here is reported and exits 1 for the driver to log
 and ignore.
 
@@ -92,7 +95,7 @@ def _ingest(args: argparse.Namespace) -> int:
             note="no-usage-in-output" if usage.input_tokens is None else None,
         )
         resolve.recover_pending(resolve.state_root(args.project))
-        found = resolve.resolve(start=args.project)
+        found = resolve.run_for_worktree(args.project)
         dispatches.append(found.state_root, found.run_key, entry)
     except Exception as exc:  # noqa: BLE001 — derived data must never fail the fire
         print(f"{_ts()} usage-unrecorded reason={_reason(exc)}")
