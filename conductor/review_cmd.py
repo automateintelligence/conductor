@@ -19,10 +19,17 @@ all. A TERM, HUP or INT while the reviewer runs (the worker's shell-tool limit, 
 watchdog) kills the reviewer's process group before this verb exits: a review never outlives
 the call that launched it.
 
+``--timeout`` (``$CONDUCTOR_REVIEW_TIMEOUT_S``, default 540 s) is the WHOLE command's wall-clock
+budget, one deadline taken at entry: each ``git``/``gh`` helper gets at most 60 s of what is
+left, the reviewer gets the rest, and ``_RESERVE_S`` is held back from both for the kill grace
+and cleanup. A slow preflight therefore shortens the review instead of pushing the command past
+the worker's 600 s shell limit.
+
 Exit status: 0 review printed; 2 refused before any host was launched (stale checkout, oversized
 brief, bad timeout, ``gh``/``git`` missing, failing or not executable, reviewer host unresolved,
-missing or not startable); 3 the host ran and failed; 4 it timed out
-(``review-timeout``) or this verb was interrupted by a signal (``review-interrupted``); 64
+missing or not startable); 3 the host ran and failed; 4 it timed out (``review-timeout``,
+including a budget spent in preflight, when no host was launched and nothing is recorded) or
+this verb was interrupted by a signal (``review-interrupted``); 64
 usage. Every refusal is one line on stderr, never a traceback.
 """
 
@@ -51,9 +58,15 @@ EXIT_TIMEOUT = 4
 EXIT_USAGE = 64
 
 _TOOL_TIMEOUT_S = 60.0
-#: Under Claude's 600 s Bash-tool maximum (the worker runs this verb from its shell tool) and
-#: the fire watchdog's 1800 s idle window, with room for the kill grace and the git calls.
+#: The WHOLE command's wall-clock budget: preflight helpers, the reviewer and cleanup. Under
+#: Claude's 600 s Bash-tool maximum (the worker runs this verb from its shell tool) and the fire
+#: watchdog's 1800 s idle window.
 _DEFAULT_REVIEW_TIMEOUT_S = 540.0
+#: Held back from every helper and from the reviewer for what follows them: ``run_bounded``'s
+#: TERM/KILL grace (2 x 5 s), removing the temp dir and appending the dispatch.
+_RESERVE_S = 15.0
+#: The budget's clock (a seam for tests).
+_clock = time.monotonic
 #: Argv strings are capped at 128 KiB by the kernel; the whole prompt (template and brief, as
 #: UTF-8) is held to half of that.
 _PROMPT_MAX_BYTES = 64 * 1024
@@ -80,6 +93,29 @@ VERDICT: APPROVE | VERDICT: CHANGES REQUESTED
 
 class Refused(Exception):
     """A precondition failed; no host was launched and nothing was recorded."""
+
+
+class BudgetSpent(Exception):
+    """The command's wall-clock budget ran out before the reviewer was launched."""
+
+
+class _Budget:
+    """One deadline for the whole command, taken at entry."""
+
+    def __init__(self, total: float) -> None:
+        self.total = total
+        self.deadline = _clock() + total
+        self.host: str | None = None
+
+    def left(self) -> float:
+        """Seconds a helper or the reviewer may still take, the cleanup reserve held back."""
+        return self.deadline - _clock() - _RESERVE_S
+
+    def spent(self, what: str) -> BudgetSpent:
+        return BudgetSpent(
+            f"review-timeout after {self.total:g}s ({self.host or 'reviewer unresolved'}): "
+            f"the budget ran out in preflight at {what}; no host was launched"
+        )
 
 
 class Interrupted(BaseException):
@@ -115,19 +151,27 @@ def _restore_signals(previous: dict) -> None:
         signal.signal(sig, handler)
 
 
-def _tool(argv: list[str], *, cwd: str, what: str) -> str:
-    """Run a short helper (``git``/``gh``) bounded; its stdout, or ``Refused`` naming ``what``."""
+def _tool(argv: list[str], *, cwd: str, what: str, budget: _Budget) -> str:
+    """Run a short helper (``git``/``gh``) for at most ``_TOOL_TIMEOUT_S`` or what the budget
+    has left; its stdout, or ``Refused`` naming ``what``. ``BudgetSpent`` when the budget is gone
+    before it starts, or it timed out on the budget's cut rather than its own limit."""
+    left = budget.left()
+    if left <= 0:
+        raise budget.spent(what)
+    limit = min(_TOOL_TIMEOUT_S, left)
     try:
-        done = bounded.run_bounded(argv, cwd=cwd, timeout=_TOOL_TIMEOUT_S)
+        done = bounded.run_bounded(argv, cwd=cwd, timeout=limit)
     except OSError as exc:  # missing, not executable: it never started
         raise Refused(f"{what} failed: {_reason(exc)}") from exc
+    if done.timed_out and limit < _TOOL_TIMEOUT_S:
+        raise budget.spent(what)
     if done.timed_out or done.returncode != 0:
         detail = "timed out" if done.timed_out else done.stderr.strip()
         raise Refused(f"{what} failed: {detail}")
     return done.stdout.strip()
 
 
-def _pull_request(pr: str, root: str) -> dict:
+def _pull_request(pr: str, root: str, budget: _Budget) -> dict:
     out = _tool(
         [
             "gh",
@@ -139,6 +183,7 @@ def _pull_request(pr: str, root: str) -> dict:
         ],
         cwd=root,
         what=f"gh pr view {pr}",
+        budget=budget,
     )
     try:
         doc = json.loads(out)
@@ -219,7 +264,13 @@ def _record(
 def _review(args: argparse.Namespace) -> int:
     if not (math.isfinite(args.timeout) and args.timeout > 0):
         raise Refused(f"bad timeout {args.timeout!r}: must be a finite number > 0")
-    top = _tool(["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd(), what="git")
+    budget = _Budget(args.timeout)
+    top = _tool(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=os.getcwd(),
+        what="git",
+        budget=budget,
+    )
     root = os.path.realpath(top)
     found, unresolved = _find_run(args.run, root)
     try:
@@ -229,11 +280,15 @@ def _review(args: argparse.Namespace) -> int:
         adapter = hostbase.load(reviewer)
     except Exception as exc:  # noqa: BLE001 — unknown/conflicting host: refuse, never a traceback
         raise Refused(f"reviewer host unresolved: {_reason(exc)}") from exc
+    budget.host = reviewer
 
-    pr = _pull_request(args.pr, root)
+    pr = _pull_request(args.pr, root, budget)
     head_sha = str(pr.get("headRefOid") or "")
     local_head = _tool(
-        ["git", "rev-parse", "HEAD"], cwd=root, what="git rev-parse HEAD"
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        what="git rev-parse HEAD",
+        budget=budget,
     )
     if local_head != head_sha:
         raise Refused(
@@ -246,11 +301,17 @@ def _review(args: argparse.Namespace) -> int:
         remote_name = remote.resolve(root)
     except Exception:  # noqa: BLE001 — same fail-open as `conductor remote`
         remote_name = "origin"
-    _tool(["git", "fetch", remote_name, base_ref], cwd=root, what="git fetch")
+    _tool(
+        ["git", "fetch", remote_name, base_ref],
+        cwd=root,
+        what="git fetch",
+        budget=budget,
+    )
     base_sha = _tool(
         ["git", "merge-base", "HEAD", f"{remote_name}/{base_ref}"],
         cwd=root,
         what="git merge-base",
+        budget=budget,
     )
 
     brief = _read_brief(args.brief)
@@ -300,13 +361,17 @@ def _review(args: argparse.Namespace) -> int:
             ],
             cwd=root,
             what="git diff",
+            budget=budget,
         )
+        review_limit = budget.left()
+        if review_limit <= 0:
+            raise budget.spent("the reviewer launch")
         started = time.monotonic()
         # Claude's argv has no workspace flag, so the checkout is its cwd.
         # An OSError here is Popen's (vanished, E2BIG): no host ran, so nothing is recorded.
         # One after the start comes back as a result with returncode None: exit 3, recorded.
         try:
-            result = bounded.run_bounded(argv, cwd=root, timeout=args.timeout)
+            result = bounded.run_bounded(argv, cwd=root, timeout=review_limit)
         except OSError as exc:
             raise Refused(f"reviewer host not launched: {_reason(exc)}") from exc
     except Interrupted as stop:
@@ -391,7 +456,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout",
         type=float,
-        help="wall-clock bound in seconds (default: $CONDUCTOR_REVIEW_TIMEOUT_S or 540)",
+        help="wall-clock budget for the whole command, in seconds "
+        "(default: $CONDUCTOR_REVIEW_TIMEOUT_S or 540)",
     )
     return parser
 
@@ -409,6 +475,9 @@ def main(argv: list[str] | None = None) -> int:
     except Refused as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_REFUSED
+    except BudgetSpent as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_TIMEOUT
 
 
 if __name__ == "__main__":

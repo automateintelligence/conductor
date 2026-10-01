@@ -204,7 +204,8 @@ step 3b's terminal crontab removal.
       commits it as reclaimed work, push the phase branch, then run `conductor review <pr> --brief <file>`
       from the phase worktree. It launches the reviewer host for you (the host you are NOT;
       `conductor preflight` names it — `codex` on a Claude-hosted run, `claude` on a Codex-hosted
-      one) read-only and time-bounded (540 s by default) against the PR head, and prints the
+      one) read-only against the PR head within one wall-clock budget for the whole command
+      (540 s by default, preflight included), and prints the
       review on stdout. Give the shell call that runs it a timeout of at least 600 seconds (on
       Claude: the Bash tool's `timeout: 600000`) and wait for it in the foreground — never
       background it and move on: a killed `conductor review` kills its reviewer and the review

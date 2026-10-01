@@ -255,10 +255,13 @@ def test_review_refuses_a_checkout_that_is_not_the_pr_head(proj, capsys):
     assert proj.dispatches == []
 
 
-def test_review_times_out_and_records_it(proj, capsys):
+def test_review_times_out_and_records_it(proj, capsys, monkeypatch):
+    monkeypatch.setattr(
+        review_cmd, "_RESERVE_S", 0.0
+    )  # the whole budget to the reviewer
     proj.codex(exec_sleep=60)
-    assert proj.review("--timeout", "1") == 4
-    assert "review-timeout after 1s (codex)" in capsys.readouterr().err
+    assert proj.review("--timeout", "3") == 4
+    assert "review-timeout after 3s (codex)" in capsys.readouterr().err
     entry = proj.dispatches[-1]
     assert entry["role"] == "reviewer"
     assert entry["outcome"] == "timeout"
@@ -516,7 +519,106 @@ def test_review_timeout_defaults_to_540_seconds(proj, capsys, monkeypatch):
 
     monkeypatch.setattr(review_cmd.bounded, "run_bounded", _only_for_host(record))
     assert proj.review() == 0
-    assert seen == [540]
+    # The whole command's budget: what preflight used and the cleanup reserve come off it.
+    (given,) = seen
+    assert 540 - review_cmd._RESERVE_S - 30 < given <= 540 - review_cmd._RESERVE_S
+
+
+class _Clock:
+    """``review_cmd``'s monotonic clock, advanced only by the stubbed helpers below."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _budget_harness(monkeypatch, *, slow: dict[str, float], timed_out: tuple = ()):
+    """Route every bounded call through a recorder. A helper named in ``slow`` (by its git/gh
+    subcommand) advances the fake clock that long; one in ``timed_out`` reports a timeout."""
+    clock = _Clock()
+    monkeypatch.setattr(review_cmd, "_clock", clock)
+    real = review_cmd.bounded.run_bounded
+    seen: list[tuple[str, float]] = []
+
+    def route(argv, **kwargs):
+        name = os.path.basename(argv[0])
+        what = name if name in ("codex", "claude") else f"{name} {argv[1]}"
+        seen.append((what, kwargs["timeout"]))
+        clock.now += slow.get(what, 0.0)
+        if what in timed_out:
+            return review_cmd.bounded.Bounded(
+                returncode=None,
+                stdout="",
+                stderr="",
+                duration_s=kwargs["timeout"],
+                timed_out=True,
+            )
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(review_cmd.bounded, "run_bounded", route)
+    return seen
+
+
+def test_slow_preflight_leaves_the_reviewer_only_the_rest_of_the_budget(
+    proj, capsys, monkeypatch
+):
+    """``--timeout`` bounds the whole command, so a slow fetch cannot push it past the
+    worker's 600 s shell limit and kill a valid review."""
+    seen = _budget_harness(monkeypatch, slow={"git fetch": 400.0})
+    assert proj.review() == 0
+    assert capsys.readouterr().out.strip() == "alpha"
+    timeouts = dict(seen)
+    assert timeouts["git fetch"] == review_cmd._TOOL_TIMEOUT_S
+    assert timeouts["git merge-base"] == review_cmd._TOOL_TIMEOUT_S
+    assert timeouts["codex"] == 540 - 400 - review_cmd._RESERVE_S
+    assert proj.dispatches[-1]["outcome"] == "ok"
+
+
+def test_a_helper_gets_no_more_than_the_budget_left(proj, capsys, monkeypatch):
+    seen = _budget_harness(monkeypatch, slow={"git fetch": 500.0})
+    assert proj.review() == 0
+    timeouts = dict(seen)
+    left = 540 - 500 - review_cmd._RESERVE_S
+    assert timeouts["git merge-base"] == left
+    assert timeouts["codex"] == left
+
+
+def test_budget_spent_in_preflight_exits_4_and_launches_no_host(
+    proj, capsys, monkeypatch
+):
+    seen = _budget_harness(monkeypatch, slow={"git fetch": 530.0})
+    assert proj.review() == 4
+    err = capsys.readouterr().err
+    assert "review-timeout after 540s (codex)" in err
+    assert "preflight" in err and "git merge-base" in err
+    assert "Traceback" not in err and len(err.strip().splitlines()) == 1
+    assert [what for what, _ in seen if what in ("codex", "claude")] == []
+    assert proj.exec_calls == []
+    assert proj.dispatches == []
+
+
+def test_a_helper_cut_short_by_the_budget_is_a_timeout_not_a_refusal(
+    proj, capsys, monkeypatch
+):
+    _budget_harness(
+        monkeypatch, slow={"git fetch": 500.0}, timed_out=("git merge-base",)
+    )
+    assert proj.review() == 4
+    err = capsys.readouterr().err
+    assert "review-timeout after 540s (codex)" in err and "git merge-base" in err
+    assert proj.exec_calls == []
+    assert proj.dispatches == []
+
+
+def test_a_helper_timing_out_inside_the_budget_is_still_a_refusal(
+    proj, capsys, monkeypatch
+):
+    _budget_harness(monkeypatch, slow={}, timed_out=("git fetch",))
+    assert proj.review() == 2
+    assert "git fetch failed: timed out" in capsys.readouterr().err
+    assert proj.dispatches == []
 
 
 def _alive(pid: int) -> bool:
