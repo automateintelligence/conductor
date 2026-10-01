@@ -113,3 +113,22 @@ def test_a_missing_usage_field_is_null_not_zero():
         and u.cached_input_tokens is None
         and u.cache_write_tokens is None
     )
+
+
+def test_codex_non_fatal_error_event_before_turn_completed_is_not_an_error():
+    raw = (
+        '{"type":"thread.started","thread_id":"t"}\n'
+        '{"type":"error","message":"Reconnecting... 1/5"}\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"x"}}\n'
+        '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}\n'
+    )
+    u = base.load("codex").usage_from_output(raw)
+    assert u.is_error is False and u.input_tokens == 5 and u.output_tokens == 1
+
+
+def test_codex_error_event_without_turn_completed_is_an_error():
+    raw = (
+        '{"type":"thread.started","thread_id":"t"}\n{"type":"error","message":"boom"}\n'
+    )
+    u = base.load("codex").usage_from_output(raw)
+    assert u.is_error is True and u.input_tokens is None

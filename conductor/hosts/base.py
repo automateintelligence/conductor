@@ -268,7 +268,7 @@ class HostAdapter(Protocol):
 
     # --- the generated cron driver (A1) ----------------------------------------------------
     #
-    # The nineteen members above launch a host from Python. The Tier-B driver does not: it is
+    # The twenty members above launch a host from Python. The Tier-B driver does not: it is
     # a bash script cron fires, so what it needs from an adapter is SHELL TEXT plus the two
     # variable names that text uses. Those cannot be expressed as argv, which is why they are
     # their own group rather than a reinterpretation of ``worker_argv``.

@@ -1399,9 +1399,11 @@ class CodexAdapter:
     def usage_from_output(self, text: str) -> base.Usage:
         """`codex exec --json` JSONL -> Usage. `turn.completed.usage.input_tokens` already
         includes cached tokens. `item.completed` items of type `error` are config warnings and
-        are ignored; a `turn.failed` or top-level `error` event, or no `turn.completed`, is an
-        error. On a resumed thread these numbers are the thread's running total (ground truth
-        fact 4); Phase A never resumes."""
+        are ignored. A `turn.failed` event, or no `turn.completed`, is an error. A top-level
+        `error` event is not one by itself: Codex emits non-fatal ones (stream reconnect
+        notices), and an `error` with no `turn.completed` after it has no usage, so it is an
+        error by that rule. On a resumed thread these numbers are the thread's running total
+        (ground truth fact 4); Phase A never resumes."""
         thread = message = None
         usage: dict | None = None
         failed = False
@@ -1428,7 +1430,7 @@ class CodexAdapter:
                     message = item["text"]
             elif kind == "turn.completed" and isinstance(ev.get("usage"), dict):
                 usage = ev["usage"]
-            elif kind in ("turn.failed", "error"):
+            elif kind == "turn.failed":
                 failed = True
 
         def _n(key: str) -> int | None:
