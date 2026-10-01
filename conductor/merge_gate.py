@@ -22,7 +22,15 @@ from typing import Any
 
 _GH_TIMEOUT = float(os.environ.get("CONDUCTOR_GH_TIMEOUT", "60"))
 _VERIFY_TIMEOUT = float(os.environ.get("CONDUCTOR_MERGE_VERIFY_TIMEOUT", "900"))
-_CLOSES_RE = re.compile(r"(?i)\b(close[sd]?|fix(es|ed)?|resolve[sd]?)\s+#\d+")
+_CLOSES_RE = re.compile(
+    r"(?i)\b(close[sd]?|fix(es|ed)?|resolve[sd]?)\s+#(?P<number>\d+)"
+)
+
+
+def closes_issue(body: str) -> str | None:
+    """The number of the first issue the PR body closes (``Closes #12`` -> ``"12"``), else None."""
+    found = _CLOSES_RE.search(body or "")
+    return found.group("number") if found else None
 
 
 def _expected_base() -> str | None:

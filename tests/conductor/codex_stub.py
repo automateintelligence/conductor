@@ -12,6 +12,10 @@ Codex for:
   to its filesystem scan. `hang=True` makes it never answer, for the time-bound paths.
   `helper_pidfile` makes it start a helper process in its own process group first and record
   the helper's pid there, as a real server's helpers would.
+* `codex exec` — the read-only reviewer launch. `exec_fixture` is a recorded `--json` stream
+  replayed to stdout, `exec_sleep` delays it (for the time-bound path), `exec_stderr` and
+  `exec_exit` make it fail the way a host does on a usage limit, and `exec_log` appends the
+  argv of every invocation as one JSON line so a test can prove no host was launched.
 
 `recorded_app_server()` and `recorded_plugin_list()` load the captured 0.155.0 responses in
 `tests/conductor/fixtures/` with their placeholders filled in.
@@ -36,6 +40,18 @@ if args[:1] == ["--version"]:
     print({version!r})
 elif args[:3] == ["plugin", "list", "--json"]:
     sys.stdout.write({plugin_list!r})
+elif args[:1] == ["exec"]:
+    if {exec_log!r}:
+        with open({exec_log!r}, "a") as f:
+            f.write(json.dumps(args) + "\\n")
+    import time
+    time.sleep({exec_sleep!r})
+    if {exec_stderr!r}:
+        sys.stderr.write({exec_stderr!r})
+    if {exec_fixture!r}:
+        with open({exec_fixture!r}) as f:
+            sys.stdout.write(f.read())
+    sys.exit({exec_exit!r})
 elif args[:1] == ["app-server"]:
     if {helper_pidfile!r}:
         import subprocess
@@ -84,6 +100,11 @@ def install(
     app_server: list[str] | None = None,
     hang: bool = False,
     helper_pidfile: pathlib.Path | None = None,
+    exec_fixture: pathlib.Path | None = None,
+    exec_sleep: float = 0.0,
+    exec_stderr: str = "",
+    exec_exit: int = 0,
+    exec_log: pathlib.Path | None = None,
 ) -> pathlib.Path:
     """Write the stub `codex` (and a `git` link, which host resolution shells out to)."""
     bindir.mkdir(parents=True, exist_ok=True)
@@ -96,6 +117,11 @@ def install(
             app_server=app_server,
             hang=hang,
             helper_pidfile=str(helper_pidfile) if helper_pidfile else None,
+            exec_fixture=str(exec_fixture) if exec_fixture else None,
+            exec_sleep=exec_sleep,
+            exec_stderr=exec_stderr,
+            exec_exit=exec_exit,
+            exec_log=str(exec_log) if exec_log else None,
             sleep=shutil.which("sleep", path=os.defpath) or "/bin/sleep",
         ),
         encoding="utf-8",

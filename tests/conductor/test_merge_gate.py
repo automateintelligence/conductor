@@ -264,6 +264,19 @@ def test_closes_verb_forms_pass(body):
     assert "closes-missing" not in _call({**_clean(), "body": body})["blockers"]
 
 
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("Closes #12", "12"),
+        ("adds the gate\n\nResolves #7 and fixes #9", "7"),
+        ("no closing keyword, see #5", None),
+        ("", None),
+    ],
+)
+def test_closes_issue_returns_the_first_closed_issue_number(body, expected):
+    assert merge_gate.closes_issue(body) == expected
+
+
 def test_zero_marker_comments_blocks_without_stale():
     out = _call({**_clean(), "comments": []})
     assert "reviews:0/2" in out["blockers"]
