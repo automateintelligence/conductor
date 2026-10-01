@@ -7,6 +7,12 @@ review text; posting it with the configured marker stays with the worker, so the
 provenance rules (``CONDUCTOR_REVIEW_AUTHOR``) are untouched. The record is derived data: a
 failure to write it is reported on stderr and never changes the review or the exit status.
 
+Only the record needs the run. The run is ``--run``'s, else the one this checkout belongs to
+(``resolve.run_for_worktree``); the reviewer is that run's ``reviewer_host``, else the opposite
+of the recorded run host (``.conductor/host``). When the run cannot be resolved or read (a lock
+timeout, a schema error, no run or several bound to this checkout) the review runs anyway with
+that fallback host and nothing is recorded: one ``usage-unrecorded reason=...`` line on stderr.
+
 The reviewer reads the change from a diff file this verb writes to a private temp directory
 (``<mkdtemp>/pr-<n>.diff``, always removed afterwards), so the Claude reviewer needs no shell at
 all. A TERM, HUP or INT while the reviewer runs (the worker's shell-tool limit, the fire
@@ -14,8 +20,8 @@ watchdog) kills the reviewer's process group before this verb exits: a review ne
 the call that launched it.
 
 Exit status: 0 review printed; 2 refused before any host was launched (stale checkout, oversized
-brief, ``gh``/``git`` missing, failing or not executable, reviewer host missing or not
-startable, unusable or unreadable run state); 3 the host ran and failed; 4 it timed out
+brief, bad timeout, ``gh``/``git`` missing, failing or not executable, reviewer host unresolved,
+missing or not startable); 3 the host ran and failed; 4 it timed out
 (``review-timeout``) or this verb was interrupted by a signal (``review-interrupted``); 64
 usage. Every refusal is one line on stderr, never a traceback.
 """
@@ -164,8 +170,23 @@ def _reason(exc: BaseException) -> str:
     return " ".join(f"{type(exc).__name__}: {exc}".split())[:200]
 
 
+def _find_run(
+    run_key: str | None, root: str
+) -> tuple[resolve.RunResolution | None, str]:
+    """The run to record on, or ``None`` and why not. Never raises: a run-state failure costs
+    the record, never the review."""
+    try:
+        resolve.recover_pending(resolve.state_root(root))
+        if run_key is not None:
+            return resolve.resolve(run_key=run_key, start=root), ""
+        return resolve.run_for_worktree(root), ""
+    except Exception as exc:  # noqa: BLE001 — lock timeout, schema error, no/several runs
+        return None, _reason(exc)
+
+
 def _record(
-    found: resolve.RunResolution,
+    found: resolve.RunResolution | None,
+    unresolved: str,
     *,
     reviewer: str,
     phase_id: str | None,
@@ -176,6 +197,9 @@ def _record(
     note: str | None,
 ) -> None:
     """Append the ``reviewer`` dispatch. Derived data: a failure is reported, never raised."""
+    if found is None:
+        print(f"usage-unrecorded reason={unresolved}", file=sys.stderr)
+        return
     try:
         entry = dispatches.make(
             host=reviewer,
@@ -197,16 +221,10 @@ def _review(args: argparse.Namespace) -> int:
         raise Refused(f"bad timeout {args.timeout!r}: must be a finite number > 0")
     top = _tool(["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd(), what="git")
     root = os.path.realpath(top)
+    found, unresolved = _find_run(args.run, root)
     try:
-        resolve.recover_pending(resolve.state_root(root))
-        found = resolve.resolve(run_key=args.run, start=root)
-    except (resolve.RunNotFound, resolve.RunAmbiguous) as exc:
-        raise Refused(str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 — lock timeout, schema error: refuse, never a traceback
-        raise Refused(f"run state unreadable: {_reason(exc)}") from exc
-    try:
-        reviewer = found.run.get("reviewer_host") or hostbase.opposite(
-            runhost.resolve(root)
+        reviewer = (found.run.get("reviewer_host") if found else None) or (
+            hostbase.opposite(runhost.resolve(root))
         )
         adapter = hostbase.load(reviewer)
     except Exception as exc:  # noqa: BLE001 — unknown/conflicting host: refuse, never a traceback
@@ -304,6 +322,7 @@ def _review(args: argparse.Namespace) -> int:
         if started is not None:
             _record(
                 found,
+                unresolved,
                 reviewer=reviewer,
                 phase_id=phase_id,
                 head_sha=head_sha,
@@ -325,6 +344,7 @@ def _review(args: argparse.Namespace) -> int:
         outcome = "ok"
     _record(
         found,
+        unresolved,
         reviewer=reviewer,
         phase_id=phase_id,
         head_sha=head_sha,

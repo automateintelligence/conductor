@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from conductor import dispatches, review_cmd, run_cmd
-from conductor.core import resolve, runstate
+from conductor.core import resolve, runstate, schema
 from conductor.hosts import bounded
 
 from . import codex_stub
@@ -596,25 +596,143 @@ def test_an_oserror_after_the_host_started_is_a_host_failure_not_a_refusal(
     assert proj.dispatches[-1]["outcome"] == "error"
 
 
+def _assert_reviewed_but_unrecorded(proj, capsys, *needles: str) -> None:
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "alpha"
+    assert len(proj.exec_calls) == 1  # codex: the opposite of the recorded run host
+    unrecorded = [
+        line for line in captured.err.splitlines() if "usage-unrecorded" in line
+    ]
+    assert len(unrecorded) == 1, captured.err
+    assert unrecorded[0].startswith("usage-unrecorded reason=")
+    for needle in needles:
+        assert needle in unrecorded[0], unrecorded[0]
+    assert "Traceback" not in captured.err
+
+
 @pytest.mark.parametrize(
     ("target", "exc"),
     [
         ("recover_pending", TimeoutError("state lock not acquired within 30s")),
-        ("resolve", ValueError("run.json schema 9 is newer than this conductor")),
+        (
+            "resolve",
+            schema.SchemaError("run.json schema 9 is newer than this conductor"),
+        ),
     ],
 )
-def test_review_exits_2_when_the_run_cannot_be_read(
+def test_review_runs_unrecorded_when_the_run_state_cannot_be_read(
     proj, capsys, monkeypatch, target, exc
 ):
+    """Only RECORDING needs run.json; the reviewer host comes from ``.conductor/host``. A
+    run-state failure must never cost the review."""
+
     def fail(*_args, **_kwargs):
         raise exc
 
     monkeypatch.setattr(resolve, target, fail)
-    assert proj.review() == 2
-    err = capsys.readouterr().err
-    assert type(exc).__name__ in err and str(exc) in err
-    assert "Traceback" not in err and len(err.strip().splitlines()) == 1
+    assert proj.review() == 0
+    _assert_reviewed_but_unrecorded(proj, capsys, type(exc).__name__, str(exc))
+    monkeypatch.undo()
+    assert proj.dispatches == []
+
+
+def _second_run(proj, git, capsys) -> str:
+    (proj.root / "docs" / "beta.md").write_text("# beta\n")
+    git(proj.root, "add", "-A")
+    git(proj.root, "commit", "-qm", "beta")
+    git(proj.root, "push", "-q", "origin", "HEAD")
+    proj.head = git(proj.root, "rev-parse", "HEAD").stdout.strip()
+    proj.set_pr()
+    assert run_cmd.main(["new", "docs/beta.md", "--project", str(proj.root)]) == 0
+    return capsys.readouterr().out.strip()
+
+
+def test_review_runs_unrecorded_when_the_run_is_ambiguous(proj, git, capsys):
+    beta = _second_run(proj, git, capsys)
+    assert proj.review() == 0
+    _assert_reviewed_but_unrecorded(proj, capsys, "RunNotFound")
+    assert proj.dispatches == []
+    beta_doc = runstate.load(proj.state_root, beta)
+    assert beta_doc is not None and beta_doc["dispatches"] == []
+
+
+def test_review_records_on_the_run_its_checkout_belongs_to_among_several(
+    proj, git, capsys
+):
+    beta = _second_run(proj, git, capsys)
+    runstate.update(
+        proj.state_root, beta, lambda doc: {**doc, "phase_worktree": str(proj.root)}
+    )
+    assert proj.review() == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "alpha"
+    assert "usage-unrecorded" not in captured.err
+    assert proj.dispatches == []
+    beta_doc = runstate.load(proj.state_root, beta)
+    assert beta_doc is not None
+    assert [d["role"] for d in beta_doc["dispatches"]] == ["reviewer"]
+
+
+def test_review_runs_unrecorded_for_an_unknown_run_key(proj, capsys):
+    assert proj.review("--run", "nope-0badf00d") == 0
+    _assert_reviewed_but_unrecorded(proj, capsys, "RunNotFound", "nope-0badf00d")
+    assert proj.dispatches == []
+
+
+def test_review_takes_the_recorded_run_host_when_the_run_cannot_be_read(
+    proj, capsys, monkeypatch
+):
+    (proj.root / ".conductor" / "host").write_text("codex\n", encoding="utf-8")
+    log = proj.claude()
+
+    def fail(*_args, **_kwargs):
+        raise TimeoutError("state lock not acquired within 30s")
+
+    monkeypatch.setattr(resolve, "recover_pending", fail)
+    assert proj.review() == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "alpha"
+    assert "usage-unrecorded reason=TimeoutError" in captured.err
+    assert len(log.read_text().splitlines()) == 1  # claude, the opposite of codex
     assert proj.exec_calls == []
+
+
+def test_review_interrupted_without_a_run_reports_it_unrecorded(
+    proj, capsys, monkeypatch
+):
+    def fail(*_args, **_kwargs):
+        raise TimeoutError("state lock not acquired within 30s")
+
+    monkeypatch.setattr(resolve, "recover_pending", fail)
+    pidfile = proj.tmp / "reviewer.pid"
+    exe = proj.bindir / "codex"
+    exe.write_text(
+        f"#!{shutil.which('python3')}\n"
+        "import os, time\n"
+        f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    exe.chmod(0o755)
+
+    def deliver():
+        deadline = time.monotonic() + 20
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if pidfile.exists():  # never signal the suite itself when no reviewer started
+            time.sleep(0.2)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    sender = threading.Thread(target=deliver, daemon=True)
+    sender.start()
+    rc = proj.review("--timeout", "60")
+    sender.join(timeout=5)
+    assert rc == 4
+    err = capsys.readouterr().err
+    assert "review-interrupted (SIGTERM)" in err
+    assert "usage-unrecorded reason=TimeoutError" in err
+    monkeypatch.undo()
+    assert proj.dispatches == []
 
 
 def test_review_exits_2_when_a_helper_cannot_be_executed(proj, capsys, monkeypatch):
