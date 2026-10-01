@@ -841,6 +841,25 @@ def installed_plugins(
 class CodexAdapter:
     id: str = HOST_ID
 
+    def executable(self) -> str:
+        return base.resolve_executable(self.id)
+
+    def reviewer_argv(self, prompt: str, *, project_root: str) -> list[str]:
+        """A read-only Codex reviewer: ``exec --json`` under a read-only sandbox (ground truth
+        2026-09-30, section 5). ``--cd`` names the workspace explicitly and the prompt is the
+        trailing positional."""
+        base.reject_flaglike_prompt(prompt)
+        return [
+            self.executable(),
+            "exec",
+            "--json",
+            "--sandbox",
+            "read-only",
+            "--cd",
+            project_root,
+            prompt,
+        ]
+
     # ------------------------------------------------------------------ generated cron driver
     #
     # Shell fragments for the generated Tier-B driver. They may reference what the driver

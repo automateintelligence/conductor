@@ -16,6 +16,7 @@ Sharing *argv construction* is not.
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -206,15 +207,7 @@ class HostAdapter(Protocol):
     def worker_env(
         self, *, state_root: str, run_key: str, project_root: str
     ) -> dict[str, str]: ...
-    def reviewer_argv(
-        self,
-        *,
-        pr: int,
-        head_sha: str,
-        run_key: str,
-        project_root: str,
-        posture: str = "supervised",
-    ) -> list[str]: ...
+    def reviewer_argv(self, prompt: str, *, project_root: str) -> list[str]: ...
     def permission_profile(self, posture: str = "supervised") -> dict: ...
     def validate_permissions(self, profile: dict) -> None: ...
     def process_identity(self, pid: int) -> str: ...
@@ -318,6 +311,17 @@ def load(host_id: str) -> HostAdapter:
 
         return CodexAdapter()  # type: ignore[return-value]  # conforming from Task 10
     raise UnknownHost(f"unknown host {host_id!r}; supported hosts are {HOST_IDS}")
+
+
+def resolve_executable(host_id: str) -> str:
+    """``shutil.which(host_id)`` or ``HostUnavailable``. Validation, not argv."""
+    exe = shutil.which(host_id)
+    if exe is None:
+        raise HostUnavailable(
+            f"`{host_id}` is not on PATH. Under cron, extend PATH in "
+            "<project>/.conductor/resume-env.sh."
+        )
+    return exe
 
 
 def reject_flaglike_prompt(prompt: str) -> str:

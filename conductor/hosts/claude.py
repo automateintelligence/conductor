@@ -56,6 +56,31 @@ SESSION_ID_ENV = "CLAUDE_CODE_SESSION_ID"
 class ClaudeAdapter:
     id: str = "claude"
 
+    def executable(self) -> str:
+        return base.resolve_executable(self.id)
+
+    def reviewer_argv(self, prompt: str, *, project_root: str) -> list[str]:
+        """A read-only, time-boundable Claude reviewer (ground truth 2026-09-30, section 5).
+
+        ``dontAsk`` denies anything not allowlisted instead of prompting, so a headless review
+        cannot block on a permission dialog. The allowlist is a single ``--allowedTools=...``
+        token because ``--allowedTools`` is variadic and would otherwise swallow the arguments
+        after it. No Write/Edit, and never ``--dangerously-skip-permissions``. The reviewer's
+        working directory is the caller's ``cwd``; ``project_root`` is unused here because
+        Claude has no workspace flag, and is accepted to keep the member host-neutral.
+        """
+        base.reject_flaglike_prompt(prompt)
+        return [
+            self.executable(),
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--permission-mode",
+            "dontAsk",
+            "--allowedTools=Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)",
+        ]
+
     # ------------------------------------------------------------------ generated cron driver
     #
     # The fragments below are shell, not argv, because the thing that consumes them is a
