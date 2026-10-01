@@ -3,9 +3,9 @@
 The cron driver calls this once after each worker fire, passing the byte offset the log had
 before the fire started, so only that fire's slice is parsed. The result is one ``worker``
 dispatch record appended to the run the fire's worktree belongs to (``resolve.run_for_worktree``:
-the one active run, else the run bound to that worktree — two active runs in one repository, or
-a run the fire itself moved to awaiting-team-merge, still get the record; sustained-context
-spec §3). Derived data only: nothing
+the run bound to that worktree, else the one active run — so two active runs in one
+repository, or a run the fire itself moved to awaiting-team-merge, get the record on the right
+run; sustained-context spec §3). Derived data only: nothing
 that gates a merge reads it, so any failure here is reported and exits 1 for the driver to log
 and ignore.
 

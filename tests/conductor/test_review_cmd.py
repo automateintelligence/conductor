@@ -650,7 +650,7 @@ def _second_run(proj, git, capsys) -> str:
 def test_review_runs_unrecorded_when_the_run_is_ambiguous(proj, git, capsys):
     beta = _second_run(proj, git, capsys)
     assert proj.review() == 0
-    _assert_reviewed_but_unrecorded(proj, capsys, "RunNotFound")
+    _assert_reviewed_but_unrecorded(proj, capsys, "RunAmbiguous")
     assert proj.dispatches == []
     beta_doc = runstate.load(proj.state_root, beta)
     assert beta_doc is not None and beta_doc["dispatches"] == []
@@ -671,6 +671,27 @@ def test_review_records_on_the_run_its_checkout_belongs_to_among_several(
     beta_doc = runstate.load(proj.state_root, beta)
     assert beta_doc is not None
     assert [d["role"] for d in beta_doc["dispatches"]] == ["reviewer"]
+
+
+def test_review_records_on_its_awaiting_merge_run_not_the_sole_active_one(
+    proj, git, capsys
+):
+    """This checkout is run A's phase worktree and A awaits the team's merge; run B is the only
+    active run. The reviewer dispatch belongs on A."""
+    runstate.update(
+        proj.state_root,
+        proj.run_key,
+        lambda doc: {**doc, "phase_worktree": str(proj.root)},
+    )
+    runstate.set_status(proj.state_root, proj.run_key, "awaiting-team-merge")
+    beta = _second_run(proj, git, capsys)
+    assert proj.review() == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "alpha"
+    assert "usage-unrecorded" not in captured.err
+    assert [d["role"] for d in proj.dispatches] == ["reviewer"]
+    beta_doc = runstate.load(proj.state_root, beta)
+    assert beta_doc is not None and beta_doc["dispatches"] == []
 
 
 def test_review_runs_unrecorded_for_an_unknown_run_key(proj, capsys):

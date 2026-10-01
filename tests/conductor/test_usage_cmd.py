@@ -341,6 +341,26 @@ def test_ingest_records_a_run_its_own_fire_moved_to_awaiting_team_merge(
     assert len(proj.run["dispatches"]) == 1
 
 
+def test_ingest_from_a_run_awaiting_merge_never_lands_on_the_sole_active_run(
+    proj, git, capsys
+):
+    """Run A's final fire moved A to awaiting-team-merge; run B is the only active run. A's
+    tokens belong on A, not on whichever run a bare resolve would pick."""
+    wt = _run_worktree(proj, git)
+    runstate.set_status(proj.state_root, proj.run_key, "awaiting-team-merge")
+    (proj.root / "docs" / "beta.md").write_text("# beta\n")
+    git(proj.root, "add", "-A")
+    git(proj.root, "commit", "-qm", "beta")
+    assert run_cmd.main(["new", "docs/beta.md", "--project", str(proj.root)]) == 0
+    beta_key = capsys.readouterr().out.strip()
+    log = proj.root / ".conductor" / "resume-autodev.log"
+    log.write_text(CLAUDE_FIXTURE_TEXT + "\n")
+    assert _ingest_from(wt, log) == 0
+    assert len(proj.run["dispatches"]) == 1
+    beta = runstate.load(proj.state_root, beta_key)
+    assert beta is not None and beta["dispatches"] == []
+
+
 def test_ingest_collapses_a_three_dot_range_to_its_head(proj):
     (proj.root / ".conductor" / "handoff.md").write_text(
         "**Active:** phase issue #7 (in-progress)\n"

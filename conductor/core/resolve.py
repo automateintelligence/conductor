@@ -279,14 +279,11 @@ def run_for_worktree(worktree: str) -> RunResolution:
     """The run ``worktree`` belongs to, for a caller that knows where it ran but carries no
     run key (the driver's post-fire usage ingest, ``conductor review``).
 
-    The one active run when there is exactly one. Otherwise — several active runs, or none
-    because this fire moved its own run to awaiting-team-merge — the unique run in
-    ``BINDABLE_STATUSES`` that ``worktree_unbound`` binds ``worktree`` to. Zero such runs raise
-    ``RunNotFound``, several ``RunAmbiguous``. A pure read, like ``resolve``."""
-    try:
-        return resolve(start=worktree)
-    except (RunNotFound, RunAmbiguous) as exc:
-        unresolved = " ".join(str(exc).split())
+    The BINDING decides first: the unique run in ``BINDABLE_STATUSES`` that ``worktree_unbound``
+    binds ``worktree`` to — so a run whose final fire moved it to awaiting-team-merge keeps its
+    own worktree even while another run is the only active one. Several bound runs raise
+    ``RunAmbiguous``. Only when no run is bound does the bare resolution apply (the one active
+    run, else its ``RunNotFound`` / ``RunAmbiguous``). A pure read, like ``resolve``."""
     root = repo_root(worktree)
     sroot = os.path.join(root, ".conductor")
     doc = registry.load(sroot)
@@ -297,17 +294,13 @@ def run_for_worktree(worktree: str) -> RunResolution:
             continue
         if worktree_unbound(root, worktree, run) is None:
             bound.append((key, run))
-    where = os.path.realpath(worktree)
     if len(bound) == 1:
         key, run = bound[0]
         return RunResolution(sroot, root, key, runstate.run_dir(sroot, key), run)
-    if not bound:
-        raise RunNotFound(
-            f"no {', '.join(BINDABLE_STATUSES)} run under {sroot} is bound to the worktree "
-            f"{where}; no write occurred. ({unresolved})"
+    if bound:
+        keys = ", ".join(key for key, _ in bound)
+        raise RunAmbiguous(
+            f"{len(bound)} runs under {sroot} are bound to the worktree "
+            f"{os.path.realpath(worktree)} ({keys}); no write occurred."
         )
-    keys = ", ".join(key for key, _ in bound)
-    raise RunAmbiguous(
-        f"{len(bound)} runs under {sroot} are bound to the worktree {where} ({keys}); "
-        "no write occurred."
-    )
+    return resolve(start=worktree)

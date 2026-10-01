@@ -377,16 +377,42 @@ def test_run_for_worktree_ignores_a_terminal_run_bound_to_the_worktree(
         resolve.run_for_worktree(wt)
 
 
-def test_run_for_worktree_with_no_bound_run_among_several_is_not_found(
+def test_run_for_worktree_with_no_bound_run_among_several_is_ambiguous(
+    project, git, tmp_path
+):
+    """Nothing binds the worktree, so the bare resolution decides — and two active runs are
+    ambiguous."""
+    root, state_root = project
+    alpha = _make_run(state_root, "docs/specs/alpha.md")
+    beta = _make_run(state_root, "docs/specs/beta.md")
+    wt = _checkout(git, root, tmp_path, "wt", "unrelated")
+    with pytest.raises(resolve.RunAmbiguous) as excinfo:
+        resolve.run_for_worktree(wt)
+    assert alpha in str(excinfo.value) and beta in str(excinfo.value)
+
+
+def test_run_for_worktree_prefers_the_bound_run_over_the_sole_active_one(
+    project, git, tmp_path
+):
+    """Run A's final fire moved A to awaiting-team-merge while B is the only active run: A's
+    worktree still means A, never B."""
+    root, state_root = project
+    alpha = _make_run(state_root, "docs/specs/alpha.md", status="awaiting-team-merge")
+    beta = _make_run(state_root, "docs/specs/beta.md")
+    wt = _checkout(git, root, tmp_path, "wt-a", f"conductor/run-{alpha}")
+    assert resolve.run_for_worktree(wt).run_key == alpha
+    assert (
+        resolve.run_for_worktree(root).run_key == beta
+    )  # unbound: the sole active run
+
+
+def test_run_for_worktree_with_an_unbound_checkout_takes_the_one_active_run(
     project, git, tmp_path
 ):
     root, state_root = project
-    _make_run(state_root, "docs/specs/alpha.md")
-    _make_run(state_root, "docs/specs/beta.md")
+    key = _make_run(state_root, "docs/specs/alpha.md")
     wt = _checkout(git, root, tmp_path, "wt", "unrelated")
-    with pytest.raises(resolve.RunNotFound) as excinfo:
-        resolve.run_for_worktree(wt)
-    assert os.path.realpath(wt) in str(excinfo.value)
+    assert resolve.run_for_worktree(wt).run_key == key
 
 
 def test_run_for_worktree_with_two_bound_runs_is_ambiguous(project, git, tmp_path):
