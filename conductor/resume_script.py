@@ -800,10 +800,20 @@ set +m
 printf '%s fire-end rc=%s\\n' "$(ts)" "$rc" >> "$LOG"
 # USAGE ACCOUNTING (sustained-context spec §3): record this fire's tokens from its own slice of
 # the log. Best-effort and bounded: it can never change the fire's exit status. `9>&-` for the
-# same reason as every other child above: nothing it leaves behind may hold the lock.
-if command -v timeout >/dev/null 2>&1; then
-    timeout 60 "$CONDUCTOR" usage ingest --project "$PROJECT" --host {h.id} --log "$LOG" \\
-        --offset "$FIRE_LOG0" --wall-s "$(( SECONDS - FIRE_T0 ))" --rc "$rc" >> "$LOG" 2>&1 9>&- || true
+# same reason as every other child above: nothing it leaves behind may hold the lock. The bound
+# is resolved the way the watchdog's run lookup resolves it, and an ingest that could not run or
+# did not finish says so in the log; a missing record is never silent.
+usage_bound="$(command -v timeout || command -v gtimeout || true)"
+if [ -n "$usage_bound" ]; then
+    usage_rc=0
+    "$usage_bound" -k {RUN_LOOKUP_KILL_GRACE_S} 60 "$CONDUCTOR" usage ingest --project "$PROJECT" --host {h.id} \\
+        --log "$LOG" --offset "$FIRE_LOG0" --wall-s "$(( SECONDS - FIRE_T0 ))" --rc "$rc" \\
+        >> "$LOG" 2>&1 9>&- || usage_rc=$?
+    case "$usage_rc" in
+        124|137) printf '%s usage-unrecorded reason=ingest-timeout\\n' "$(ts)" >> "$LOG" ;;
+    esac
+else
+    printf '%s usage-unrecorded reason=no-timeout-binary\\n' "$(ts)" >> "$LOG"
 fi
 exit "$rc"
 """

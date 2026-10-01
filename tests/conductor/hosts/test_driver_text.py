@@ -16,6 +16,7 @@ from __future__ import annotations
 import inspect
 import os
 import pathlib
+import subprocess
 
 import pytest
 
@@ -121,15 +122,71 @@ def test_fire_command_emits_machine_readable_usage(host_id, flag):
 
 
 @pytest.mark.parametrize("host_id", HOSTS)
-def test_driver_ingests_usage_after_fire_end_and_preserves_rc(host_id):
+def test_driver_ingests_usage_after_fire_end_bounded_and_never_fatal(host_id):
     text = resume_script.render("/p/proj", "/p/wt", host_id)
     end = text.rindex("fire-end rc=")
     ingest = text.index("usage ingest")
     exit_line = text.rindex('exit "$rc"')
     assert end < ingest < exit_line
     assert f"--host {host_id}" in text[ingest:exit_line]
-    assert "|| true" in text[ingest:exit_line]
-    assert "timeout 60" in text[ingest - 200 : ingest]
+    assert "9>&- ||" in text[ingest:exit_line]
+    # The same bound resolution the watchdog's run lookup uses: GNU `timeout`, else the
+    # coreutils `gtimeout` a macOS machine has.
+    assert 'usage_bound="$(command -v timeout || command -v gtimeout || true)"' in text
+    assert '"$usage_bound" -k 5 60 "$CONDUCTOR" usage ingest' in text
+
+
+def _run_usage_tail(tmp_path, host_id, timeout_stub):
+    """Execute ONLY the rendered usage-accounting tail, with a PATH holding nothing but the
+    given `timeout` stub (or nothing at all), and return (exit status, log text)."""
+    text = resume_script.render("/p/proj", "/p/wt", host_id)
+    tail = text[text.index("# USAGE ACCOUNTING") :]
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    if timeout_stub is not None:
+        stub = bindir / "timeout"
+        stub.write_text(timeout_stub)
+        os.chmod(stub, 0o755)
+    log = tmp_path / "log"
+    log.write_text("")
+    prelude = (
+        f"PATH={bindir}\n"
+        "ts() { printf T; }\n"
+        f"LOG={log}\nPROJECT=/p/proj\nCONDUCTOR=/nonexistent\n"
+        "FIRE_LOG0=0\nFIRE_T0=$SECONDS\nrc=3\n"
+    )
+    proc = subprocess.run(
+        ["/bin/bash", "-u", "-c", prelude + tail],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return proc.returncode, log.read_text()
+
+
+@pytest.mark.parametrize("host_id", HOSTS)
+@pytest.mark.parametrize("status", [124, 137])
+def test_a_timed_out_ingest_is_logged_and_keeps_the_fire_rc(tmp_path, host_id, status):
+    rc, log = _run_usage_tail(tmp_path, host_id, f"#!/bin/sh\nexit {status}\n")
+    assert rc == 3
+    assert log == "T usage-unrecorded reason=ingest-timeout\n"
+
+
+@pytest.mark.parametrize("host_id", HOSTS)
+def test_no_timeout_binary_is_logged_and_keeps_the_fire_rc(tmp_path, host_id):
+    rc, log = _run_usage_tail(tmp_path, host_id, None)
+    assert rc == 3
+    assert log == "T usage-unrecorded reason=no-timeout-binary\n"
+
+
+@pytest.mark.parametrize("host_id", HOSTS)
+def test_a_failed_ingest_that_did_not_time_out_adds_no_line_and_keeps_the_fire_rc(
+    tmp_path, host_id
+):
+    """`usage ingest` logs its own `usage-unrecorded` on exit 1; the driver adds nothing."""
+    rc, log = _run_usage_tail(tmp_path, host_id, "#!/bin/sh\nexit 1\n")
+    assert rc == 3
+    assert log == ""
 
 
 # --- Codex's fragments spawn codex, and say so ----------------------------------------------
