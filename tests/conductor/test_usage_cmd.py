@@ -14,7 +14,15 @@ from pathlib import Path
 import pytest
 
 from conductor import run_cmd, usage_cmd
-from conductor.core import runstate
+from conductor.core import (
+    names,
+    registry,
+    resolve,
+    runkey,
+    runstate,
+    schema,
+    transaction,
+)
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 CLAUDE_FIXTURE_TEXT = (
@@ -216,3 +224,105 @@ def test_ingest_with_two_active_runs_reports_unrecorded_and_exits_1(proj, git, c
     out = capsys.readouterr().out
     assert "usage-unrecorded reason=" in out
     assert "fire-end" not in out and "driver-unresolved" not in out
+
+
+def test_ingest_collapses_a_three_dot_range_to_its_head(proj):
+    (proj.root / ".conductor" / "handoff.md").write_text(
+        "**Active:** phase issue #7 (in-progress)\n"
+        "**Last unit:** aaa111...ccc333 — did things\n"
+    )
+    log = proj.root / ".conductor" / "resume-autodev.log"
+    log.write_text(CLAUDE_FIXTURE_TEXT + "\n")
+    assert _ingest(proj, log, wall_s="60") == 0
+    d = proj.run["dispatches"][-1]
+    assert d["phase_id"] == "7" and d["head_sha"] == "ccc333"
+
+
+def test_unrecorded_reason_names_the_error_on_one_line_without_driver_markers(
+    proj, monkeypatch, capsys
+):
+    def boom(*_a, **_k):
+        raise RuntimeError("bad\nfire-end and driver-unresolved " + "x" * 500)
+
+    monkeypatch.setattr(usage_cmd.dispatches, "append", boom)
+    log = proj.root / ".conductor" / "resume-autodev.log"
+    log.write_text(CLAUDE_FIXTURE_TEXT + "\n")
+    assert _ingest(proj, log) == 1
+    out = capsys.readouterr().out
+    assert len(out.splitlines()) == 1
+    assert (
+        "usage-unrecorded reason=RuntimeError: bad fire_end and driver_unresolved "
+        in out
+    )
+    assert "fire-end" not in out and "driver-unresolved" not in out
+    reason = out.split("reason=", 1)[1].strip()
+    assert len(reason) <= usage_cmd._REASON_MAX
+
+
+def test_ingest_recovers_a_committed_journal_before_resolving_the_run(
+    tmp_path, git_env, git, monkeypatch, capsys
+):
+    """A crash between ``transaction.commit`` and ``transaction.apply`` leaves the run invisible
+    to ``resolve``. Ingest is a mutating entry point, so it must recover first and then record
+    against the run that journal registered."""
+    root = tmp_path / "repo"
+    (root / "docs").mkdir(parents=True)
+    (root / "docs" / "alpha.md").write_text("# alpha\n")
+    _init_repo(root, git_env)
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "init")
+    monkeypatch.setenv("CONDUCTOR_CONFIG_HOME", str(tmp_path / "conductor-config"))
+    for name in ("CONDUCTOR_HOME", "CONDUCTOR_GATE_DIR", "CONDUCTOR_GATE_SLUG"):
+        monkeypatch.delenv(name, raising=False)
+
+    state_root = resolve.state_root(str(root))
+    spec = "docs/alpha.md"
+    key = runkey.run_key(spec)
+    derived = names.derived_names(key)
+    project_doc = registry.register(
+        schema.new_project_doc(
+            workstation_id="ws-test",
+            repo_identity=resolve.repo_identity(str(root)),
+        ),
+        spec=spec,
+        run_key=key,
+        generation=1,
+    )
+    run_doc = schema.new_run_doc(
+        run_key=key,
+        generation=1,
+        spec_path=spec,
+        workstation_id="ws-test",
+        integration_branch=derived.integration_branch,
+        gate_dir=derived.gate_dir,
+        spec_digest=run_cmd.spec_digest(str(root), spec),
+        now="2026-08-10T00:00:00+00:00",
+    )
+    transaction.prepare(
+        state_root,
+        "crashed-registration",
+        [
+            {
+                "path": registry.registry_path(state_root),
+                "before": None,
+                "after": project_doc,
+            },
+            {
+                "path": runstate.run_path(state_root, key),
+                "before": None,
+                "after": run_doc,
+            },
+        ],
+    )
+    transaction.commit(state_root, "crashed-registration")
+    assert runstate.load(state_root, key) is None
+    assert transaction.pending(state_root) == ["crashed-registration"]
+
+    log = root / "worker.log"
+    log.write_text(CLAUDE_FIXTURE_TEXT + "\n")
+    p = Proj(root)
+    p.run_key = key
+    assert _ingest(p, log) == 0
+    assert "usage-recorded" in capsys.readouterr().out
+    assert transaction.pending(state_root) == []
+    assert len(p.run["dispatches"]) == 1

@@ -29,7 +29,7 @@ EXIT_USAGE = 64
 
 _TIMEOUT_RCS = (124, 137)
 _PHASE_RE = re.compile(r"phase issue #(\d+)")
-_HEAD_RE = re.compile(r"\*\*Last unit:\*\*\s*\S+?\.\.(\S+)")
+_HEAD_RE = re.compile(r"\*\*Last unit:\*\*\s*\S+?\.{2,3}(\S+)")
 
 
 def _ts() -> str:
@@ -63,9 +63,17 @@ def _phase_and_head(project: str, wall_s: float) -> tuple[str | None, str | None
     return (phase.group(1) if phase else None, head.group(1) if head else None)
 
 
+_REASON_MAX = 200
+_DRIVER_MARKERS = (("fire-end", "fire_end"), ("driver-unresolved", "driver_unresolved"))
+
+
 def _reason(exc: BaseException) -> str:
-    """One short token: the exception class, never free text from the log or the repo."""
-    return type(exc).__name__
+    """``<ClassName>: <message>`` on one line, truncated, with the driver's own markers defused
+    so ``conductor driver status`` cannot read an unrecorded line as a fire boundary."""
+    text = " ".join(f"{type(exc).__name__}: {exc}".split())[:_REASON_MAX]
+    for marker, safe in _DRIVER_MARKERS:
+        text = text.replace(marker, safe)
+    return text
 
 
 def _ingest(args: argparse.Namespace) -> int:
@@ -83,6 +91,7 @@ def _ingest(args: argparse.Namespace) -> int:
             outcome=_outcome(args.rc),
             note="no-usage-in-output" if usage.input_tokens is None else None,
         )
+        resolve.recover_pending(resolve.state_root(args.project))
         found = resolve.resolve(start=args.project)
         dispatches.append(found.state_root, found.run_key, entry)
     except Exception as exc:  # noqa: BLE001 — derived data must never fail the fire
