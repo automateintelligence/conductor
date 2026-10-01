@@ -635,6 +635,88 @@ def test_adr_precondition_lives_in_autodevs_pre_claim_step():
     assert "build within the decisions" in execute
 
 
+def _recipe_step(text: str, start: str, end: str) -> str:
+    """The nested per-phase recipe step from `start` to `end`, whitespace-normalized."""
+    return re.sub(r"\s+", " ", text[text.index(start) : text.index(end)])
+
+
+def test_autodev_opposite_host_review_goes_through_conductor_review():
+    raw = open(os.path.join(ROOT, "skills/autodev/SKILL.md"), encoding="utf-8").read()
+    step5 = _recipe_step(
+        raw, "5. **Opposite-host review.**", "6. `receiving-code-review`"
+    )
+    assert "conductor review <pr> --brief" in step5
+    assert "Usage-limit fallback" in step5  # the fallback rules survive unchanged
+    assert "CONDUCTOR_REVIEW_AUTHOR" in step5
+    # the brief lives outside the worktree so step 0 never commits it as reclaimed work
+    assert "OUTSIDE the worktree" in step5
+
+
+def _exit_clause(step5: str, code: int) -> str:
+    """The text of one exit-code bullet: from its marker to the next bullet or the fallback."""
+    start = step5.index(f"**exit {code}**")
+    ends = [
+        step5.index(marker, start + 1)
+        for marker in ("- **exit ", "**Usage-limit fallback")
+        if marker in step5[start + 1 :]
+    ]
+    return step5[start : min(ends)]
+
+
+def test_each_conductor_review_exit_code_is_tied_to_its_action():
+    raw = open(os.path.join(ROOT, "skills/autodev/SKILL.md"), encoding="utf-8").read()
+    step5 = _recipe_step(
+        raw, "5. **Opposite-host review.**", "6. `receiving-code-review`"
+    )
+    two, three, four = (_exit_clause(step5, n) for n in (2, 3, 4))
+    # exit 2: fixable preconditions are fixed and re-run; an unresolved host falls back
+    assert "checkout-stale" in two and "push, or check out the PR head" in two
+    assert "brief-too-large" in two and "shorten the brief" in two
+    assert "not on PATH or unresolved" in two
+    assert "same-host `code-review` fallback" in two
+    assert "reviewer unavailable" in two
+    # exit 3: the existing usage-limit / transient rules apply unchanged
+    assert "usage-limit / transient-retry rules" in three
+    # exit 4: one retry, then the fallback with its own reason
+    assert "retry once" in four
+    assert "same-host `code-review` fallback" in four and "`timeout`" in four
+    # the fallback's label and debt body name the actual reason, not only a usage limit
+    assert "UNAVAILABLE (<reason>)" in step5
+    assert "UNAVAILABLE (usage limit)" not in step5
+    assert "reviewer unavailable" in step5.split("Usage-limit fallback", 1)[1]
+
+
+def test_autodev_runs_conductor_review_in_the_foreground_under_a_long_enough_bound():
+    """`conductor review` defaults to 540 s; Claude's Bash tool defaults to 2 min. A shell call
+    killed early kills the reviewer with it, so the worker must give the call room."""
+    raw = open(os.path.join(ROOT, "skills/autodev/SKILL.md"), encoding="utf-8").read()
+    step5 = _recipe_step(
+        raw, "5. **Opposite-host review.**", "6. `receiving-code-review`"
+    )
+    assert "540 s by default" in step5
+    assert "a timeout of at least 600 seconds" in step5
+    assert "`timeout: 600000`" in step5
+    assert "never background it" in step5
+    assert "review-interrupted" in _exit_clause(step5, 4)
+
+
+def test_autodev_final_state_re_review_reruns_conductor_review():
+    raw = open(os.path.join(ROOT, "skills/autodev/SKILL.md"), encoding="utf-8").read()
+    step6 = _recipe_step(
+        raw, "6. `receiving-code-review`", "7. **merge INTO THE RUN BRANCH"
+    )
+    assert "re-run `conductor review`" in step6
+    assert "opposite host re-reviews" not in step6
+
+
+def test_start_describes_the_fire_commands_with_json_output():
+    raw = open(os.path.join(ROOT, "skills/start/SKILL.md"), encoding="utf-8").read()
+    text = re.sub(r"\s+", " ", raw)
+    assert '`claude -p "/conductor:autodev" --output-format json <flags>`' in text
+    assert "`codex exec --json --cd <run-worktree> <flags> " in text
+    assert "token accounting" in text
+
+
 @pytest.mark.parametrize("path", sorted(_FORBIDDEN))
 def test_no_skill_still_carries_a_pre_a1_host_specific_form(path):
     raw = open(os.path.join(ROOT, path), encoding="utf-8").read().lower()

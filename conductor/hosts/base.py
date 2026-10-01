@@ -16,6 +16,7 @@ Sharing *argv construction* is not.
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -152,6 +153,28 @@ class DispatchResult:
     duration_s: float
 
 
+@dataclass(frozen=True)
+class Usage:
+    """Token usage and outcome of one host invocation, parsed from its machine-readable output.
+
+    ``None`` means the host did not report the figure; it is never coerced to 0, so a missing
+    number cannot be mistaken for a free call.
+    """
+
+    input_tokens: int | None  # every prompt token, cached ones included
+    cached_input_tokens: int | None  # the part served from cache
+    # tokens written to cache (billed above base on Claude)
+    cache_write_tokens: int | None
+    output_tokens: int | None
+    session_id: str | None
+    result_text: str | None
+    is_error: bool  # True when no result was found or the host said so
+
+    @classmethod
+    def unknown(cls) -> Usage:
+        return cls(None, None, None, None, None, None, True)
+
+
 class HostAdapter(Protocol):
     """Everything that genuinely differs between Claude Code and Codex.
 
@@ -185,13 +208,7 @@ class HostAdapter(Protocol):
         self, *, state_root: str, run_key: str, project_root: str
     ) -> dict[str, str]: ...
     def reviewer_argv(
-        self,
-        *,
-        pr: int,
-        head_sha: str,
-        run_key: str,
-        project_root: str,
-        posture: str = "supervised",
+        self, prompt: str, *, project_root: str, context_dir: str
     ) -> list[str]: ...
     def permission_profile(self, posture: str = "supervised") -> dict: ...
     def validate_permissions(self, profile: dict) -> None: ...
@@ -242,10 +259,11 @@ class HostAdapter(Protocol):
         result_path: str | None = None,
         posture: str = "scoped",
     ) -> DispatchResult: ...
+    def usage_from_output(self, text: str) -> Usage: ...
 
     # --- the generated cron driver (A1) ----------------------------------------------------
     #
-    # The nineteen members above launch a host from Python. The Tier-B driver does not: it is
+    # The twenty members above launch a host from Python. The Tier-B driver does not: it is
     # a bash script cron fires, so what it needs from an adapter is SHELL TEXT plus the two
     # variable names that text uses. Those cannot be expressed as argv, which is why they are
     # their own group rather than a reinterpretation of ``worker_argv``.
@@ -295,6 +313,17 @@ def load(host_id: str) -> HostAdapter:
 
         return CodexAdapter()  # type: ignore[return-value]  # conforming from Task 10
     raise UnknownHost(f"unknown host {host_id!r}; supported hosts are {HOST_IDS}")
+
+
+def resolve_executable(host_id: str) -> str:
+    """``shutil.which(host_id)`` or ``HostUnavailable``. Validation, not argv."""
+    exe = shutil.which(host_id)
+    if exe is None:
+        raise HostUnavailable(
+            f"`{host_id}` is not on PATH. Under cron, extend PATH in "
+            "<project>/.conductor/resume-env.sh."
+        )
+    return exe
 
 
 def reject_flaglike_prompt(prompt: str) -> str:

@@ -61,7 +61,7 @@ import shlex
 import subprocess
 import sys
 
-from conductor import branches, finalpr, remote as remote_mod, resume_script
+from conductor import branches, dispatches, finalpr, remote as remote_mod, resume_script
 from conductor.core import (
     locks,
     ownership,
@@ -333,6 +333,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         # READ, never recovered: an unfinished journal is a fact about the run, and completing
         # it here would make the read-only verb the one that mutates state.
         "pending_transactions": transaction.pending_states(resolution.state_root),
+        "usage": dispatches.phase_totals(run.get("dispatches") or []),
     }
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
@@ -380,7 +381,39 @@ def cmd_status(args: argparse.Namespace) -> int:
             "reverses it; status deliberately does not.",
             file=sys.stderr,
         )
+    _print_usage(report["usage"])
     return EXIT_OK
+
+
+_USAGE_ROLES = ("worker", "reviewer")
+
+
+def _print_usage(usage: dict[str, dict[str, dict]]) -> None:
+    if not usage:
+        print("usage: none recorded")
+        return
+    print("usage (tokens: input / cached / cache-write / output; wall s):")
+    phases = [k for k in usage if k != dispatches.UNATTRIBUTED]
+    if dispatches.UNATTRIBUTED in usage:
+        phases.append(dispatches.UNATTRIBUTED)
+    for phase in phases:
+        label = "unattributed" if phase == dispatches.UNATTRIBUTED else f"phase {phase}"
+        roles = [r for r in _USAGE_ROLES if r in usage[phase]]
+        roles += [r for r in usage[phase] if r not in _USAGE_ROLES]
+        for role in roles:
+            row = usage[phase][role]
+            tokens = (
+                f"{row['input_tokens']} / {row['cached_input_tokens']} / "
+                f"{row['cache_write_tokens']} / {row['output_tokens']}"
+            )
+            flag = (
+                ""
+                if row["complete"]
+                else "   INCOMPLETE (a dispatch reported no usage)"
+            )
+            print(
+                f"  {label:<12}  {role:<9}  {row['dispatches']:>3}   {tokens}   {row['wall_s']:.1f}{flag}"
+            )
 
 
 # --- resume -------------------------------------------------------------------------------
@@ -499,8 +532,9 @@ def _driver_unbound(repo_root: str, script: str, run: dict) -> str | None:
     script it launches drives whichever worktree it was installed for — so a heartbeat fired for
     run A would launch run B's worker under A's ownership. Launching is allowed only when the
     script's binding is provably this run's: the worktree ``run.json`` records for it, or a
-    checkout of this run's integration or phase branch. Anything else, including a binding this
-    build cannot read, launches nothing."""
+    checkout of this run's integration or phase branch (``resolve.worktree_unbound``, the rule
+    ``conductor usage ingest`` and ``conductor review`` also attribute by). Anything else,
+    including a binding this build cannot read, launches nothing."""
     key = run["run_key"]
     reinstall = f"  {_driver_install_hint(run)}"
     worktree = resume_script.installed_worktree(script)
@@ -510,54 +544,26 @@ def _driver_unbound(repo_root: str, script: str, run: dict) -> str | None:
             "read, so which run it would drive is unknown; no fire was launched and no write "
             f"occurred. Reinstall it for this run:\n{reinstall}"
         )
-    real = os.path.realpath(worktree)
-    recorded = {
-        os.path.realpath(path)
-        for path in (run.get("integration_worktree"), run.get("phase_worktree"))
-        if isinstance(path, str) and path
-    }
-    if real in recorded:
+    unbound = resolve.worktree_unbound(repo_root, worktree, run)
+    if unbound is None:
         return None
+    if unbound.foreign:
+        return (
+            f"run {key!r}: the durable driver {script} fires in {worktree}, which "
+            f"{unbound.detail}, not this project ({repo_root}); no fire was launched and no "
+            f"write occurred. Reinstall the driver for this run:\n{reinstall}"
+        )
     branches_of_run = [
         name
         for name in (run.get("integration_branch"), run.get("phase_branch"))
         if isinstance(name, str) and name
     ]
-    # A branch NAME is evidence only inside THIS repository: a clone elsewhere with the same
-    # branch checked out is another repository's work tree. The worktree must share this
-    # project's git common dir before its branch counts.
-    common = _git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    common_dir = (common.stdout or "").strip() if common.returncode == 0 else ""
-    if not common_dir or os.path.realpath(
-        os.path.dirname(common_dir)
-    ) != os.path.realpath(repo_root):
-        where = (
-            f"belongs to the repository at {os.path.dirname(common_dir)}"
-            if common_dir
-            else f"is not a git work tree git could resolve (exit {common.returncode}: "
-            f"{(common.stderr or '').strip() or 'no output'})"
-        )
-        return (
-            f"run {key!r}: the durable driver {script} fires in {worktree}, which {where}, "
-            f"not this project ({repo_root}); no fire was launched and no write occurred. "
-            f"Reinstall the driver for this run:\n{reinstall}"
-        )
-    head = _git(worktree, "symbolic-ref", "--quiet", "--short", "HEAD")
-    checked_out = (head.stdout or "").strip() if head.returncode == 0 else None
-    if checked_out and checked_out in branches_of_run:
-        return None
-    found = (
-        f"branch {checked_out!r}"
-        if checked_out
-        else f"no branch git could name (exit {head.returncode}: "
-        f"{(head.stderr or '').strip() or 'no output'})"
-    )
     return (
-        f"run {key!r}: the durable driver {script} fires in {worktree}, which has {found} "
-        f"checked out — not this run's {' or '.join(map(repr, branches_of_run))} — and is not "
-        "a worktree run.json records for it. Launching it would drive another run under this "
-        "run's ownership; no fire was launched and no write occurred. Reinstall the driver for "
-        f"this run:\n{reinstall}"
+        f"run {key!r}: the durable driver {script} fires in {worktree}, which has "
+        f"{unbound.detail} checked out — not this run's {' or '.join(map(repr, branches_of_run))}"
+        " — and is not a worktree run.json records for it. Launching it would drive another "
+        "run under this run's ownership; no fire was launched and no write occurred. Reinstall "
+        f"the driver for this run:\n{reinstall}"
     )
 
 

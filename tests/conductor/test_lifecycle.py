@@ -19,9 +19,9 @@ from pathlib import Path
 
 import pytest
 
-from conductor import finalpr, lifecycle, run_cmd
+from conductor import dispatches, finalpr, lifecycle, run_cmd
 from conductor.core import ownership, registry, runstate, schema, transaction
-from conductor.hosts import proc
+from conductor.hosts import base, proc
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -367,6 +367,74 @@ def test_status_json_carries_the_owner_and_its_liveness(project, capsys) -> None
     # defence against reuse, and `status` is where an operator reads what is holding the run.
     assert report["owner"]["identity"].split(":")[:2] == ["proc", str(os.getpid())]
     assert report["status"] == "active"
+
+
+def test_status_json_carries_per_phase_usage_by_role(project, capsys) -> None:
+    dispatches.append(
+        project.state_root,
+        project.run_key,
+        dispatches.make(
+            host="codex",
+            role="reviewer",
+            phase_id="7",
+            head_sha="abc",
+            usage=base.Usage(10, 4, 0, 2, "s", "r", False),
+            wall_s=1.0,
+            outcome="ok",
+        ),
+    )
+    assert project.verb("status", "--run", project.run_key, "--json") == 0
+    usage = json.loads(capsys.readouterr().out)["usage"]
+    assert usage["7"]["reviewer"]["input_tokens"] == 10
+    assert usage["7"]["reviewer"]["complete"] is True
+
+
+def test_status_text_marks_a_phase_with_missing_usage_incomplete(
+    project, capsys
+) -> None:
+    dispatches.append(
+        project.state_root,
+        project.run_key,
+        dispatches.make(
+            host="claude",
+            role="worker",
+            phase_id="7",
+            head_sha=None,
+            usage=base.Usage.unknown(),
+            wall_s=1.0,
+            outcome="error",
+            note="no-usage",
+        ),
+    )
+    assert project.verb("status", "--run", project.run_key) == 0
+    out = capsys.readouterr().out
+    assert "phase 7" in out and "worker" in out and "INCOMPLETE" in out
+
+
+def test_status_text_orders_unattributed_last_and_says_none_when_empty(
+    project, capsys
+) -> None:
+    assert project.verb("status", "--run", project.run_key) == 0
+    assert "usage: none recorded" in capsys.readouterr().out
+    usage = base.Usage(1, 0, 0, 1, "s", "r", False)
+    for phase in (None, "3"):
+        dispatches.append(
+            project.state_root,
+            project.run_key,
+            dispatches.make(
+                host="claude",
+                role="worker",
+                phase_id=phase,
+                head_sha=None,
+                usage=usage,
+                wall_s=1.0,
+                outcome="ok",
+            ),
+        )
+    assert project.verb("status", "--run", project.run_key) == 0
+    out = capsys.readouterr().out
+    assert out.index("phase 3") < out.index("unattributed")
+    assert "phase unattributed" not in out
 
 
 def test_status_reports_a_pending_transaction_without_recovering_it(

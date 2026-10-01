@@ -595,12 +595,223 @@ def test_driver_preserves_quoted_flag_values_with_spaces(tmp_path):
     assert argv == [
         "-p",
         "/conductor:autodev",
+        "--output-format",
+        "json",
         "--settings",
         "/tmp/space path/settings.json",
     ]
     # negative: the word-split fragments must not appear as argv entries
     assert "'/tmp/space" not in argv
     assert "path/settings.json'" not in argv
+
+
+# ---- usage accounting: the driver records every worker fire (sustained-context §3) ----
+
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_CLAUDE_FIXTURE = os.path.join(
+    _REPO, "tests", "conductor", "fixtures", "claude-print-json-2.1.286.json"
+)
+
+
+def _mk_usage_harness(tmp, git_env, git, monkeypatch, capsys, fire_rc):
+    """A real git project with ONE registered run, and a driver whose stub `claude` prints the
+    recorded `claude -p --output-format json` result and exits `fire_rc`.
+
+    The `conductor` on the driver's PATH answers the two pre-fire guards the way
+    `_STUB_CONDUCTOR` does (free, gate not green) and hands every other verb to THIS repo's
+    `bin/conductor`, so `usage ingest` is the real verb resolving the real run."""
+    from conductor import run_cmd
+
+    project = tmp / "proj"
+    (project / "docs").mkdir(parents=True)
+    (project / "docs" / "alpha.md").write_text("# alpha\n")
+    subprocess.run(
+        ["git", "init", "-q", "-b", "trunk", str(project)],
+        check=True,
+        capture_output=True,
+        env=git_env,
+        timeout=30,
+    )
+    git(project, "add", "-A")
+    git(project, "commit", "-qm", "init")
+    config_home = tmp / "conductor-config"
+    monkeypatch.setenv("CONDUCTOR_HOME", str(project))
+    monkeypatch.setenv("CONDUCTOR_CONFIG_HOME", str(config_home))
+    for name in ("CONDUCTOR_GATE_DIR", "CONDUCTOR_GATE_SLUG", "CONDUCTOR_HOST"):
+        monkeypatch.delenv(name, raising=False)
+    assert run_cmd.main(["new", "docs/alpha.md", "--project", str(project)]) == 0
+    run_key = capsys.readouterr().out.strip()
+
+    # A real linked worktree, as a run's is: the ingest resolves the run from it.
+    worktree = tmp / "wt"
+    git(project, "worktree", "add", "-q", "-b", "run", str(worktree))
+    home = tmp / "home"
+    bindir = home / ".local" / "bin"
+    bindir.mkdir(parents=True)
+    claude = bindir / "claude"
+    claude.write_text(
+        f"#!/bin/sh\ncat {shlex.quote(_CLAUDE_FIXTURE)}\nexit {fire_rc}\n"
+    )
+    os.chmod(claude, 0o755)
+    conductor = bindir / "conductor"
+    conductor.write_text(
+        '#!/bin/sh\ncase "$1 $2" in\n'
+        '  "run owner-busy") exit 11 ;;\n'
+        '  "assert run") exit 1 ;;\n'
+        "esac\n"
+        f'exec {shlex.quote(os.path.join(_REPO, "bin", "conductor"))} "$@"\n'
+    )
+    os.chmod(conductor, 0o755)
+    driver = project / ".conductor" / "resume-autodev.sh"
+    driver.write_text(rs.render(str(project), str(worktree), "claude"))
+    os.chmod(driver, 0o755)
+    return project, driver, home, run_key, config_home
+
+
+@pytest.mark.parametrize(("fire_rc", "outcome"), [(0, "ok"), (3, "error")])
+def test_driver_records_the_fire_as_a_worker_dispatch_and_keeps_its_rc(
+    tmp_path, git_env, git, monkeypatch, capsys, fire_rc, outcome
+):
+    from conductor.core import runstate
+
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, driver, home, run_key, config_home = _mk_usage_harness(
+        tmp_path, git_env, git, monkeypatch, capsys, fire_rc
+    )
+    proc = _fire_driver(driver, home, {"CONDUCTOR_CONFIG_HOME": str(config_home)})
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == fire_rc, (proc.stdout, proc.stderr, log)
+    assert f"fire-end rc={fire_rc}" in log
+    assert "usage-recorded role=worker" in log, log
+    assert log.index(f"fire-end rc={fire_rc}") < log.index("usage-recorded")
+
+    doc = runstate.load(os.path.join(str(project), ".conductor"), run_key)
+    assert doc is not None
+    d = doc["dispatches"][-1]
+    with open(_CLAUDE_FIXTURE, encoding="utf-8") as f:
+        models = json.loads(f.read())["modelUsage"].values()
+    fresh = sum(m["inputTokens"] for m in models)
+    read = sum(m["cacheReadInputTokens"] for m in models)
+    write = sum(m["cacheCreationInputTokens"] for m in models)
+    assert d["role"] == "worker" and d["host"] == "claude"
+    assert d["outcome"] == outcome
+    assert d["input_tokens"] == fresh + read + write
+    assert d["cached_input_tokens"] == read
+    assert d["cache_write_tokens"] == write
+    assert d["output_tokens"] == sum(m["outputTokens"] for m in models)
+
+
+_CODEX_EXEC_FIXTURE = os.path.join(
+    _REPO, "tests", "conductor", "fixtures", "codex-exec-json-0.156.1.jsonl"
+)
+
+#: What the stub host runs during its fire: the real `conductor.handoff.write`, with no path,
+#: exactly as a worker does — so the handoff lands wherever the driver's CONDUCTOR_HOME says.
+_WRITE_HANDOFF = (
+    "import sys; sys.path.insert(0, {repo!r}); from conductor import handoff; "
+    "handoff.write({{'goal': 'g', 'paths': {{'spec': 's', 'expectations': 'e', "
+    "'assertions': 'a', 'plan_index': 'p', 'adr_dir': 'd'}}, 'active_plan': 'p', "
+    "'milestone': 1, 'phase_issue': 42, 'phase_status': 'in-progress', "
+    "'baseline': 'aaa111', 'final': 'bbb222', 'last_unit_summary': 'unit', "
+    "'next_unit': 'n', 'open_issues': {{'debt': 0, 'feature': 0, 'blocked': 0}}, "
+    "'branch': 'b', 'resume_cmd': 'r'}})"
+)
+
+
+def _mk_linked_worktree_usage_harness(tmp, git_env, git, monkeypatch, capsys, host):
+    """A real project with ONE registered run, its run worktree a LINKED git worktree (so the
+    project and the worktree are different directories), and a stub `host` whose fire writes the
+    handoff through the real `conductor.handoff.write` and prints that host's recorded output."""
+    from conductor import run_cmd
+    from conductor.hosts import runhost
+
+    project = tmp / "proj"
+    (project / "docs").mkdir(parents=True)
+    (project / "docs" / "alpha.md").write_text("# alpha\n")
+    subprocess.run(
+        ["git", "init", "-q", "-b", "trunk", str(project)],
+        check=True,
+        capture_output=True,
+        env=git_env,
+        timeout=30,
+    )
+    git(project, "add", "-A")
+    git(project, "commit", "-qm", "init")
+    worktree = tmp / "wt"
+    git(project, "worktree", "add", "-q", "-b", "run", str(worktree))
+    config_home = tmp / "conductor-config"
+    monkeypatch.setenv("CONDUCTOR_HOME", str(project))
+    monkeypatch.setenv("CONDUCTOR_CONFIG_HOME", str(config_home))
+    for name in ("CONDUCTOR_GATE_DIR", "CONDUCTOR_GATE_SLUG", "CONDUCTOR_HOST"):
+        monkeypatch.delenv(name, raising=False)
+    assert run_cmd.main(["new", "docs/alpha.md", "--project", str(project)]) == 0
+    run_key = capsys.readouterr().out.strip()
+    runhost.record(str(project), host)
+
+    home = tmp / "home"
+    bindir = home / ".local" / "bin"
+    bindir.mkdir(parents=True)
+    fixture = _CLAUDE_FIXTURE if host == "claude" else _CODEX_EXEC_FIXTURE
+    write_handoff = shlex.quote(_WRITE_HANDOFF.format(repo=_REPO))
+    stub = bindir / host
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"python3 -c {write_handoff} || exit 99\n"
+        f"cat {shlex.quote(fixture)}\n"
+        "exit 0\n"
+    )
+    os.chmod(stub, 0o755)
+    conductor = bindir / "conductor"
+    conductor.write_text(
+        '#!/bin/sh\ncase "$1 $2" in\n'
+        '  "run owner-busy") exit 11 ;;\n'
+        '  "assert run") exit 1 ;;\n'
+        "esac\n"
+        f'exec {shlex.quote(os.path.join(_REPO, "bin", "conductor"))} "$@"\n'
+    )
+    os.chmod(conductor, 0o755)
+    if host == "codex":
+        # The Codex driver derives the skill tree from the resolved conductor bin's parent.
+        skill = home / ".local" / "skills" / "autodev" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# autodev\n")
+    driver = project / ".conductor" / "resume-autodev.sh"
+    driver.write_text(rs.render(str(project), str(worktree), host))
+    os.chmod(driver, 0o755)
+    return project, worktree, driver, home, run_key, config_home
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+def test_driver_records_the_phase_and_head_from_the_worktree_handoff(
+    tmp_path, git_env, git, monkeypatch, capsys, host
+):
+    """The worker runs with CONDUCTOR_HOME=$WORKTREE, so its handoff is the WORKTREE's. The
+    ingest must read it there and still resolve the run through the shared git common dir."""
+    from conductor.core import runstate
+
+    if not _which("bash"):
+        pytest.skip("bash not available")
+    project, worktree, driver, home, run_key, config_home = (
+        _mk_linked_worktree_usage_harness(
+            tmp_path, git_env, git, monkeypatch, capsys, host
+        )
+    )
+    proc = _fire_driver(driver, home, {"CONDUCTOR_CONFIG_HOME": str(config_home)})
+    log = (project / ".conductor" / "resume-autodev.log").read_text()
+    assert proc.returncode == 0, (proc.stdout, proc.stderr, log)
+    assert (worktree / ".conductor" / "handoff.md").is_file()
+    assert not (project / ".conductor" / "handoff.md").exists()
+    assert "usage-recorded role=worker phase=42" in log, log
+
+    doc = runstate.load(os.path.join(str(project), ".conductor"), run_key)
+    assert doc is not None
+    d = doc["dispatches"][-1]
+    assert d["role"] == "worker" and d["host"] == host
+    assert d["outcome"] == "ok"
+    assert d["phase_id"] == "42"
+    assert d["head_sha"] == "bbb222"
+    assert d["input_tokens"] is not None and d["output_tokens"] is not None
 
 
 # ---- posture visibility: fire-start carries a DERIVED posture label (Phase 3, A5) ----
@@ -1008,7 +1219,7 @@ def test_render_for_a_claude_recorded_run_is_the_claude_driver(tmp_path):
     project, worktree = _project_recorded_as(tmp_path, "claude")
     s = rs.render(project, worktree)
     assert 'CLAUDE_BIN="$(command -v claude || true)"' in s
-    assert '"$CLAUDE_BIN" -p "/conductor:autodev" "$@"' in s
+    assert '"$CLAUDE_BIN" -p "/conductor:autodev" --output-format json "$@"' in s
 
 
 def test_render_for_an_unrecorded_run_is_byte_identical_to_the_recorded_claude_one(
@@ -1048,7 +1259,7 @@ def test_render_for_a_codex_recorded_run_resolves_and_launches_codex(tmp_path):
     assert [ln for ln in spawns if ln not in fire] == [
         '"$CODEX_BIN" plugin list --json </dev/null >"$CODEX_PLUGIN_OUT" 2>/dev/null &'
     ], spawns
-    assert fire[0].startswith('"$CODEX_BIN" exec --cd "$WORKTREE"')
+    assert fire[0].startswith('"$CODEX_BIN" exec --json --cd "$WORKTREE"')
     assert "skills/autodev/SKILL.md" in fire[0]
 
 
@@ -1386,7 +1597,7 @@ def test_a_codex_run_fires_the_codex_binary_with_an_exec_invocation(tmp_path):
     proc, log, argv = _fire_codex(tmp_path, "fire")
     assert "fire-start" in log, (proc.returncode, proc.stdout, proc.stderr, log)
     assert proc.returncode == 0
-    assert argv[:3] == ["exec", "--cd", str(tmp_path / "fire" / "wt")], argv
+    assert argv[:4] == ["exec", "--json", "--cd", str(tmp_path / "fire" / "wt")], argv
     assert argv[-1].startswith("Read ")
     assert argv[-1].endswith("/skills/autodev/SKILL.md and execute it.")
     # -p is --profile to codex: the prompt must never be its value

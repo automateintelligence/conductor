@@ -41,7 +41,7 @@ from conductor.hosts import base, runhost
 
 # Bump when `render` changes so `verify` flags already-installed scripts as stale and the
 # `conductor:start` skill's reconcile regenerates them (self-heal on upgrade).
-TEMPLATE_VERSION = 12
+TEMPLATE_VERSION = 13
 _MARKER = f"# conductor-resume-template: v{TEMPLATE_VERSION}"
 
 # The lock's two outcomes other than "taken". Both sit above 100 on purpose: the driver
@@ -355,6 +355,9 @@ def fire_supervision_prologue() -> str:
         "# rather than to a watchdog that would kill every working phase on that machine.\n"
         'FIRE_PS="$(command -v ps || true)"\n'
         'FIRE_LOG0="$(wc -c < "$LOG" 2>/dev/null || printf 0)"\n'
+        "# The fire's start, on EVERY path: `fire_started` below is set only when the watchdog\n"
+        "# runs, and usage accounting needs the fire's wall time with or without `ps`.\n"
+        "FIRE_T0=$SECONDS\n"
         "fire_progress() {\n"
         "    # $1 = the fire's process-group id. One token; any change in it is progress.\n"
         '    fire_cpu="$("$FIRE_PS" -eo pgid=,time= 2>/dev/null | awk -v g="$1" \''
@@ -795,6 +798,25 @@ FIRE_PID=$!
 set +m
 {fire_watchdog(h)}
 printf '%s fire-end rc=%s\\n' "$(ts)" "$rc" >> "$LOG"
+# USAGE ACCOUNTING (sustained-context spec §3): record this fire's tokens from its own slice of
+# the log. Best-effort and bounded: it can never change the fire's exit status. `9>&-` for the
+# same reason as every other child above: nothing it leaves behind may hold the lock. The bound
+# is resolved the way the watchdog's run lookup resolves it, and an ingest that could not run or
+# did not finish says so in the log; a missing record is never silent. `--project` is the
+# WORKTREE: the worker wrote its handoff under CONDUCTOR_HOME="$WORKTREE", and the run itself
+# resolves through the shared git common dir from either checkout.
+usage_bound="$(command -v timeout || command -v gtimeout || true)"
+if [ -n "$usage_bound" ]; then
+    usage_rc=0
+    "$usage_bound" -k {RUN_LOOKUP_KILL_GRACE_S} 60 "$CONDUCTOR" usage ingest --project "$WORKTREE" --host {h.id} \\
+        --log "$LOG" --offset "$FIRE_LOG0" --wall-s "$(( SECONDS - FIRE_T0 ))" --rc "$rc" \\
+        >> "$LOG" 2>&1 9>&- || usage_rc=$?
+    case "$usage_rc" in
+        124|137) printf '%s usage-unrecorded reason=ingest-timeout\\n' "$(ts)" >> "$LOG" ;;
+    esac
+else
+    printf '%s usage-unrecorded reason=no-timeout-binary\\n' "$(ts)" >> "$LOG"
+fi
 exit "$rc"
 """
 

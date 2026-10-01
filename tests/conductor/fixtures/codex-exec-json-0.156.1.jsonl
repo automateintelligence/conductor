@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a0f4b5-1927-72a2-830b-d3b372a66ae5"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Codex is ignoring 4 unrecognized configuration settings. Check for typos or deprecated settings.\n  user (<HOME>/.codex/config.toml): `features.child_agents_md` is ignored.\n  user (<HOME>/.codex/config.toml): `mcp_servers.context7.timeoutMs` is ignored.\n  user (<HOME>/.codex/config.toml): `mcp_servers.figma.timeoutMs` is ignored.\n  ... and 1 more ignored settings."}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"alpha"}}
+{"type":"turn.completed","usage":{"input_tokens":34072,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":22,"reasoning_output_tokens":15}}

@@ -1,0 +1,157 @@
+"""``conductor usage ingest`` — record one worker fire's token usage from the driver log.
+
+The cron driver calls this once after each worker fire, passing the byte offset the log had
+before the fire started, so only that fire's slice is parsed. The result is one ``worker``
+dispatch record appended to the run the fire's worktree belongs to (``resolve.run_for_worktree``:
+the run bound to that worktree, else the one active run — so two active runs in one
+repository, or a run the fire itself moved to awaiting-team-merge, get the record on the right
+run; sustained-context spec §3). Derived data only: nothing
+that gates a merge reads it, so any failure here is reported and exits 1 for the driver to log
+and ignore.
+
+The output lines never contain the driver's own markers (``fire-end``, ``driver-unresolved``):
+``conductor driver status`` scans the same log for them, and echoing one would corrupt its read.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import os
+import re
+import sys
+import time
+
+from conductor import dispatches, paths
+from conductor.core import resolve
+from conductor.hosts import base as hostbase
+
+EXIT_OK = 0
+EXIT_FAIL = 1
+EXIT_USAGE = 64
+
+_TIMEOUT_RCS = (124, 137)
+_PHASE_RE = re.compile(r"phase issue #(\d+)")
+_HEAD_RE = re.compile(r"\*\*Last unit:\*\*\s*\S+?\.{2,3}(\S+)")
+
+
+def _ts() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _read_slice(log: str, offset: int) -> str:
+    with open(log, "rb") as handle:
+        handle.seek(max(0, offset))
+        return handle.read().decode("utf-8", errors="replace")
+
+
+def _outcome(rc: int) -> str:
+    if rc in _TIMEOUT_RCS:
+        return "timeout"
+    return "error" if rc != 0 else "ok"
+
+
+def _fresh(path: str, wall_s: float) -> bool:
+    """Whether ``path`` was written by this fire (or later): mtime at or after the fire start."""
+    return os.stat(path).st_mtime >= time.time() - wall_s - 1
+
+
+def _claimed_phase(project: str, wall_s: float) -> str | None:
+    """The phase this fire claimed (``ledger.claim.claim`` writes it), if it claimed one."""
+    path = paths.claimed_phase_path(project)
+    try:
+        if not _fresh(path, wall_s):
+            return None
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read().strip()
+    except OSError:
+        return None
+    return text if text.isdigit() else None
+
+
+def _phase_and_head(project: str, wall_s: float) -> tuple[str | None, str | None]:
+    """Phase id and head sha from ``handoff.md``, only if this fire (or a later write) wrote it.
+    Without one, the phase this fire claimed and no head: a worker that claimed a phase and
+    crashed before its handoff still lands on that phase."""
+    path = os.path.join(project, ".conductor", "handoff.md")
+    try:
+        if not _fresh(path, wall_s):
+            return _claimed_phase(project, wall_s), None
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return _claimed_phase(project, wall_s), None
+    phase = _PHASE_RE.search(text)
+    head = _HEAD_RE.search(text)
+    return (
+        phase.group(1) if phase else _claimed_phase(project, wall_s),
+        head.group(1) if head else None,
+    )
+
+
+_REASON_MAX = 200
+_DRIVER_MARKERS = (("fire-end", "fire_end"), ("driver-unresolved", "driver_unresolved"))
+
+
+def _reason(exc: BaseException) -> str:
+    """``<ClassName>: <message>`` on one line, truncated, with the driver's own markers defused
+    so ``conductor driver status`` cannot read an unrecorded line as a fire boundary."""
+    text = " ".join(f"{type(exc).__name__}: {exc}".split())[:_REASON_MAX]
+    for marker, safe in _DRIVER_MARKERS:
+        text = text.replace(marker, safe)
+    return text
+
+
+def _ingest(args: argparse.Namespace) -> int:
+    try:
+        adapter = hostbase.load(args.host)
+        usage = adapter.usage_from_output(_read_slice(args.log, args.offset))
+        phase_id, head_sha = _phase_and_head(args.project, args.wall_s)
+        entry = dispatches.make(
+            host=args.host,
+            role="worker",
+            phase_id=phase_id,
+            head_sha=head_sha,
+            usage=usage,
+            wall_s=args.wall_s,
+            outcome=_outcome(args.rc),
+            note="no-usage-in-output" if usage.input_tokens is None else None,
+        )
+        resolve.recover_pending(resolve.state_root(args.project))
+        found = resolve.run_for_worktree(args.project)
+        dispatches.append(found.state_root, found.run_key, entry)
+    except Exception as exc:  # noqa: BLE001 — derived data must never fail the fire
+        print(f"{_ts()} usage-unrecorded reason={_reason(exc)}")
+        return EXIT_FAIL
+    inp = "null" if usage.input_tokens is None else usage.input_tokens
+    out = "null" if usage.output_tokens is None else usage.output_tokens
+    print(
+        f"{_ts()} usage-recorded role=worker phase={phase_id or '-'} "
+        f"input={inp} output={out}"
+    )
+    return EXIT_OK
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="conductor usage")
+    sub = parser.add_subparsers(dest="verb", required=True)
+    ing = sub.add_parser("ingest", help="record one worker fire from the driver log")
+    ing.add_argument("--project", required=True)
+    ing.add_argument("--host", required=True, choices=hostbase.HOST_IDS)
+    ing.add_argument("--log", required=True)
+    ing.add_argument("--offset", required=True, type=int)
+    ing.add_argument("--wall-s", required=True, type=float, dest="wall_s")
+    ing.add_argument("--rc", required=True, type=int)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
+    except SystemExit as exc:
+        return EXIT_USAGE if exc.code else EXIT_OK
+    return _ingest(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

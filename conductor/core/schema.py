@@ -20,6 +20,7 @@ import posixpath
 from conductor.core.names import GATE_DIR_PREFIX, derived_names, is_safe_segment
 from conductor.core.runkey import is_safe_run_key, parse_generation
 from conductor.core.runkey import run_key as derive_run_key
+from conductor.hosts.base import HOST_IDS
 
 SCHEMA_VERSION = 2
 
@@ -40,6 +41,27 @@ REVIEW_POLICIES = (
     "blocked-pending-opposite-host",
 )
 IDENTITY_SCHEMES = ("path-hash-v2", "legacy-slug-v1")
+DISPATCH_ROLES = ("worker", "reviewer")
+DISPATCH_OUTCOMES = ("ok", "error", "timeout")
+DISPATCH_TOKEN_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_tokens",
+    "output_tokens",
+)
+_DISPATCH_FIELDS = frozenset(
+    {
+        "host",
+        "role",
+        "phase_id",
+        "head_sha",
+        *DISPATCH_TOKEN_FIELDS,
+        "wall_s",
+        "outcome",
+        "note",
+        "recorded_at",
+    }
+)
 
 # active -> terminal is absent on purpose: only `conductor finish` completes a run, and it runs
 # from awaiting-team-merge after proving the final pull request merged.
@@ -328,12 +350,60 @@ def validate_run(doc: dict) -> dict:
             raise SchemaError(
                 f"{field} must be a list, got {type(doc[field]).__name__}"
             )
+    for entry in doc["dispatches"]:
+        validate_dispatch(entry)
     for field in ("github", "heartbeat", "lease"):
         if not isinstance(doc[field], dict):
             raise SchemaError(
                 f"{field} must be a mapping, got {type(doc[field]).__name__}"
             )
     return doc
+
+
+def validate_dispatch(entry: object) -> dict:
+    """Return ``entry`` unchanged if it is a legal run.json ``dispatches`` record, else raise
+    ``SchemaError``. Token fields are ``int >= 0`` or ``None`` (unknown is not zero)."""
+    if not isinstance(entry, dict):
+        raise SchemaError(
+            f"dispatch entry must be a mapping, got {type(entry).__name__}"
+        )
+    missing = sorted(_DISPATCH_FIELDS - entry.keys())
+    extra = sorted(entry.keys() - _DISPATCH_FIELDS)
+    if missing or extra:
+        raise SchemaError(
+            f"dispatch entry fields differ: missing {missing}, unexpected {extra}"
+        )
+    for field, allowed in (
+        ("host", HOST_IDS),
+        ("role", DISPATCH_ROLES),
+        ("outcome", DISPATCH_OUTCOMES),
+    ):
+        if entry[field] not in allowed:
+            raise SchemaError(
+                f"dispatch {field} must be one of {allowed}, got {entry[field]!r}"
+            )
+    for field in ("phase_id", "head_sha", "note"):
+        if entry[field] is not None and not isinstance(entry[field], str):
+            raise SchemaError(
+                f"dispatch {field} must be a string or null, got {entry[field]!r}"
+            )
+    for field in DISPATCH_TOKEN_FIELDS:
+        value = entry[field]
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+        ):
+            raise SchemaError(
+                f"dispatch {field} must be an integer >= 0 or null, got {value!r}"
+            )
+    wall = entry["wall_s"]
+    if not isinstance(wall, (int, float)) or isinstance(wall, bool) or not wall >= 0:
+        raise SchemaError(f"dispatch wall_s must be a number >= 0, got {wall!r}")
+    recorded = entry["recorded_at"]
+    if not isinstance(recorded, str) or not recorded:
+        raise SchemaError(
+            f"dispatch recorded_at must be a non-empty string, got {recorded!r}"
+        )
+    return entry
 
 
 def validate_project(doc: dict) -> dict:

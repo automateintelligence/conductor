@@ -10,10 +10,11 @@ merely working, it is the text many live fires have proven, including the ones t
 from __future__ import annotations
 
 import glob
+import json
 import os
 from collections.abc import Mapping
 
-from conductor.hosts import discovery, proc
+from conductor.hosts import base, discovery, proc
 
 #: Claude Code publishes the root of the plugin whose skill is executing. Codex has no
 #: verified counterpart, which is why ``discovery.dev_plugin_roots`` takes the variable name
@@ -54,6 +55,42 @@ SESSION_ID_ENV = "CLAUDE_CODE_SESSION_ID"
 
 class ClaudeAdapter:
     id: str = "claude"
+
+    def executable(self) -> str:
+        return base.resolve_executable(self.id)
+
+    def reviewer_argv(
+        self, prompt: str, *, project_root: str, context_dir: str
+    ) -> list[str]:
+        """A read-only, time-boundable Claude reviewer (ground truth 2026-09-30, section 5).
+
+        ``--tools=Read,Grep,Glob`` names the WHOLE built-in tool set, so no shell and no
+        Write/Edit exist to be allowed. An ``--allowedTools`` list would not do: it adds to the
+        allow rules merged from user, project and local settings, so the PR's own
+        ``.claude/settings.json`` could widen it, and ``Bash(git diff:*)`` admits
+        ``--output=<file>``, which writes. ``--restricted`` and ``--strict-mcp-config`` keep the
+        checkout's settings, hooks and MCP servers out of the review; ``dontAsk`` denies
+        anything else instead of prompting, so a headless review cannot block on a dialog.
+        ``--add-dir`` grants read of ``context_dir``, where the caller put the diff. Never
+        ``--dangerously-skip-permissions``. The reviewer's working directory is the caller's
+        ``cwd``; ``project_root`` is unused because Claude has no workspace flag, and is accepted
+        to keep the member host-neutral.
+        """
+        base.reject_flaglike_prompt(prompt)
+        return [
+            self.executable(),
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--permission-mode",
+            "dontAsk",
+            "--restricted",
+            "--strict-mcp-config",
+            "--tools=Read,Grep,Glob",
+            "--add-dir",
+            context_dir,
+        ]
 
     # ------------------------------------------------------------------ generated cron driver
     #
@@ -124,13 +161,17 @@ class ClaudeAdapter:
         )
 
     def resume_fire_command(self) -> str:
-        """One headless phase: ``claude -p "/conductor:autodev"`` plus the owner's flags.
+        """One headless phase: ``claude -p "/conductor:autodev" --output-format json`` plus the
+        owner's flags.
 
-        Byte-identical to the invocation live fires have proven. The owner's re-parsed flags
-        follow the prompt because Claude takes the prompt as ``-p``'s value, not as a trailing
-        positional — the opposite of Codex, which is why this line is not shared.
+        The invocation live fires have proven, plus ``--output-format json``: the fire's output
+        in the driver log is now its single-line JSON result, which carries the token usage
+        ``conductor usage ingest`` records after the fire (sustained-context spec §3). The
+        owner's re-parsed flags follow the prompt because Claude takes the prompt as ``-p``'s
+        value, not as a trailing positional — the opposite of Codex, which is why this line is
+        not shared.
         """
-        return '"$CLAUDE_BIN" -p "/conductor:autodev" "$@"'
+        return '"$CLAUDE_BIN" -p "/conductor:autodev" --output-format json "$@"'
 
     def posture_of(self, args: list[str]) -> str:
         """The Python mirror of ``resume_posture_arms``.
@@ -288,3 +329,50 @@ class ClaudeAdapter:
         for root in discovery.dev_plugin_roots(PLUGIN_ROOT_ENV):
             cmds |= discovery.scan_plugin_dir(root, (f".{self.id}-plugin",))
         return discovery.HostSkills(cmds, frozenset())
+
+    def usage_from_output(self, text: str) -> base.Usage:
+        """`claude -p --output-format json` -> Usage. Totals come from `modelUsage`, which covers
+        every model call in the invocation including subagents; top-level `usage` is only the
+        last main-thread call (ground truth 2026-09-30 fact 2)."""
+        result = None
+        for line in reversed(text.splitlines()):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                doc = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(doc, dict) and doc.get("type") == "result":
+                result = doc
+                break
+        if result is None:
+            return base.Usage.unknown()
+
+        def _sum(models: object, field: str) -> int | None:
+            if not isinstance(models, dict) or not models:
+                return None
+            vals = [m.get(field) for m in models.values() if isinstance(m, dict)]
+            ints = [v for v in vals if isinstance(v, int) and not isinstance(v, bool)]
+            return sum(ints) if ints and len(ints) == len(vals) else None
+
+        models = result.get("modelUsage")
+        fresh = _sum(models, "inputTokens")
+        read = _sum(models, "cacheReadInputTokens")
+        write = _sum(models, "cacheCreationInputTokens")
+        total_in = (
+            fresh + read + write
+            if fresh is not None and read is not None and write is not None
+            else None
+        )
+        session = result.get("session_id")
+        text_out = result.get("result")
+        return base.Usage(
+            input_tokens=total_in,
+            cached_input_tokens=read,
+            cache_write_tokens=write,
+            output_tokens=_sum(models, "outputTokens"),
+            session_id=session if isinstance(session, str) else None,
+            result_text=text_out if isinstance(text_out, str) else None,
+            is_error=bool(result.get("is_error")) or result.get("subtype") != "success",
+        )

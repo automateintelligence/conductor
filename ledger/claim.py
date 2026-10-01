@@ -1,6 +1,9 @@
 import re
 from typing import Any
 
+from conductor import paths
+from conductor.core.atomic import write_atomic
+
 # draft = "not scheduled" (parked/optional phases) — claimable only after the owner
 # promotes it to status:ready (0.5.0; live finding: a draft phase was claim-eligible).
 BLOCKING = {"status:blocked", "status:done", "status:draft"}
@@ -79,7 +82,18 @@ def claim(repo: str, n: int, worker: str, now_ts: int, ttl: int, gh: Any) -> boo
         remove=[lbl for lbl in confirm["labels"] if lbl.startswith("status:")],
     )
     renew_lease(repo, n, worker, now_ts, gh)
+    _record_claimed_phase(n)
     return True
+
+
+def _record_claimed_phase(n: int) -> None:
+    """Leave the won phase where ``conductor usage ingest`` finds it, so a fire that crashes
+    before its handoff is still attributed to this phase. Derived data: a failed write never
+    changes the claim."""
+    try:
+        write_atomic(paths.claimed_phase_path(paths.project_root()), f"{n}\n")
+    except Exception:  # noqa: BLE001 — usage attribution must never cost a won claim
+        pass
 
 
 def release(repo: str, n: int, worker: str, gh: Any) -> None:

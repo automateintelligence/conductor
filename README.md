@@ -188,6 +188,8 @@ On Codex, skills use plugin-qualified `$` names: `$conductor:start`, `$conductor
 `$spec-craft:expectations`, `$spec-craft:executable-assertions`. Start a run with
 `$conductor:start <spec>`; the driver it installs launches `codex` on every fire.
 
+**Upgrading to 0.11.0:** after the update, re-run `/conductor:start` (or `conductor driver install --worktree <path>`) for each live run, so its regenerated driver (template 13) records worker usage.
+
 ### Without the plugin (from a clone)
 
 For development, or to run an unreleased checkout. Clone both repos side by side:
@@ -320,8 +322,8 @@ days** (re-run `/conductor:start` to continue), and an in-session cron **dies wh
 closes**. For a run that survives reboots and closed terminals, `start` installs the **Tier-B OS
 watchdog** as the fail-closed default for an unattended run — `conductor driver install`, never
 a judgment call about whether the in-session cron persisted: a flock-guarded resume script
-that fires the run's recorded host — `claude -p "/conductor:autodev"` on Claude,
-`codex exec --cd <run-worktree> …` on Codex — and exits once the gate is green. An open
+that fires the run's recorded host — `claude -p "/conductor:autodev" --output-format json` on Claude,
+`codex exec --json --cd <run-worktree> …` on Codex — and exits once the gate is green. An open
 terminal does not by itself stop a fire: a fire skips (`fire-skipped reason=owner-busy`)
 while the run's ownership record names a live worker (`conductor run owner-busy`), e.g. while
 `start` or an in-session `autodev` tick holds it. Plus `@reboot` + heartbeat crontab lines tagged
@@ -357,8 +359,8 @@ empty by default (supervised: fires stall on the first prompt):
 
 | Host | Variable | Scoped example | Full-bypass value |
 |---|---|---|---|
-| Claude | `CONDUCTOR_RESUME_CLAUDE_FLAGS` (appended to `claude -p "/conductor:autodev"`) | `--settings <path-to-scoped-settings.json>` | `--dangerously-skip-permissions` |
-| Codex | `CONDUCTOR_RESUME_CODEX_FLAGS` (placed before the prompt in `codex exec --cd <run-worktree>`) | `--sandbox workspace-write` | `--dangerously-bypass-approvals-and-sandbox` |
+| Claude | `CONDUCTOR_RESUME_CLAUDE_FLAGS` (appended to `claude -p "/conductor:autodev" --output-format json`) | `--settings <path-to-scoped-settings.json>` | `--dangerously-skip-permissions` |
+| Codex | `CONDUCTOR_RESUME_CODEX_FLAGS` (placed before the prompt in `codex exec --json --cd <run-worktree>`) | `--sandbox workspace-write` | `--dangerously-bypass-approvals-and-sandbox` |
 
 Each fire logs `fire-start posture=<supervised|scoped|full-bypass>`, derived from exact tokens
 of that variable (on Codex, `-s`/`--sandbox danger-full-access` also reads as full-bypass and
@@ -429,6 +431,9 @@ The `conductor` command (`bin/conductor`) fronts the Python modules.
 | `conductor driver install --worktree <path>` | Fail-closed Tier-B default for an unattended run: writes the resume script (through `resume-script write`, so its inline-owner-env no-clobber guard is respected) plus the marker-tagged `@reboot` + `*/20` crontab lines — never a durability judgment call. |
 | `conductor driver status` | The operator's health signal: exits non-zero unless a durable driver exists for the project (crontab marker or a matching scheduled task) AND the recent `resume-autodev.log` tail is clean; recent `driver-unresolved` / `fire-end rc=<non-zero>` lines are printed verbatim, never just counted. |
 | `conductor resume-script {install-cron\|uninstall-cron} --project <root>` | Add / remove exactly the `# conductor-autodev <main-root>`-tagged crontab lines. One shared marker implementation (`dirname` of `--git-common-dir`), idempotent install, `grep -F -v --` fixed-string removal semantics — install and removal cannot drift. |
+| `conductor review <pr> --brief <file> [--run <key>] [--timeout <s>]` | Launches the run's reviewer host read-only within one wall-clock budget for the whole command (default 540 s, or `$CONDUCTOR_REVIEW_TIMEOUT_S`; slow `gh`/`git` preflight shortens the review, never extends the command) against the PR head (refuses a stale checkout, exit `2`), with the change in a temp diff file it removes afterwards; prints the review and records a `reviewer` dispatch on `--run`'s run, else the run this checkout belongs to; when no run resolves, the review still runs (reviewer = opposite of `.conductor/host`) and only the record is skipped, with a `usage-unrecorded` line on stderr. A TERM/HUP/INT kills the reviewer before the verb exits. Exit `2` refused before any host ran, `3` host failure, `4` timeout (including a budget spent before the reviewer launched: no host ran, nothing recorded) or interrupted. |
+| `conductor usage ingest --project <root> --host <id> --log <path> --offset <n> --wall-s <s> --rc <n>` | The driver's post-fire step: records the fire's token usage from its slice of the log. Exit `1` (and a `usage-unrecorded` line) when it cannot. |
+| `conductor status [--run <key>] [--json]` | Read-only run summary, including per-phase token totals by role, marked `INCOMPLETE` where a host reported none. |
 | `conductor gate {lint\|freeze\|verify}` | Lint the gate for mechanically-detectable weak-test patterns (unpinned commands, no negative clause, trivially-true asserts; fail-closed), then freeze it at setup / verify it is unchanged. Freeze also digests the `<spec>.assertions.md` source. The runner enforces this — see [Why the worker can't cheat the gate](#why-the-worker-cant-cheat-the-gate). |
 
 `conductor merge-gate` blocks a merge on any of: draft PR, merge state not `CLEAN`,

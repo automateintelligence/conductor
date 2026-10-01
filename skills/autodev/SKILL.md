@@ -199,24 +199,45 @@ step 3b's terminal crontab removal.
    4. **one PR per phase, base = the RUN branch** (`Closes #<phase-issue>` for traceability —
       merge-gate blocks without it, and its base leg blocks any other base with
       `base-mismatch`; run-branch merges don't auto-close issues — `phase-done` does that).
-   5. **Opposite-host review.** Invoke the review wrapper for the host you are NOT — `conductor
-      preflight` names it for your host, and it is `codex` on a Claude-hosted run and `claude` on
-      a Codex-hosted one — asking it to run `requesting-code-review` and provide a read-only,
-      pre-merge review for PR#<n> against the phase's Spec sections and ADRs. Post the result as
-      a PR comment starting with the gate's review marker
+   5. **Opposite-host review.** Write the phase brief — its Spec sections and ADRs, verbatim —
+      to a temp file OUTSIDE the worktree (e.g. `mktemp`), so the next fire's step 0 never
+      commits it as reclaimed work, push the phase branch, then run `conductor review <pr> --brief <file>`
+      from the phase worktree. It launches the reviewer host for you (the host you are NOT;
+      `conductor preflight` names it — `codex` on a Claude-hosted run, `claude` on a Codex-hosted
+      one) read-only against the PR head within one wall-clock budget for the whole command
+      (540 s by default, preflight included), and prints the
+      review on stdout. Give the shell call that runs it a timeout of at least 600 seconds (on
+      Claude: the Bash tool's `timeout: 600000`) and wait for it in the foreground — never
+      background it and move on: a killed `conductor review` kills its reviewer and the review
+      is lost. Post
+      that stdout as a PR comment starting with the gate's review marker
       (**`CONDUCTOR_REVIEW_MARKER`, default `<Opposite-host> review`** — `Codex review` on a
-      Claude-hosted run, `Claude review` on a Codex-hosted one).
+      Claude-hosted run, `Claude review` on a Codex-hosted one). Exit codes:
+        - **exit 2** — refused before any host ran; stderr names the reason. Fix the fixable
+          preconditions and re-run: `checkout-stale` → push, or check out the PR head;
+          `brief-too-large` → shorten the brief; bad timeout → fix the flag. Anything else
+          (reviewer host not on PATH or unresolved, host launch failure, `gh pr view` failing
+          twice) is not something an unattended worker can repair: take the same-host
+          `code-review` fallback below, with reason `reviewer unavailable`.
+        - **exit 3** — the host ran and failed; its last output is on stderr. Read it and apply
+          the usage-limit / transient-retry rules below unchanged.
+        - **exit 4** — `review-timeout`, or `review-interrupted` (the call was killed); treat
+          as transient: retry once, then take the same-host `code-review` fallback below with
+          reason `timeout`.
       **Usage-limit fallback — continue uninterrupted, never stall.** If the opposite host
       reports its 5-hour OR weekly usage limit is exhausted (its stderr/stdout names a
       usage/rate/quota limit, or its status shows the window spent — distinct from a transient
       timeout, which you retry ONCE first), do NOT halt and do NOT park the phase until the
       window resets: a spent WEEKLY quota would freeze the whole run for days, breaking the
       "walk away and it keeps making progress" contract. Fall back to your OWN host's
-      `code-review` for the independent pre-merge review. The gate is OWNER-CONFIGURED and you
+      `code-review` for the independent pre-merge review. The same fallback covers an exit-4
+      timeout that persists after its one retry and an exit-2 refusal you cannot repair; name
+      the actual **reason** — `usage limit (5-hour)`, `usage limit (weekly)`, `timeout`, or
+      `reviewer unavailable` — wherever the fallback is labeled or reported. The gate is OWNER-CONFIGURED and you
       must NOT change its env, so honor two constraints as they are set:
         - **Marker (`CONDUCTOR_REVIEW_MARKER`):** post `code-review`'s findings as the PR comment
           with that exact marker at the START of the body, labeled honestly — e.g. **"<marker> —
-          UNAVAILABLE (usage limit); same-host code-review fallback"** — so `conductor merge-gate`
+          UNAVAILABLE (<reason>); same-host code-review fallback"** — so `conductor merge-gate`
           still counts it AND the degradation stays visible. **Read the configured marker; never
           assume the default**, which itself depends on the run's host.
         - **Provenance (`CONDUCTOR_REVIEW_AUTHOR`):** if it is pinned to a non-worker account, a
@@ -228,13 +249,13 @@ step 3b's terminal crontab removal.
       do NOT assume that count is 2. Then **let the owner know** (the §9 *patch-later* branch, not a
       halt):
       `escalate.file_followup(repo, "debt", "Same-host fallback review: phase #<n>", body, link_issue=<phase#>)`
-      with `body` naming the phase, the PR, which limit tripped (5-hour vs weekly), and that this
+      with `body` naming the phase, the PR, the reason (which limit tripped — 5-hour vs weekly — or timeout, or reviewer unavailable), and that this
       phase traded the opposite host's independence for its own — flag it for optional
       independent re-review.
       The open `debt` issue rides the handoff's `Open:` line to the final owner PR, where YOU decide;
       it SURFACES the degradation, it does not silently repair it. Keep working.
-   6. `receiving-code-review` — apply fixes, commit, then **the opposite host re-reviews the
-      FINAL state** (posted as another marker comment; if it is still usage-limited the step-5
+   6. `receiving-code-review` — apply fixes, commit, then **re-run `conductor review` for the
+      FINAL state** (posted as another marker comment; if it is still unavailable for any step-5 reason the step-5
       fallback applies again — `code-review` the final state under the same configured marker);
       repeat until the last review postdates the last commit and raises nothing blocking.
       merge-gate enforces both: `CONDUCTOR_MIN_REVIEWS` marker comments and review-of-final-state —

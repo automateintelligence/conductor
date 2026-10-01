@@ -299,6 +299,16 @@ def _invocations(sweep: Sweep) -> dict[str, list[list[str]]]:
     verbs are; a verb missing from this table fails `test_every_registered_verb_is_swept`."""
     work = str(sweep.work)
     driver = str(sweep.work / ".conductor" / "resume-autodev.sh")
+    # `usage ingest` reads one fire's slice of a driver log; `review` reads a brief file. Both
+    # files live in the sweep's own temp dir. The brief is deliberately absent so `review` can
+    # never launch a reviewer host: it refuses (rc 2) before that point, and the sweep starts no
+    # real `claude`/`codex` process. Against this fixture the verb refuses at `gh pr view` (the
+    # fake `gh` carries no `headRefOid`-shaped answer for it) after parsing its arguments and
+    # resolving the run; `usage ingest` refuses with `usage-unrecorded` because the fixture run
+    # is `awaiting-team-merge`, not active. Both ran their own code and neither completes a PR.
+    fire_log = sweep.workdir / "fire.log"
+    fire_log.write_text("fire output\n", encoding="utf-8")
+    brief = str(sweep.workdir / "brief-absent.md")
     return {
         "assert": [["run", "--level", "spec"]],
         # Each of these three carries the argument its verb REQUIRES. Without it the verb dies
@@ -337,6 +347,27 @@ def _invocations(sweep: Sweep) -> dict[str, list[list[str]]]:
         "finish": [["--run", sweep.run_key]],
         "heartbeat": [["--run", sweep.run_key]],
         "status": [["--run", sweep.run_key]],
+        # Added with the sustained-context measurement work. `usage ingest` appends a worker
+        # dispatch record; `review` launches the reviewer host. Neither may complete a pull
+        # request, and each is swept against the same fixture run and final pull request.
+        "usage": [
+            [
+                "ingest",
+                "--project",
+                work,
+                "--host",
+                "claude",
+                "--log",
+                str(fire_log),
+                "--offset",
+                "0",
+                "--wall-s",
+                "1",
+                "--rc",
+                "0",
+            ]
+        ],
+        "review": [[str(FINAL_PR), "--brief", brief, "--run", sweep.run_key]],
     }
 
 

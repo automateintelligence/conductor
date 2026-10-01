@@ -40,6 +40,13 @@ def project_root() -> str:
     return os.getcwd()
 
 
+def claimed_phase_path(project: str) -> str:
+    """``<project>/.conductor/claimed_phase``: the phase issue the worker's last won claim took
+    (``ledger.claim.claim``). Read by ``conductor usage ingest`` to attribute a fire that crashed
+    before writing its handoff. Lives beside ``handoff.md`` in the git-ignored state dir."""
+    return os.path.join(project, ".conductor", "claimed_phase")
+
+
 # --- Per-spec done-gate location (multi-spec safety) -----------------------------------
 #
 # The done-gate (manifest.yaml, .frozen, tests, run/results.json) is a TRACKED path. Left

@@ -1,6 +1,27 @@
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from ledger import claim
+
+
+@pytest.fixture(autouse=True)
+def _project(tmp_path, monkeypatch) -> Path:
+    """A won claim records its phase under the project (``CONDUCTOR_HOME``): keep it in a temp
+    dir, never this checkout."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+    return tmp_path
+
+
+def _sole_owner_gh() -> MagicMock:
+    gh = MagicMock()
+    gh.issue_state.side_effect = [
+        {"assignees": [], "labels": ["status:ready"], "state": "open"},
+        {"assignees": ["me"], "labels": ["status:ready"], "state": "open"},
+    ]
+    gh.get_body.return_value = "body"
+    return gh
 
 
 def test_eligible_only_when_unassigned_and_open():
@@ -124,3 +145,24 @@ def test_draft_is_not_eligible():
     assert not claim.eligible(
         {"assignees": [], "labels": ["status:draft"], "state": "open"}
     )
+
+
+def test_a_won_claim_records_the_claimed_phase_for_usage_attribution(_project):
+    assert claim.claim("o/r", 42, "me", now_ts=10, ttl=900, gh=_sole_owner_gh())
+    recorded = _project / ".conductor" / "claimed_phase"
+    assert recorded.read_text(encoding="utf-8") == "42\n"
+
+
+def test_a_lost_claim_records_no_phase(_project):
+    gh = MagicMock()
+    gh.issue_state.side_effect = [
+        {"assignees": [], "labels": ["status:ready"], "state": "open"},
+        {"assignees": ["other", "me"], "labels": ["status:ready"], "state": "open"},
+    ]
+    assert claim.claim("o/r", 42, "me", now_ts=10, ttl=900, gh=gh) is False
+    assert not (_project / ".conductor" / "claimed_phase").exists()
+
+
+def test_a_failing_phase_record_never_changes_the_claim(_project):
+    (_project / ".conductor").write_text("a file where the directory should be")
+    assert claim.claim("o/r", 42, "me", now_ts=10, ttl=900, gh=_sole_owner_gh())

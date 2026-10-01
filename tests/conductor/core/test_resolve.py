@@ -317,3 +317,132 @@ def test_resume_script_main_root_delegates_to_the_same_resolver(
     linked = tmp_path / "linked2"
     git(git_repo, "worktree", "add", "-q", "-b", "side2", str(linked))
     assert resume_script.main_root(str(linked)) == resolve.repo_root(str(linked))
+
+
+# --- the run a WORKTREE belongs to (usage ingest, conductor review) ------------------------
+
+
+def _checkout(git, repo, tmp_path, name: str, branch: str):
+    """A linked worktree of ``repo`` with a new ``branch`` checked out."""
+    path = tmp_path / name
+    git(repo, "worktree", "add", "-q", "-b", branch, str(path))
+    return str(path)
+
+
+def test_run_for_worktree_takes_the_one_active_run_without_a_binding(project):
+    root, state_root = project
+    key = _make_run(state_root, "docs/specs/alpha.md")
+    assert resolve.run_for_worktree(root).run_key == key
+
+
+def test_run_for_worktree_picks_the_run_whose_branch_the_worktree_has_checked_out(
+    project, git, tmp_path
+):
+    root, state_root = project
+    alpha = _make_run(state_root, "docs/specs/alpha.md")
+    beta = _make_run(state_root, "docs/specs/beta.md")
+    wt_alpha = _checkout(git, root, tmp_path, "wt-a", f"conductor/run-{alpha}")
+    wt_beta = _checkout(git, root, tmp_path, "wt-b", f"conductor/run-{beta}")
+    assert resolve.run_for_worktree(wt_alpha).run_key == alpha
+    assert resolve.run_for_worktree(wt_beta).run_key == beta
+
+
+def test_run_for_worktree_picks_the_run_that_records_the_worktree(
+    project, git, tmp_path
+):
+    root, state_root = project
+    _make_run(state_root, "docs/specs/alpha.md")
+    beta = _make_run(state_root, "docs/specs/beta.md")
+    phase = _checkout(git, root, tmp_path, "phase", "some-phase-branch")
+    runstate.update(state_root, beta, lambda d: {**d, "phase_worktree": phase})
+    found = resolve.run_for_worktree(phase)
+    assert found.run_key == beta
+    assert found.state_root == state_root
+
+
+def test_run_for_worktree_finds_a_run_awaiting_the_teams_merge(project, git, tmp_path):
+    root, state_root = project
+    key = _make_run(state_root, "docs/specs/alpha.md", status="awaiting-team-merge")
+    wt = _checkout(git, root, tmp_path, "wt", f"conductor/run-{key}")
+    assert resolve.run_for_worktree(wt).run_key == key
+
+
+def test_run_for_worktree_ignores_a_terminal_run_bound_to_the_worktree(
+    project, git, tmp_path
+):
+    root, state_root = project
+    key = _make_run(state_root, "docs/specs/alpha.md", status="terminal")
+    wt = _checkout(git, root, tmp_path, "wt", f"conductor/run-{key}")
+    with pytest.raises(resolve.RunNotFound):
+        resolve.run_for_worktree(wt)
+
+
+def test_run_for_worktree_with_no_bound_run_among_several_is_ambiguous(
+    project, git, tmp_path
+):
+    """Nothing binds the worktree, so the bare resolution decides — and two active runs are
+    ambiguous."""
+    root, state_root = project
+    alpha = _make_run(state_root, "docs/specs/alpha.md")
+    beta = _make_run(state_root, "docs/specs/beta.md")
+    wt = _checkout(git, root, tmp_path, "wt", "unrelated")
+    with pytest.raises(resolve.RunAmbiguous) as excinfo:
+        resolve.run_for_worktree(wt)
+    assert alpha in str(excinfo.value) and beta in str(excinfo.value)
+
+
+def test_run_for_worktree_prefers_the_bound_run_over_the_sole_active_one(
+    project, git, tmp_path
+):
+    """Run A's final fire moved A to awaiting-team-merge while B is the only active run: A's
+    worktree still means A, never B."""
+    root, state_root = project
+    alpha = _make_run(state_root, "docs/specs/alpha.md", status="awaiting-team-merge")
+    beta = _make_run(state_root, "docs/specs/beta.md")
+    wt = _checkout(git, root, tmp_path, "wt-a", f"conductor/run-{alpha}")
+    assert resolve.run_for_worktree(wt).run_key == alpha
+    assert (
+        resolve.run_for_worktree(root).run_key == beta
+    )  # unbound: the sole active run
+
+
+def test_run_for_worktree_with_an_unbound_checkout_takes_the_one_active_run(
+    project, git, tmp_path
+):
+    root, state_root = project
+    key = _make_run(state_root, "docs/specs/alpha.md")
+    wt = _checkout(git, root, tmp_path, "wt", "unrelated")
+    assert resolve.run_for_worktree(wt).run_key == key
+
+
+def test_run_for_worktree_with_two_bound_runs_is_ambiguous(project, git, tmp_path):
+    root, state_root = project
+    alpha = _make_run(state_root, "docs/specs/alpha.md")
+    beta = _make_run(state_root, "docs/specs/beta.md")
+    wt = _checkout(git, root, tmp_path, "wt", "shared")
+    for key in (alpha, beta):
+        runstate.update(state_root, key, lambda d: {**d, "integration_worktree": wt})
+    with pytest.raises(resolve.RunAmbiguous) as excinfo:
+        resolve.run_for_worktree(wt)
+    assert alpha in str(excinfo.value) and beta in str(excinfo.value)
+
+
+def test_a_same_branch_checkout_of_another_repository_is_not_bound(
+    project, git, git_env, tmp_path
+):
+    root, state_root = project
+    key = _make_run(state_root, "docs/specs/alpha.md")
+    run = runstate.load(state_root, key)
+    assert run is not None
+    other = tmp_path / "other"
+    subprocess.run(
+        ["git", "init", "-q", "-b", run["integration_branch"], str(other)],
+        check=True,
+        capture_output=True,
+        env=git_env,
+        timeout=30,
+    )
+    unbound = resolve.worktree_unbound(root, str(other), run)
+    assert unbound is not None and unbound.foreign
+    mine = _checkout(git, root, tmp_path, "mine", run["integration_branch"])
+    assert resolve.worktree_unbound(root, mine, run) is None

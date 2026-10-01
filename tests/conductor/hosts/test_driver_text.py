@@ -16,9 +16,11 @@ from __future__ import annotations
 import inspect
 import os
 import pathlib
+import subprocess
 
 import pytest
 
+from conductor import resume_script
 from conductor.hosts import base
 
 # Literal, never `base.HOST_IDS`: parametrizing over the value under test would let a falsifier
@@ -80,7 +82,10 @@ CLAUDE_GUARD = (
     "fi"
 )
 
-CLAUDE_FIRE = '"$CLAUDE_BIN" -p "/conductor:autodev" "$@"'
+# `--output-format json` is the one deliberate departure from the shipped v4 line: the fire's
+# final JSON result lands in the driver log, where `conductor usage ingest` reads the fire's
+# token usage (docs/specs/2026-09-29-sustained-context-design.md §3).
+CLAUDE_FIRE = '"$CLAUDE_BIN" -p "/conductor:autodev" --output-format json "$@"'
 
 
 def test_claude_bin_resolution_is_the_shipped_text():
@@ -92,6 +97,9 @@ def test_claude_unresolved_guard_is_the_shipped_text():
 
 
 def test_claude_fire_command_is_the_proven_production_invocation():
+    """Pinned byte-for-byte. The proven v4 invocation plus `--output-format json`, added so
+    the fire's result JSON (with its token usage) lands in the log for usage accounting
+    (sustained-context spec §3). Any other change to this line is a regression."""
     assert base.load("claude").resume_fire_command() == CLAUDE_FIRE
 
 
@@ -104,6 +112,84 @@ def test_claude_posture_arms_are_the_shipped_detection_table():
         bypassPermissions) [ "$prev" = "--permission-mode" ] && POSTURE="full-bypass" ;;
         --settings|--settings=*) [ "$POSTURE" = "full-bypass" ] || POSTURE="scoped" ;;"""
     )
+
+
+@pytest.mark.parametrize(
+    ("host_id", "flag"), [("claude", "--output-format json"), ("codex", "exec --json")]
+)
+def test_fire_command_emits_machine_readable_usage(host_id, flag):
+    assert flag in base.load(host_id).resume_fire_command()
+
+
+@pytest.mark.parametrize("host_id", HOSTS)
+def test_driver_ingests_usage_after_fire_end_bounded_and_never_fatal(host_id):
+    text = resume_script.render("/p/proj", "/p/wt", host_id)
+    end = text.rindex("fire-end rc=")
+    ingest = text.index("usage ingest")
+    exit_line = text.rindex('exit "$rc"')
+    assert end < ingest < exit_line
+    assert f"--host {host_id}" in text[ingest:exit_line]
+    # The worker's handoff is written under CONDUCTOR_HOME="$WORKTREE", not the main checkout.
+    assert '--project "$WORKTREE"' in text[ingest:exit_line]
+    assert '--project "$PROJECT"' not in text[ingest:exit_line]
+    assert "9>&- ||" in text[ingest:exit_line]
+    # The same bound resolution the watchdog's run lookup uses: GNU `timeout`, else the
+    # coreutils `gtimeout` a macOS machine has.
+    assert 'usage_bound="$(command -v timeout || command -v gtimeout || true)"' in text
+    assert '"$usage_bound" -k 5 60 "$CONDUCTOR" usage ingest' in text
+
+
+def _run_usage_tail(tmp_path, host_id, timeout_stub):
+    """Execute ONLY the rendered usage-accounting tail, with a PATH holding nothing but the
+    given `timeout` stub (or nothing at all), and return (exit status, log text)."""
+    text = resume_script.render("/p/proj", "/p/wt", host_id)
+    tail = text[text.index("# USAGE ACCOUNTING") :]
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    if timeout_stub is not None:
+        stub = bindir / "timeout"
+        stub.write_text(timeout_stub)
+        os.chmod(stub, 0o755)
+    log = tmp_path / "log"
+    log.write_text("")
+    prelude = (
+        f"PATH={bindir}\n"
+        "ts() { printf T; }\n"
+        f"LOG={log}\nPROJECT=/p/proj\nWORKTREE=/p/wt\nCONDUCTOR=/nonexistent\n"
+        "FIRE_LOG0=0\nFIRE_T0=$SECONDS\nrc=3\n"
+    )
+    proc = subprocess.run(
+        ["/bin/bash", "-u", "-c", prelude + tail],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return proc.returncode, log.read_text()
+
+
+@pytest.mark.parametrize("host_id", HOSTS)
+@pytest.mark.parametrize("status", [124, 137])
+def test_a_timed_out_ingest_is_logged_and_keeps_the_fire_rc(tmp_path, host_id, status):
+    rc, log = _run_usage_tail(tmp_path, host_id, f"#!/bin/sh\nexit {status}\n")
+    assert rc == 3
+    assert log == "T usage-unrecorded reason=ingest-timeout\n"
+
+
+@pytest.mark.parametrize("host_id", HOSTS)
+def test_no_timeout_binary_is_logged_and_keeps_the_fire_rc(tmp_path, host_id):
+    rc, log = _run_usage_tail(tmp_path, host_id, None)
+    assert rc == 3
+    assert log == "T usage-unrecorded reason=no-timeout-binary\n"
+
+
+@pytest.mark.parametrize("host_id", HOSTS)
+def test_a_failed_ingest_that_did_not_time_out_adds_no_line_and_keeps_the_fire_rc(
+    tmp_path, host_id
+):
+    """`usage ingest` logs its own `usage-unrecorded` on exit 1; the driver adds nothing."""
+    rc, log = _run_usage_tail(tmp_path, host_id, "#!/bin/sh\nexit 1\n")
+    assert rc == 3
+    assert log == ""
 
 
 # --- Codex's fragments spawn codex, and say so ----------------------------------------------
