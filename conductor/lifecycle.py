@@ -61,7 +61,7 @@ import shlex
 import subprocess
 import sys
 
-from conductor import branches, finalpr, remote as remote_mod, resume_script
+from conductor import branches, dispatches, finalpr, remote as remote_mod, resume_script
 from conductor.core import (
     locks,
     ownership,
@@ -333,6 +333,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         # READ, never recovered: an unfinished journal is a fact about the run, and completing
         # it here would make the read-only verb the one that mutates state.
         "pending_transactions": transaction.pending_states(resolution.state_root),
+        "usage": dispatches.phase_totals(run.get("dispatches") or []),
     }
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
@@ -380,7 +381,39 @@ def cmd_status(args: argparse.Namespace) -> int:
             "reverses it; status deliberately does not.",
             file=sys.stderr,
         )
+    _print_usage(report["usage"])
     return EXIT_OK
+
+
+_USAGE_ROLES = ("worker", "reviewer")
+
+
+def _print_usage(usage: dict[str, dict[str, dict]]) -> None:
+    if not usage:
+        print("usage: none recorded")
+        return
+    print("usage (tokens: input / cached / cache-write / output; wall s):")
+    phases = [k for k in usage if k != dispatches.UNATTRIBUTED]
+    if dispatches.UNATTRIBUTED in usage:
+        phases.append(dispatches.UNATTRIBUTED)
+    for phase in phases:
+        label = "unattributed" if phase == dispatches.UNATTRIBUTED else f"phase {phase}"
+        roles = [r for r in _USAGE_ROLES if r in usage[phase]]
+        roles += [r for r in usage[phase] if r not in _USAGE_ROLES]
+        for role in roles:
+            row = usage[phase][role]
+            tokens = (
+                f"{row['input_tokens']} / {row['cached_input_tokens']} / "
+                f"{row['cache_write_tokens']} / {row['output_tokens']}"
+            )
+            flag = (
+                ""
+                if row["complete"]
+                else "   INCOMPLETE (a dispatch reported no usage)"
+            )
+            print(
+                f"  {label:<12}  {role:<9}  {row['dispatches']:>3}   {tokens}   {row['wall_s']:.1f}{flag}"
+            )
 
 
 # --- resume -------------------------------------------------------------------------------
