@@ -253,8 +253,10 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
      either can't resolve — so a claude/node/plugin upgrade cannot silently rot it the way a
      hand-written generation-time-pinned path did (live-run silent stall 2026-07-05, see
      `docs/reviews/2026-07-05-conductor-tier-b-driver-robustness.md`). It fires the recorded
-     host's autodev — `claude -p "/conductor:autodev"` on Claude, `codex exec --cd
-     <run-worktree> "Read <plugin>/skills/autodev/SKILL.md and execute it."` on Codex — from the
+     host's autodev — `claude -p "/conductor:autodev" --output-format json <flags>` on Claude,
+     `codex exec --json --cd <run-worktree> <flags> "Read <plugin>/skills/autodev/SKILL.md and
+     execute it."` on Codex (the JSON output feeds per-fire token accounting, which a post-fire
+     `conductor usage ingest` step records) — from the
      RUN WORKTREE (never the owner's checkout; autodev, not start —
      a headless one-shot must do a phase, not register a cron that dies with it), guarding: (a) one
      driver at a time — `flock -n <project>/.conductor/resume.lock`, held by the driver (never
@@ -283,8 +285,8 @@ description: Start (or resume) an autonomous conductor run for a spec. Reconcile
 
      | host | variable the driver expands | fire | scoped example | full-bypass value |
      |---|---|---|---|---|
-     | `claude` | `CONDUCTOR_RESUME_CLAUDE_FLAGS` | `claude -p "/conductor:autodev" <flags>` | `--settings <path-to-scoped-settings.json>` | `--dangerously-skip-permissions` |
-     | `codex` | `CONDUCTOR_RESUME_CODEX_FLAGS` | `codex exec --cd <run-worktree> <flags> "<autodev prompt>"` | `--sandbox workspace-write` | `--dangerously-bypass-approvals-and-sandbox` |
+     | `claude` | `CONDUCTOR_RESUME_CLAUDE_FLAGS` | `claude -p "/conductor:autodev" --output-format json <flags>` | `--settings <path-to-scoped-settings.json>` | `--dangerously-skip-permissions` |
+     | `codex` | `CONDUCTOR_RESUME_CODEX_FLAGS` | `codex exec --json --cd <run-worktree> <flags> "<autodev prompt>"` | `--sandbox workspace-write` | `--dangerously-bypass-approvals-and-sandbox` |
 
      Set **only your own host's** variable. Every fire logs `fire-start posture=<label>`,
      derived from exact tokens of that variable (Codex also recognizes `-s`/`--sandbox

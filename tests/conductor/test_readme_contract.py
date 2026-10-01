@@ -6,6 +6,7 @@ README cannot be edited into agreement with a stale copy.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -67,3 +68,17 @@ def test_spec_kit_is_not_listed_as_a_required_skill():
 def test_the_review_step_is_host_neutral():
     """The loop diagram used to prescribe `/codex review` on every host."""
     assert "/codex review" not in _readme()
+
+
+def test_cli_reference_documents_the_review_and_usage_verbs():
+    ref = _section(_readme(), "## CLI reference")
+    assert "`conductor review <pr> --brief <file>" in ref
+    assert "`conductor usage ingest" in ref
+
+
+def test_plugin_manifests_carry_the_same_version():
+    versions = set()
+    for rel in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+            versions.add(json.load(f)["version"])
+    assert len(versions) == 1, versions

@@ -199,13 +199,21 @@ step 3b's terminal crontab removal.
    4. **one PR per phase, base = the RUN branch** (`Closes #<phase-issue>` for traceability —
       merge-gate blocks without it, and its base leg blocks any other base with
       `base-mismatch`; run-branch merges don't auto-close issues — `phase-done` does that).
-   5. **Opposite-host review.** Invoke the review wrapper for the host you are NOT — `conductor
-      preflight` names it for your host, and it is `codex` on a Claude-hosted run and `claude` on
-      a Codex-hosted one — asking it to run `requesting-code-review` and provide a read-only,
-      pre-merge review for PR#<n> against the phase's Spec sections and ADRs. Post the result as
-      a PR comment starting with the gate's review marker
+   5. **Opposite-host review.** Write the phase brief — its Spec sections and ADRs, verbatim —
+      to a temp file, push the phase branch, then run `conductor review <pr> --brief <file>`
+      from the phase worktree. It launches the reviewer host for you (the host you are NOT;
+      `conductor preflight` names it — `codex` on a Claude-hosted run, `claude` on a Codex-hosted
+      one) read-only and time-bounded against the PR head, and prints the review on stdout. Post
+      that stdout as a PR comment starting with the gate's review marker
       (**`CONDUCTOR_REVIEW_MARKER`, default `<Opposite-host> review`** — `Codex review` on a
-      Claude-hosted run, `Claude review` on a Codex-hosted one).
+      Claude-hosted run, `Claude review` on a Codex-hosted one). Exit codes:
+        - **exit 2** — refused before any host ran; stderr names the precondition. Fix it
+          (`checkout-stale`: push, or check out the PR head; `brief-too-large`: shorten the
+          brief; reviewer host missing or `gh pr view` failed: repair and retry) and re-run.
+        - **exit 3** — the host ran and failed; its last output is on stderr. Read it and apply
+          the usage-limit / transient-retry rules below unchanged.
+        - **exit 4** — `review-timeout`; treat as transient: retry once, then take the same
+          fallback as a persistent transient failure.
       **Usage-limit fallback — continue uninterrupted, never stall.** If the opposite host
       reports its 5-hour OR weekly usage limit is exhausted (its stderr/stdout names a
       usage/rate/quota limit, or its status shows the window spent — distinct from a transient
@@ -233,7 +241,7 @@ step 3b's terminal crontab removal.
       independent re-review.
       The open `debt` issue rides the handoff's `Open:` line to the final owner PR, where YOU decide;
       it SURFACES the degradation, it does not silently repair it. Keep working.
-   6. `receiving-code-review` — apply fixes, commit, then **the opposite host re-reviews the
+   6. `receiving-code-review` — apply fixes, commit, then **re-run `conductor review` for the
       FINAL state** (posted as another marker comment; if it is still usage-limited the step-5
       fallback applies again — `code-review` the final state under the same configured marker);
       repeat until the last review postdates the last commit and raises nothing blocking.

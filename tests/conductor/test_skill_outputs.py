@@ -635,6 +635,41 @@ def test_adr_precondition_lives_in_autodevs_pre_claim_step():
     assert "build within the decisions" in execute
 
 
+def _recipe_step(text: str, start: str, end: str) -> str:
+    """The nested per-phase recipe step from `start` to `end`, whitespace-normalized."""
+    return re.sub(r"\s+", " ", text[text.index(start) : text.index(end)])
+
+
+def test_autodev_opposite_host_review_goes_through_conductor_review():
+    raw = open(os.path.join(ROOT, "skills/autodev/SKILL.md"), encoding="utf-8").read()
+    step5 = _recipe_step(
+        raw, "5. **Opposite-host review.**", "6. `receiving-code-review`"
+    )
+    assert "conductor review <pr> --brief" in step5
+    assert "Usage-limit fallback" in step5  # the fallback rules survive unchanged
+    assert "CONDUCTOR_REVIEW_AUTHOR" in step5
+    # every exit code the verb can return is mapped, so a worker never improvises one
+    for code in ("exit 2", "exit 3", "exit 4"):
+        assert code in step5, code
+
+
+def test_autodev_final_state_re_review_reruns_conductor_review():
+    raw = open(os.path.join(ROOT, "skills/autodev/SKILL.md"), encoding="utf-8").read()
+    step6 = _recipe_step(
+        raw, "6. `receiving-code-review`", "7. **merge INTO THE RUN BRANCH"
+    )
+    assert "re-run `conductor review`" in step6
+    assert "opposite host re-reviews" not in step6
+
+
+def test_start_describes_the_fire_commands_with_json_output():
+    raw = open(os.path.join(ROOT, "skills/start/SKILL.md"), encoding="utf-8").read()
+    text = re.sub(r"\s+", " ", raw)
+    assert '`claude -p "/conductor:autodev" --output-format json <flags>`' in text
+    assert "`codex exec --json --cd <run-worktree> <flags> " in text
+    assert "token accounting" in text
+
+
 @pytest.mark.parametrize("path", sorted(_FORBIDDEN))
 def test_no_skill_still_carries_a_pre_a1_host_specific_form(path):
     raw = open(os.path.join(ROOT, path), encoding="utf-8").read().lower()
