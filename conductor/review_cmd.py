@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 
@@ -32,8 +33,9 @@ EXIT_USAGE = 64
 
 _TOOL_TIMEOUT_S = 60.0
 _DEFAULT_REVIEW_TIMEOUT_S = 2400.0
-#: Argv strings are capped at 128 KiB by the kernel; half of that is left for the template.
-_BRIEF_MAX_BYTES = 64 * 1024
+#: Argv strings are capped at 128 KiB by the kernel; the whole prompt (template and brief, as
+#: UTF-8) is held to half of that.
+_PROMPT_MAX_BYTES = 64 * 1024
 _TAIL_LINES = 40
 
 PROMPT = """\
@@ -95,13 +97,15 @@ def _pull_request(pr: str, root: str) -> dict:
 
 
 def _read_brief(path: str) -> str:
+    # Decoding with replacement never shrinks the bytes, so a raw read past the cap is already
+    # too large; the exact check runs on the finished prompt.
     try:
         with open(path, "rb") as handle:
-            raw = handle.read(_BRIEF_MAX_BYTES + 1)
+            raw = handle.read(_PROMPT_MAX_BYTES + 1)
     except OSError as exc:
         raise Refused(f"brief unreadable: {exc}") from exc
-    if len(raw) > _BRIEF_MAX_BYTES:
-        raise Refused(f"brief-too-large: over {_BRIEF_MAX_BYTES} bytes ({path})")
+    if len(raw) > _PROMPT_MAX_BYTES:
+        raise Refused(f"brief-too-large: over {_PROMPT_MAX_BYTES} bytes ({path})")
     return raw.decode("utf-8", errors="replace")
 
 
@@ -114,6 +118,8 @@ def _reason(exc: BaseException) -> str:
 
 
 def _review(args: argparse.Namespace) -> int:
+    if not (math.isfinite(args.timeout) and args.timeout > 0):
+        raise Refused(f"bad timeout {args.timeout!r}: must be a finite number > 0")
     top = _tool(["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd(), what="git")
     root = os.path.realpath(top)
     resolve.recover_pending(resolve.state_root(root))
@@ -121,9 +127,13 @@ def _review(args: argparse.Namespace) -> int:
         found = resolve.resolve(run_key=args.run, start=root)
     except (resolve.RunNotFound, resolve.RunAmbiguous) as exc:
         raise Refused(str(exc)) from exc
-    reviewer = found.run.get("reviewer_host") or hostbase.opposite(
-        runhost.resolve(root)
-    )
+    try:
+        reviewer = found.run.get("reviewer_host") or hostbase.opposite(
+            runhost.resolve(root)
+        )
+        adapter = hostbase.load(reviewer)
+    except Exception as exc:  # noqa: BLE001 — unknown/conflicting host: refuse, never a traceback
+        raise Refused(f"reviewer host unresolved: {_reason(exc)}") from exc
 
     pr = _pull_request(args.pr, root)
     head_sha = str(pr.get("headRefOid") or "")
@@ -158,14 +168,22 @@ def _review(args: argparse.Namespace) -> int:
         base_sha=base_sha,
         brief=brief,
     )
-    adapter = hostbase.load(reviewer)
+    if len(prompt.encode("utf-8")) > _PROMPT_MAX_BYTES:
+        raise Refused(
+            f"brief-too-large: prompt over {_PROMPT_MAX_BYTES} bytes ({args.brief})"
+        )
     try:
         argv = adapter.reviewer_argv(prompt, project_root=root)
     except (hostbase.HostUnavailable, ValueError) as exc:
         raise Refused(str(exc)) from exc
 
     # Claude's argv has no workspace flag, so the checkout is its cwd.
-    result = bounded.run_bounded(argv, cwd=root, timeout=args.timeout)
+    try:
+        result = bounded.run_bounded(argv, cwd=root, timeout=args.timeout)
+    except (
+        OSError
+    ) as exc:  # executable vanished, E2BIG: no host ran, so nothing is recorded
+        raise Refused(f"reviewer host not launched: {_reason(exc)}") from exc
     usage = adapter.usage_from_output(result.stdout)
     if result.timed_out:
         outcome = "timeout"
@@ -204,7 +222,12 @@ def _review(args: argparse.Namespace) -> int:
 
 def _default_timeout() -> float:
     raw = os.environ.get("CONDUCTOR_REVIEW_TIMEOUT_S")
-    return float(raw) if raw else _DEFAULT_REVIEW_TIMEOUT_S
+    if not raw:
+        return _DEFAULT_REVIEW_TIMEOUT_S
+    try:
+        return float(raw)
+    except ValueError:
+        raise Refused(f"bad CONDUCTOR_REVIEW_TIMEOUT_S {raw!r}: not a number") from None
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -229,14 +252,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         parser = _parser()
         args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-        if args.timeout is None:
-            args.timeout = _default_timeout()
     except SystemExit as exc:
         return EXIT_USAGE if exc.code else EXIT_OK
-    except ValueError as exc:
-        print(f"usage: bad CONDUCTOR_REVIEW_TIMEOUT_S: {exc}", file=sys.stderr)
-        return EXIT_USAGE
     try:
+        if args.timeout is None:
+            args.timeout = _default_timeout()
         return _review(args)
     except Refused as exc:
         print(str(exc), file=sys.stderr)

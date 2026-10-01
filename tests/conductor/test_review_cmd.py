@@ -100,10 +100,20 @@ class Proj:
         kwargs.setdefault("exec_fixture", CODEX_FIXTURE)
         codex_stub.install(self.bindir, exec_log=self.exec_log, **kwargs)
 
-    def claude(self, script_body: str) -> None:
+    def claude(self) -> Path:
+        """A `claude` that logs its argv and cwd as one JSON line, then replays the fixture."""
+        log = self.tmp / "claude-calls.jsonl"
         exe = self.bindir / "claude"
-        exe.write_text(f"#!/bin/sh\n{script_body}\n", encoding="utf-8")
+        exe.write_text(
+            f"#!{shutil.which('python3')}\n"
+            "import json, os, sys\n"
+            f"with open({str(log)!r}, 'a') as f:\n"
+            "    f.write(json.dumps({'argv': sys.argv[1:], 'cwd': os.getcwd()}) + '\\n')\n"
+            f"sys.stdout.write(open({str(CLAUDE_FIXTURE)!r}).read())\n",
+            encoding="utf-8",
+        )
         exe.chmod(0o755)
+        return log
 
     def review(self, *extra: str) -> int:
         return review_cmd.main([PR, "--brief", str(self.brief), *extra])
@@ -202,9 +212,14 @@ def test_review_uses_the_run_reviewer_host_when_set(proj, capsys):
         proj.run_key,
         lambda doc: {**doc, "reviewer_host": "claude"},
     )
-    proj.claude(f"cat {CLAUDE_FIXTURE}")
+    log = proj.claude()
     assert proj.review() == 0
     assert capsys.readouterr().out.strip() == "alpha"
+    (call,) = [json.loads(line) for line in log.read_text().splitlines()]
+    argv = call["argv"]
+    assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert os.path.realpath(call["cwd"]) == os.path.realpath(proj.root)
     assert proj.exec_calls == []  # codex was not launched
     entry = proj.dispatches[-1]
     assert entry["host"] == "claude"
@@ -268,9 +283,12 @@ def test_review_exits_2_when_the_reviewer_host_is_not_installed(
     bare.mkdir()
     (bare / "gh").symlink_to(proj.bindir / "gh")
     (bare / "git").symlink_to(shutil.which("git") or "/usr/bin/git")
+    (bare / "python3").symlink_to(shutil.which("python3") or "/usr/bin/python3")
     monkeypatch.setenv("PATH", str(bare))
     assert proj.review() == 2
-    assert capsys.readouterr().err.strip() != ""
+    err = capsys.readouterr().err
+    assert "`codex` is not on PATH" in err
+    assert "gh pr view" not in err  # the PR was read; the host is what is missing
     assert proj.dispatches == []
 
 
@@ -308,3 +326,104 @@ def test_review_timeout_defaults_from_the_environment(proj, monkeypatch):
 def test_no_gate_path_reads_dispatches():
     for mod in ("conductor/merge_gate.py", "conductor/merge_cmd.py"):
         assert "dispatches" not in (ROOT / mod).read_text()
+
+
+def test_review_exits_2_for_an_unknown_reviewer_host(proj, capsys):
+    runstate.update(
+        proj.state_root,
+        proj.run_key,
+        lambda doc: {**doc, "reviewer_host": "Codex"},
+    )
+    assert proj.review() == 2
+    err = capsys.readouterr().err
+    assert "reviewer host unresolved" in err
+    assert "UnknownHost" in err
+    assert "Traceback" not in err
+    assert proj.exec_calls == []
+    assert proj.dispatches == []
+
+
+def test_review_exits_2_when_launching_the_host_raises_oserror(
+    proj, capsys, monkeypatch
+):
+    def fail(*_args, **_kwargs):
+        raise OSError(7, "Argument list too long")
+
+    monkeypatch.setattr(review_cmd.bounded, "run_bounded", _only_for_host(fail))
+    assert proj.review() == 2
+    err = capsys.readouterr().err
+    assert "reviewer host not launched" in err
+    assert "Argument list too long" in err
+    assert "Traceback" not in err
+    assert proj.dispatches == []
+
+
+def _only_for_host(replacement):
+    """Send only the reviewer host launch to ``replacement``; git and gh keep running for real."""
+    real = review_cmd.bounded.run_bounded
+
+    def route(argv, **kwargs):
+        if os.path.basename(argv[0]) in ("codex", "claude"):
+            return replacement(argv, **kwargs)
+        return real(argv, **kwargs)
+
+    return route
+
+
+def _prompt_overhead(proj, git) -> int:
+    base_sha = git(proj.root, "rev-parse", f"origin/{BASE_BRANCH}").stdout.strip()
+    empty = review_cmd.PROMPT.format(
+        reviewer="codex",
+        number=int(PR),
+        title="Add the reviewer verb",
+        url=f"https://github.com/{REPO}/pull/{PR}",
+        head_sha=proj.head,
+        base_sha=base_sha,
+        brief="",
+    )
+    return len(empty.encode("utf-8"))
+
+
+def test_review_accepts_a_prompt_of_exactly_the_cap(proj, git, capsys):
+    cap = review_cmd._PROMPT_MAX_BYTES
+    proj.brief.write_bytes(b"x" * (cap - _prompt_overhead(proj, git)))
+    assert proj.review() == 0
+    assert len(proj.exec_calls[0][-1].encode("utf-8")) == cap
+
+
+def test_review_refuses_a_prompt_one_byte_over_the_cap(proj, git, capsys):
+    cap = review_cmd._PROMPT_MAX_BYTES
+    proj.brief.write_bytes(b"x" * (cap - _prompt_overhead(proj, git) + 1))
+    assert proj.review() == 2
+    assert "brief-too-large" in capsys.readouterr().err
+    assert proj.exec_calls == []
+    assert proj.dispatches == []
+
+
+def test_review_counts_replacement_inflation_against_the_cap(proj, git, capsys):
+    # Each invalid byte decodes to U+FFFD (3 bytes): well under the cap raw, over it decoded.
+    cap = review_cmd._PROMPT_MAX_BYTES
+    proj.brief.write_bytes(b"\xff" * (cap // 2))
+    assert proj.brief.stat().st_size < cap
+    assert proj.review() == 2
+    assert "brief-too-large" in capsys.readouterr().err
+    assert proj.exec_calls == []
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "nan", "inf", "-inf"])
+def test_review_refuses_a_timeout_that_is_not_finite_and_positive(proj, capsys, bad):
+    assert proj.review(f"--timeout={bad}") == 2
+    assert "bad timeout" in capsys.readouterr().err
+    assert proj.exec_calls == []
+    assert proj.dispatches == []
+
+
+@pytest.mark.parametrize("bad", ["0", "nan", "soon"])
+def test_review_refuses_a_bad_timeout_from_the_environment(
+    proj, capsys, monkeypatch, bad
+):
+    monkeypatch.setenv("CONDUCTOR_REVIEW_TIMEOUT_S", bad)
+    assert proj.review() == 2
+    assert "timeout" in capsys.readouterr().err.lower()
+    assert proj.exec_calls == []
+    assert proj.dispatches == []
