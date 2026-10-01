@@ -54,6 +54,7 @@ case "${1:-}" in
   # `--strict` refused on the files it had just made, under a report saying nothing was written.
   doctor) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" PYTHONDONTWRITEBYTECODE=1 exec python3 -B -m conductor.doctor "$@" ;;
   status) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.lifecycle status "$@" ;;
+  usage) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.usage_cmd "$@" ;;
   resume) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.lifecycle resume "$@" ;;
   heartbeat) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.lifecycle heartbeat "$@" ;;
   finish) shift; PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m conductor.lifecycle finish "$@" ;;
