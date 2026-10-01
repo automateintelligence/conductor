@@ -22,7 +22,7 @@ import re
 import sys
 import time
 
-from conductor import dispatches
+from conductor import dispatches, paths
 from conductor.core import resolve
 from conductor.hosts import base as hostbase
 
@@ -51,19 +51,42 @@ def _outcome(rc: int) -> str:
     return "error" if rc != 0 else "ok"
 
 
+def _fresh(path: str, wall_s: float) -> bool:
+    """Whether ``path`` was written by this fire (or later): mtime at or after the fire start."""
+    return os.stat(path).st_mtime >= time.time() - wall_s - 1
+
+
+def _claimed_phase(project: str, wall_s: float) -> str | None:
+    """The phase this fire claimed (``ledger.claim.claim`` writes it), if it claimed one."""
+    path = paths.claimed_phase_path(project)
+    try:
+        if not _fresh(path, wall_s):
+            return None
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read().strip()
+    except OSError:
+        return None
+    return text if text.isdigit() else None
+
+
 def _phase_and_head(project: str, wall_s: float) -> tuple[str | None, str | None]:
-    """Phase id and head sha from ``handoff.md``, only if this fire (or a later write) wrote it."""
+    """Phase id and head sha from ``handoff.md``, only if this fire (or a later write) wrote it.
+    Without one, the phase this fire claimed and no head: a worker that claimed a phase and
+    crashed before its handoff still lands on that phase."""
     path = os.path.join(project, ".conductor", "handoff.md")
     try:
-        if os.stat(path).st_mtime < time.time() - wall_s - 1:
-            return None, None
+        if not _fresh(path, wall_s):
+            return _claimed_phase(project, wall_s), None
         with open(path, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
     except OSError:
-        return None, None
+        return _claimed_phase(project, wall_s), None
     phase = _PHASE_RE.search(text)
     head = _HEAD_RE.search(text)
-    return (phase.group(1) if phase else None, head.group(1) if head else None)
+    return (
+        phase.group(1) if phase else _claimed_phase(project, wall_s),
+        head.group(1) if head else None,
+    )
 
 
 _REASON_MAX = 200

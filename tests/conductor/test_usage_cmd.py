@@ -186,6 +186,48 @@ def test_ingest_takes_phase_and_head_from_a_fresh_handoff_only(proj):
     assert d["phase_id"] is None and d["head_sha"] is None
 
 
+def test_ingest_without_a_handoff_takes_the_phase_this_fire_claimed(proj):
+    """A worker that claims a phase and crashes before its handoff still attributes the fire
+    to that phase, so the phase's totals show the missing usage as incomplete."""
+    (proj.root / ".conductor" / "claimed_phase").write_text("31\n")
+    log = proj.root / ".conductor" / "resume-autodev.log"
+    log.write_text(CLAUDE_FIXTURE_TEXT + "\n")
+    assert _ingest(proj, log, wall_s="60", rc="1") == 0
+    d = proj.run["dispatches"][-1]
+    assert d["phase_id"] == "31" and d["head_sha"] is None
+    assert d["outcome"] == "error"
+
+
+def test_ingest_ignores_a_claimed_phase_from_an_earlier_fire(proj):
+    claimed = proj.root / ".conductor" / "claimed_phase"
+    claimed.write_text("31\n")
+    os.utime(claimed, (0, 0))
+    log = proj.root / ".conductor" / "resume-autodev.log"
+    log.write_text(CLAUDE_FIXTURE_TEXT + "\n")
+    assert _ingest(proj, log, wall_s="60") == 0
+    assert proj.run["dispatches"][-1]["phase_id"] is None
+
+
+def test_ingest_prefers_a_fresh_handoff_over_the_claimed_phase(proj):
+    (proj.root / ".conductor" / "claimed_phase").write_text("31\n")
+    (proj.root / ".conductor" / "handoff.md").write_text(
+        "**Active:** phase issue #42 (in-progress)\n**Last unit:** aaa111..bbb222 — x\n"
+    )
+    log = proj.root / ".conductor" / "resume-autodev.log"
+    log.write_text(CLAUDE_FIXTURE_TEXT + "\n")
+    assert _ingest(proj, log, wall_s="60") == 0
+    d = proj.run["dispatches"][-1]
+    assert d["phase_id"] == "42" and d["head_sha"] == "bbb222"
+
+
+def test_ingest_ignores_a_claimed_phase_that_is_not_an_issue_number(proj):
+    (proj.root / ".conductor" / "claimed_phase").write_text("garbage\n")
+    log = proj.root / ".conductor" / "resume-autodev.log"
+    log.write_text(CLAUDE_FIXTURE_TEXT + "\n")
+    assert _ingest(proj, log, wall_s="60") == 0
+    assert proj.run["dispatches"][-1]["phase_id"] is None
+
+
 def test_ingest_from_a_linked_worktree_reads_its_handoff_and_finds_the_run(proj, git):
     """The driver passes the run WORKTREE: the worker's handoff lives there, and the run is
     still found through the git common dir the worktree shares with the main checkout."""
