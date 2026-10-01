@@ -9,14 +9,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import signal
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from conductor import dispatches, review_cmd, run_cmd
-from conductor.core import runstate
+from conductor.core import resolve, runstate
+from conductor.hosts import bounded
 
 from . import codex_stub
 
@@ -106,9 +111,12 @@ class Proj:
         exe = self.bindir / "claude"
         exe.write_text(
             f"#!{shutil.which('python3')}\n"
-            "import json, os, sys\n"
+            "import glob, json, os, sys\n"
+            "args = sys.argv[1:]\n"
+            "ctx = args[args.index('--add-dir') + 1] if '--add-dir' in args else ''\n"
+            "diffs = {p: open(p).read() for p in glob.glob(os.path.join(ctx, '*'))}\n"
             f"with open({str(log)!r}, 'a') as f:\n"
-            "    f.write(json.dumps({'argv': sys.argv[1:], 'cwd': os.getcwd()}) + '\\n')\n"
+            "    f.write(json.dumps({'argv': args, 'cwd': os.getcwd(), 'diffs': diffs}) + '\\n')\n"
             f"sys.stdout.write(open({str(CLAUDE_FIXTURE)!r}).read())\n",
             encoding="utf-8",
         )
@@ -198,7 +206,17 @@ def test_review_prompt_names_the_head_base_and_brief(proj, git):
     assert proj.review() == 0
     argv = proj.exec_calls[0]
     prompt = argv[-1]
-    assert f"git diff {base_sha}..{proj.head}" in prompt
+    match = re.search(
+        r"The full change is in (\S+) \(git diff (\w+)\.\.(\w+)\)\.", prompt
+    )
+    assert match is not None, prompt
+    assert match.group(2, 3) == (base_sha, proj.head)
+    assert os.path.basename(match.group(1)) == f"pr-{PR}.diff"
+    assert not os.path.exists(os.path.dirname(match.group(1)))  # removed after the run
+    assert "Read it, and read any file in this checkout you need for context." in prompt
+    assert "Review the full change with" not in prompt  # no instruction to run git
+    assert "Read-only: do not modify any file." in prompt
+    assert "Do not run the project's full test suite." in prompt
     assert "PR #7: Add the reviewer verb" in prompt
     assert "Phase 3: the reviewer verb." in prompt
     assert "VERDICT: APPROVE | VERDICT: CHANGES REQUESTED" in prompt
@@ -219,6 +237,7 @@ def test_review_uses_the_run_reviewer_host_when_set(proj, capsys):
     argv = call["argv"]
     assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
     assert argv[argv.index("--output-format") + 1] == "json"
+    assert "--tools=Read,Grep,Glob" in argv and "--restricted" in argv
     assert os.path.realpath(call["cwd"]) == os.path.realpath(proj.root)
     assert proj.exec_calls == []  # codex was not launched
     entry = proj.dispatches[-1]
@@ -370,7 +389,19 @@ def _only_for_host(replacement):
     return route
 
 
-def _prompt_overhead(proj, git) -> int:
+def _fixed_context_dir(proj, monkeypatch) -> Path:
+    """Pin the per-review temp dir, so the diff path in the prompt has a known length."""
+    ctx = proj.tmp / "review-ctx"
+
+    def mkdtemp(*_args, **_kwargs):
+        ctx.mkdir()
+        return str(ctx)
+
+    monkeypatch.setattr(review_cmd.tempfile, "mkdtemp", mkdtemp)
+    return ctx
+
+
+def _prompt_overhead(proj, git, ctx: Path) -> int:
     base_sha = git(proj.root, "rev-parse", f"origin/{BASE_BRANCH}").stdout.strip()
     empty = review_cmd.PROMPT.format(
         reviewer="codex",
@@ -379,25 +410,29 @@ def _prompt_overhead(proj, git) -> int:
         url=f"https://github.com/{REPO}/pull/{PR}",
         head_sha=proj.head,
         base_sha=base_sha,
+        diff_path=str(ctx / f"pr-{PR}.diff"),
         brief="",
     )
     return len(empty.encode("utf-8"))
 
 
-def test_review_accepts_a_prompt_of_exactly_the_cap(proj, git, capsys):
+def test_review_accepts_a_prompt_of_exactly_the_cap(proj, git, capsys, monkeypatch):
+    ctx = _fixed_context_dir(proj, monkeypatch)
     cap = review_cmd._PROMPT_MAX_BYTES
-    proj.brief.write_bytes(b"x" * (cap - _prompt_overhead(proj, git)))
+    proj.brief.write_bytes(b"x" * (cap - _prompt_overhead(proj, git, ctx)))
     assert proj.review() == 0
     assert len(proj.exec_calls[0][-1].encode("utf-8")) == cap
 
 
-def test_review_refuses_a_prompt_one_byte_over_the_cap(proj, git, capsys):
+def test_review_refuses_a_prompt_one_byte_over_the_cap(proj, git, capsys, monkeypatch):
+    ctx = _fixed_context_dir(proj, monkeypatch)
     cap = review_cmd._PROMPT_MAX_BYTES
-    proj.brief.write_bytes(b"x" * (cap - _prompt_overhead(proj, git) + 1))
+    proj.brief.write_bytes(b"x" * (cap - _prompt_overhead(proj, git, ctx) + 1))
     assert proj.review() == 2
     assert "brief-too-large" in capsys.readouterr().err
     assert proj.exec_calls == []
     assert proj.dispatches == []
+    assert not ctx.exists()  # the refused review left nothing behind
 
 
 def test_review_counts_replacement_inflation_against_the_cap(proj, git, capsys):
@@ -425,5 +460,188 @@ def test_review_refuses_a_bad_timeout_from_the_environment(
     monkeypatch.setenv("CONDUCTOR_REVIEW_TIMEOUT_S", bad)
     assert proj.review() == 2
     assert "timeout" in capsys.readouterr().err.lower()
+    assert proj.exec_calls == []
+    assert proj.dispatches == []
+
+
+def test_review_gives_the_claude_reviewer_the_diff_in_a_context_dir_then_removes_it(
+    proj, git, capsys
+):
+    runstate.update(
+        proj.state_root,
+        proj.run_key,
+        lambda doc: {**doc, "reviewer_host": "claude"},
+    )
+    log = proj.claude()
+    base_sha = git(proj.root, "rev-parse", f"origin/{BASE_BRANCH}").stdout.strip()
+    expected = git(proj.root, "diff", "--no-color", f"{base_sha}..{proj.head}").stdout
+    assert proj.review() == 0
+    (call,) = [json.loads(line) for line in log.read_text().splitlines()]
+    ctx = call["argv"][call["argv"].index("--add-dir") + 1]
+    diff_path = os.path.join(ctx, f"pr-{PR}.diff")
+    assert call["diffs"] == {diff_path: expected}  # present, and right, during the run
+    assert "+phase work" in expected
+    assert f"The full change is in {diff_path} " in call["argv"][1]
+    assert not os.path.exists(ctx)
+
+
+def test_review_removes_the_context_dir_when_the_host_fails(proj, capsys, monkeypatch):
+    seen: list[str] = []
+    real_mkdtemp = review_cmd.tempfile.mkdtemp
+
+    def recording_mkdtemp(*args, **kwargs):
+        seen.append(real_mkdtemp(*args, **kwargs))
+        return seen[-1]
+
+    monkeypatch.setattr(review_cmd.tempfile, "mkdtemp", recording_mkdtemp)
+    proj.codex(exec_fixture=None, exec_stderr="usage limit reached\n", exec_exit=1)
+    assert proj.review() == 3
+    assert len(seen) == 1 and not os.path.exists(seen[0])
+
+
+def test_review_timeout_defaults_to_540_seconds(proj, capsys, monkeypatch):
+    """Under Claude's 600 s Bash maximum and the fire watchdog's 1800 s idle window."""
+    assert review_cmd._DEFAULT_REVIEW_TIMEOUT_S == 540
+    seen: list[float] = []
+
+    def record(argv, **kwargs):
+        seen.append(kwargs["timeout"])
+        return review_cmd.bounded.Bounded(
+            returncode=0,
+            stdout=CODEX_FIXTURE.read_text(encoding="utf-8"),
+            stderr="",
+            duration_s=0.1,
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(review_cmd.bounded, "run_bounded", _only_for_host(record))
+    assert proj.review() == 0
+    assert seen == [540]
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP", "SIGINT"])
+def test_a_signal_during_the_review_kills_the_reviewer_and_records_it(
+    proj, capsys, signame
+):
+    """The worker's shell limit or the fire watchdog kills `conductor review`; the reviewer it
+    launched must die with it, and the attempt must still be on the run."""
+    pidfile = proj.tmp / "reviewer.pid"
+    exe = proj.bindir / "codex"
+    exe.write_text(
+        f"#!{shutil.which('python3')}\n"
+        "import os, time\n"
+        f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    exe.chmod(0o755)
+    sig = getattr(signal, signame)
+    previous = signal.getsignal(sig)
+
+    def deliver():
+        deadline = time.monotonic() + 20
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if pidfile.exists():  # never signal the suite itself when no reviewer started
+            time.sleep(0.2)
+            os.kill(os.getpid(), sig)
+
+    sender = threading.Thread(target=deliver, daemon=True)
+    sender.start()
+    started = time.monotonic()
+    rc = proj.review("--timeout", "60")
+    sender.join(timeout=5)
+    assert rc == 4
+    assert time.monotonic() - started < 30
+    assert f"review-interrupted ({signame})" in capsys.readouterr().err
+    time.sleep(0.2)
+    assert not _alive(int(pidfile.read_text()))
+    entry = proj.dispatches[-1]
+    assert entry["role"] == "reviewer" and entry["host"] == "codex"
+    assert entry["outcome"] == "error"
+    assert entry["note"] == "interrupted"
+    assert signal.getsignal(sig) == previous  # handlers restored
+
+
+def test_an_oserror_after_the_host_started_is_a_host_failure_not_a_refusal(
+    proj, capsys, monkeypatch
+):
+    def broke_mid_run(argv, **kwargs):
+        return bounded.Bounded(
+            returncode=None,
+            stdout="",
+            stderr="run_bounded: OSError: [Errno 5] Input/output error",
+            duration_s=1.0,
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(
+        review_cmd.bounded, "run_bounded", _only_for_host(broke_mid_run)
+    )
+    assert proj.review() == 3
+    err = capsys.readouterr().err
+    assert "review-failed" in err and "Input/output error" in err
+    assert proj.dispatches[-1]["outcome"] == "error"
+
+
+@pytest.mark.parametrize(
+    ("target", "exc"),
+    [
+        ("recover_pending", TimeoutError("state lock not acquired within 30s")),
+        ("resolve", ValueError("run.json schema 9 is newer than this conductor")),
+    ],
+)
+def test_review_exits_2_when_the_run_cannot_be_read(
+    proj, capsys, monkeypatch, target, exc
+):
+    def fail(*_args, **_kwargs):
+        raise exc
+
+    monkeypatch.setattr(resolve, target, fail)
+    assert proj.review() == 2
+    err = capsys.readouterr().err
+    assert type(exc).__name__ in err and str(exc) in err
+    assert "Traceback" not in err and len(err.strip().splitlines()) == 1
+    assert proj.exec_calls == []
+
+
+def test_review_exits_2_when_a_helper_cannot_be_executed(proj, capsys, monkeypatch):
+    real = review_cmd.bounded.run_bounded
+
+    def denied(argv, **kwargs):
+        if os.path.basename(argv[0]) == "gh":
+            raise PermissionError(13, "Permission denied", argv[0])
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(review_cmd.bounded, "run_bounded", denied)
+    assert proj.review() == 2
+    err = capsys.readouterr().err
+    assert "gh pr view 7 failed" in err and "Permission denied" in err
+    assert "Traceback" not in err and len(err.strip().splitlines()) == 1
+    assert proj.exec_calls == []
+    assert proj.dispatches == []
+
+
+def test_review_exits_2_when_no_temp_dir_can_be_made(proj, capsys, monkeypatch):
+    def full(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(review_cmd.tempfile, "mkdtemp", full)
+    assert proj.review() == 2
+    err = capsys.readouterr().err
+    assert "no temp dir for the diff" in err and "No space left" in err
+    assert "Traceback" not in err
     assert proj.exec_calls == []
     assert proj.dispatches == []

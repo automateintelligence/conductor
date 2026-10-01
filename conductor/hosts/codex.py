@@ -844,10 +844,13 @@ class CodexAdapter:
     def executable(self) -> str:
         return base.resolve_executable(self.id)
 
-    def reviewer_argv(self, prompt: str, *, project_root: str) -> list[str]:
+    def reviewer_argv(
+        self, prompt: str, *, project_root: str, context_dir: str
+    ) -> list[str]:
         """A read-only Codex reviewer: ``exec --json`` under a read-only sandbox (ground truth
         2026-09-30, section 5). ``--cd`` names the workspace explicitly and the prompt is the
-        trailing positional."""
+        trailing positional. ``context_dir`` needs no flag: the read-only sandbox reads files
+        outside ``--cd`` (verified on the same date), so it is accepted and unused."""
         base.reject_flaglike_prompt(prompt)
         return [
             self.executable(),

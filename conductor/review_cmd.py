@@ -7,9 +7,17 @@ review text; posting it with the configured marker stays with the worker, so the
 provenance rules (``CONDUCTOR_REVIEW_AUTHOR``) are untouched. The record is derived data: a
 failure to write it is reported on stderr and never changes the review or the exit status.
 
+The reviewer reads the change from a diff file this verb writes to a private temp directory
+(``<mkdtemp>/pr-<n>.diff``, always removed afterwards), so the Claude reviewer needs no shell at
+all. A TERM, HUP or INT while the reviewer runs (the worker's shell-tool limit, the fire
+watchdog) kills the reviewer's process group before this verb exits: a review never outlives
+the call that launched it.
+
 Exit status: 0 review printed; 2 refused before any host was launched (stale checkout, oversized
-brief, ``gh``/``git`` failure, reviewer host missing, unusable run); 3 the host failed; 4 it
-timed out; 64 usage.
+brief, ``gh``/``git`` missing, failing or not executable, reviewer host missing or not
+startable, unusable or unreadable run state); 3 the host ran and failed; 4 it timed out
+(``review-timeout``) or this verb was interrupted by a signal (``review-interrupted``); 64
+usage. Every refusal is one line on stderr, never a traceback.
 """
 
 from __future__ import annotations
@@ -18,7 +26,12 @@ import argparse
 import json
 import math
 import os
+import shutil
+import signal
 import sys
+import tempfile
+import threading
+import time
 
 from conductor import dispatches, merge_gate, remote
 from conductor.core import resolve
@@ -32,7 +45,9 @@ EXIT_TIMEOUT = 4
 EXIT_USAGE = 64
 
 _TOOL_TIMEOUT_S = 60.0
-_DEFAULT_REVIEW_TIMEOUT_S = 2400.0
+#: Under Claude's 600 s Bash-tool maximum (the worker runs this verb from its shell tool) and
+#: the fire watchdog's 1800 s idle window, with room for the kill grace and the git calls.
+_DEFAULT_REVIEW_TIMEOUT_S = 540.0
 #: Argv strings are capped at 128 KiB by the kernel; the whole prompt (template and brief, as
 #: UTF-8) is held to half of that.
 _PROMPT_MAX_BYTES = 64 * 1024
@@ -45,8 +60,7 @@ Read-only: do not modify any file. Do not run the project's full test suite.
 PR #{number}: {title}
 URL: {url}
 Head: {head_sha}   Base: {base_sha}
-Review the full change with: git diff {base_sha}..{head_sha}
-Read any file in this checkout you need for context.
+The full change is in {diff_path} (git diff {base_sha}..{head_sha}). Read it, and read any file in this checkout you need for context.
 
 Review it against the phase brief below: correctness, spec and ADR conformance, tests that
 prove the behaviour, security. Report findings by severity (P0 blocker, P1 must-fix, P2
@@ -62,12 +76,45 @@ class Refused(Exception):
     """A precondition failed; no host was launched and nothing was recorded."""
 
 
+class Interrupted(BaseException):
+    """A trapped signal arrived. A ``BaseException``, like ``KeyboardInterrupt``, so no
+    ``except Exception`` on the way out can swallow it before the reviewer group is killed."""
+
+    def __init__(self, signame: str) -> None:
+        super().__init__(signame)
+        self.signame = signame
+
+
+_TRAPPED = tuple(
+    getattr(signal, name)
+    for name in ("SIGTERM", "SIGHUP", "SIGINT")
+    if hasattr(signal, name)
+)
+
+
+def _raise_interrupted(signum: int, _frame: object) -> None:
+    raise Interrupted(signal.Signals(signum).name)
+
+
+def _trap_signals() -> dict:
+    """Turn TERM/HUP/INT into ``Interrupted``; the previous handlers, for ``_restore_signals``.
+    Handlers can only be set from the main thread; elsewhere nothing is trapped."""
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+    return {sig: signal.signal(sig, _raise_interrupted) for sig in _TRAPPED}
+
+
+def _restore_signals(previous: dict) -> None:
+    for sig, handler in previous.items():
+        signal.signal(sig, handler)
+
+
 def _tool(argv: list[str], *, cwd: str, what: str) -> str:
     """Run a short helper (``git``/``gh``) bounded; its stdout, or ``Refused`` naming ``what``."""
     try:
         done = bounded.run_bounded(argv, cwd=cwd, timeout=_TOOL_TIMEOUT_S)
-    except FileNotFoundError as exc:
-        raise Refused(f"{what} failed: {exc}") from exc
+    except OSError as exc:  # missing, not executable: it never started
+        raise Refused(f"{what} failed: {_reason(exc)}") from exc
     if done.timed_out or done.returncode != 0:
         detail = "timed out" if done.timed_out else done.stderr.strip()
         raise Refused(f"{what} failed: {detail}")
@@ -117,16 +164,46 @@ def _reason(exc: BaseException) -> str:
     return " ".join(f"{type(exc).__name__}: {exc}".split())[:200]
 
 
+def _record(
+    found: resolve.RunResolution,
+    *,
+    reviewer: str,
+    phase_id: str | None,
+    head_sha: str,
+    usage: hostbase.Usage,
+    wall_s: float,
+    outcome: str,
+    note: str | None,
+) -> None:
+    """Append the ``reviewer`` dispatch. Derived data: a failure is reported, never raised."""
+    try:
+        entry = dispatches.make(
+            host=reviewer,
+            role="reviewer",
+            phase_id=phase_id,
+            head_sha=head_sha,
+            usage=usage,
+            wall_s=wall_s,
+            outcome=outcome,
+            note=note,
+        )
+        dispatches.append(found.state_root, found.run_key, entry)
+    except Exception as exc:  # noqa: BLE001 — derived data must never lose the review
+        print(f"usage-unrecorded reason={_reason(exc)}", file=sys.stderr)
+
+
 def _review(args: argparse.Namespace) -> int:
     if not (math.isfinite(args.timeout) and args.timeout > 0):
         raise Refused(f"bad timeout {args.timeout!r}: must be a finite number > 0")
     top = _tool(["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd(), what="git")
     root = os.path.realpath(top)
-    resolve.recover_pending(resolve.state_root(root))
     try:
+        resolve.recover_pending(resolve.state_root(root))
         found = resolve.resolve(run_key=args.run, start=root)
     except (resolve.RunNotFound, resolve.RunAmbiguous) as exc:
         raise Refused(str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — lock timeout, schema error: refuse, never a traceback
+        raise Refused(f"run state unreadable: {_reason(exc)}") from exc
     try:
         reviewer = found.run.get("reviewer_host") or hostbase.opposite(
             runhost.resolve(root)
@@ -159,31 +236,86 @@ def _review(args: argparse.Namespace) -> int:
     )
 
     brief = _read_brief(args.brief)
-    prompt = PROMPT.format(
-        reviewer=reviewer,
-        number=pr.get("number"),
-        title=pr.get("title"),
-        url=pr.get("url"),
-        head_sha=head_sha,
-        base_sha=base_sha,
-        brief=brief,
-    )
-    if len(prompt.encode("utf-8")) > _PROMPT_MAX_BYTES:
-        raise Refused(
-            f"brief-too-large: prompt over {_PROMPT_MAX_BYTES} bytes ({args.brief})"
-        )
-    try:
-        argv = adapter.reviewer_argv(prompt, project_root=root)
-    except (hostbase.HostUnavailable, ValueError) as exc:
-        raise Refused(str(exc)) from exc
+    number = pr.get("number")
+    diff_name = f"pr-{number}.diff" if isinstance(number, int) else "pr.diff"
+    phase_id = merge_gate.closes_issue(str(pr.get("body") or ""))
 
-    # Claude's argv has no workspace flag, so the checkout is its cwd.
+    previous = _trap_signals()
+    context_dir: str | None = None
+    started: float | None = None
+    result: bounded.Bounded | None = None
+    interrupted: Interrupted | None = None
     try:
-        result = bounded.run_bounded(argv, cwd=root, timeout=args.timeout)
-    except (
-        OSError
-    ) as exc:  # executable vanished, E2BIG: no host ran, so nothing is recorded
-        raise Refused(f"reviewer host not launched: {_reason(exc)}") from exc
+        try:
+            context_dir = tempfile.mkdtemp(prefix="conductor-review-")
+        except OSError as exc:
+            raise Refused(f"no temp dir for the diff: {_reason(exc)}") from exc
+        diff_path = os.path.join(context_dir, diff_name)
+        prompt = PROMPT.format(
+            reviewer=reviewer,
+            number=number,
+            title=pr.get("title"),
+            url=pr.get("url"),
+            head_sha=head_sha,
+            base_sha=base_sha,
+            diff_path=diff_path,
+            brief=brief,
+        )
+        if len(prompt.encode("utf-8")) > _PROMPT_MAX_BYTES:
+            raise Refused(
+                f"brief-too-large: prompt over {_PROMPT_MAX_BYTES} bytes ({args.brief})"
+            )
+        try:
+            argv = adapter.reviewer_argv(
+                prompt, project_root=root, context_dir=context_dir
+            )
+        except (hostbase.HostUnavailable, ValueError) as exc:
+            raise Refused(str(exc)) from exc
+        _tool(
+            [
+                "git",
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                f"--output={diff_path}",
+                f"{base_sha}..{head_sha}",
+            ],
+            cwd=root,
+            what="git diff",
+        )
+        started = time.monotonic()
+        # Claude's argv has no workspace flag, so the checkout is its cwd.
+        # An OSError here is Popen's (vanished, E2BIG): no host ran, so nothing is recorded.
+        # One after the start comes back as a result with returncode None: exit 3, recorded.
+        try:
+            result = bounded.run_bounded(argv, cwd=root, timeout=args.timeout)
+        except OSError as exc:
+            raise Refused(f"reviewer host not launched: {_reason(exc)}") from exc
+    except Interrupted as stop:
+        # run_bounded has already killed the reviewer group. Handlers are restored and the
+        # temp dir removed (finally, below) before the attempt is recorded.
+        interrupted = stop
+    finally:
+        _restore_signals(previous)
+        if context_dir is not None:
+            shutil.rmtree(context_dir, ignore_errors=True)
+
+    if interrupted is not None:
+        if started is not None:
+            _record(
+                found,
+                reviewer=reviewer,
+                phase_id=phase_id,
+                head_sha=head_sha,
+                usage=adapter.usage_from_output(""),
+                wall_s=time.monotonic() - started,
+                outcome="error",
+                note="interrupted",
+            )
+        print(f"review-interrupted ({interrupted.signame})", file=sys.stderr)
+        return EXIT_TIMEOUT
+    assert result is not None  # the try either set it or raised
+
     usage = adapter.usage_from_output(result.stdout)
     if result.timed_out:
         outcome = "timeout"
@@ -191,20 +323,16 @@ def _review(args: argparse.Namespace) -> int:
         outcome = "error"
     else:
         outcome = "ok"
-    try:
-        entry = dispatches.make(
-            host=reviewer,
-            role="reviewer",
-            phase_id=merge_gate.closes_issue(str(pr.get("body") or "")),
-            head_sha=head_sha,
-            usage=usage,
-            wall_s=result.duration_s,
-            outcome=outcome,
-            note="no-usage-in-output" if usage.input_tokens is None else None,
-        )
-        dispatches.append(found.state_root, found.run_key, entry)
-    except Exception as exc:  # noqa: BLE001 — derived data must never lose the review
-        print(f"usage-unrecorded reason={_reason(exc)}", file=sys.stderr)
+    _record(
+        found,
+        reviewer=reviewer,
+        phase_id=phase_id,
+        head_sha=head_sha,
+        usage=usage,
+        wall_s=result.duration_s,
+        outcome=outcome,
+        note="no-usage-in-output" if usage.input_tokens is None else None,
+    )
 
     if outcome == "ok":
         print(usage.result_text)
@@ -243,7 +371,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout",
         type=float,
-        help="wall-clock bound in seconds (default: $CONDUCTOR_REVIEW_TIMEOUT_S or 2400)",
+        help="wall-clock bound in seconds (default: $CONDUCTOR_REVIEW_TIMEOUT_S or 540)",
     )
     return parser
 

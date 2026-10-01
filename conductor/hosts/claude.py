@@ -59,15 +59,22 @@ class ClaudeAdapter:
     def executable(self) -> str:
         return base.resolve_executable(self.id)
 
-    def reviewer_argv(self, prompt: str, *, project_root: str) -> list[str]:
+    def reviewer_argv(
+        self, prompt: str, *, project_root: str, context_dir: str
+    ) -> list[str]:
         """A read-only, time-boundable Claude reviewer (ground truth 2026-09-30, section 5).
 
-        ``dontAsk`` denies anything not allowlisted instead of prompting, so a headless review
-        cannot block on a permission dialog. The allowlist is a single ``--allowedTools=...``
-        token because ``--allowedTools`` is variadic and would otherwise swallow the arguments
-        after it. No Write/Edit, and never ``--dangerously-skip-permissions``. The reviewer's
-        working directory is the caller's ``cwd``; ``project_root`` is unused here because
-        Claude has no workspace flag, and is accepted to keep the member host-neutral.
+        ``--tools=Read,Grep,Glob`` names the WHOLE built-in tool set, so no shell and no
+        Write/Edit exist to be allowed. An ``--allowedTools`` list would not do: it adds to the
+        allow rules merged from user, project and local settings, so the PR's own
+        ``.claude/settings.json`` could widen it, and ``Bash(git diff:*)`` admits
+        ``--output=<file>``, which writes. ``--restricted`` and ``--strict-mcp-config`` keep the
+        checkout's settings, hooks and MCP servers out of the review; ``dontAsk`` denies
+        anything else instead of prompting, so a headless review cannot block on a dialog.
+        ``--add-dir`` grants read of ``context_dir``, where the caller put the diff. Never
+        ``--dangerously-skip-permissions``. The reviewer's working directory is the caller's
+        ``cwd``; ``project_root`` is unused because Claude has no workspace flag, and is accepted
+        to keep the member host-neutral.
         """
         base.reject_flaglike_prompt(prompt)
         return [
@@ -78,7 +85,11 @@ class ClaudeAdapter:
             "json",
             "--permission-mode",
             "dontAsk",
-            "--allowedTools=Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)",
+            "--restricted",
+            "--strict-mcp-config",
+            "--tools=Read,Grep,Glob",
+            "--add-dir",
+            context_dir,
         ]
 
     # ------------------------------------------------------------------ generated cron driver
