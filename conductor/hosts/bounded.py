@@ -35,6 +35,13 @@ def _signal_group(pgid: int, sig: signal.Signals) -> None:
         pass
 
 
+def _decode(data: bytes | str | None) -> str:
+    # TimeoutExpired carries the partial output as bytes even when the Popen is in text mode.
+    if data is None:
+        return ""
+    return data.decode("utf-8", errors="replace") if isinstance(data, bytes) else data
+
+
 def run_bounded(
     argv: list[str],
     *,
@@ -43,7 +50,8 @@ def run_bounded(
     grace: float = 5.0,
     env: Mapping[str, str] | None = None,
 ) -> Bounded:
-    """Run ``argv`` for at most ``timeout`` seconds, then TERM its group, ``grace`` seconds, KILL."""
+    """Run ``argv`` for at most ``timeout`` seconds, then TERM its group, wait ``grace`` seconds, KILL
+    it, and wait ``grace`` more for the pipes to close. Worst case is ``timeout + 2 * grace``."""
     started = time.monotonic()
     child = subprocess.Popen(
         argv,
@@ -53,6 +61,7 @@ def run_bounded(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         errors="replace",
         start_new_session=True,
     )
@@ -66,8 +75,22 @@ def run_bounded(
         try:
             out, err = child.communicate(timeout=grace)
         except subprocess.TimeoutExpired:
-            _signal_group(pgid, signal.SIGKILL)
-            out, err = child.communicate()
+            out, err = None, None
+        # KILL unconditionally: a leader that exited on TERM says nothing about a group member
+        # that ignored it, and an unsignalled member would be orphaned still running.
+        _signal_group(pgid, signal.SIGKILL)
+        if out is None:
+            try:
+                out, err = child.communicate(timeout=grace)
+            except subprocess.TimeoutExpired as late:
+                # A descendant that left the group (setsid) still holds the pipes open, so
+                # killpg cannot reach it and waiting for EOF would block until it exits. Give
+                # up on the pipes, reap the leader, and return what was captured so far.
+                out, err = _decode(late.stdout), _decode(late.stderr)
+                for stream in (child.stdout, child.stderr):
+                    if stream is not None:
+                        stream.close()
+                child.wait()
     return Bounded(
         returncode=None if timed_out else child.returncode,
         stdout=out or "",
